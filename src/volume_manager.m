@@ -342,6 +342,7 @@ mount_interactively:(NSURL *)image
         if (done) return;
         done = YES;
         [NSNotificationCenter.defaultCenter removeObserver:observer];
+        observer = nil;  /* the token's block retains finish, which retains observer */
         completion(volume, nil);
     };
 
