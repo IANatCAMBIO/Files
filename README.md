@@ -49,7 +49,8 @@ A minimalist macOS file manager written in Objective-C + AppKit.
 - Preferences window (Files ▸ Preferences…, ⌘,): every View-menu
   preference, the default file browser (Files or Finder), and Keep Files
   running for faster startup (see Keeping Files running)
-- About Files shows the version (from the `VERSION` file) and build date
+- About Files shows the version (from the `VERSION` file), build date,
+  and links to camb.io and the license
 - Address bar (accepts `~` and relative paths), back/forward/up, Open in
   Terminal, show/hide hidden files
 
@@ -198,3 +199,7 @@ folder.
 | Desktop        | ⌘⇧D               |
 | Downloads      | ⌘⇧L               |
 | Documents      | ⌘⇧O               |
+
+## License
+
+BSD 3-Clause License. Copyright © 2026 Ian Campbell. See `LICENSE`.

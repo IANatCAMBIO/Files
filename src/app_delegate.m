@@ -445,12 +445,54 @@ applicationShouldHandleReopen:(NSApplication *)app hasVisibleWindows:(BOOL)visib
     return NO;
 }
 
+/* Links in the About panel's credits: the author's site and the license
+ * (BSD 3-Clause, as for Tasks). */
+static NSString * const about_site_url    = @"https://camb.io";
+static NSString * const about_license_url = @"https://opensource.org/license/bsd-3-clause";
+
 /*
- * show_about: — Files ▸ About Files: the standard About panel, whose
- * version line reads "Version <VERSION> (built <date>)". The version comes
- * from Info.plist; the build date from its FilesBuildDate key (UTC, ISO
- * 8601), both written by the Makefile. Without a readable build date the
- * line is just the version.
+ * about_credits — the About panel's credits: "camb.io · BSD License",
+ * centred in the small system font, each name a link.
+ *
+ * Output: attributed string for NSAboutPanelOptionCredits.
+ */
+static NSAttributedString *
+about_credits(void)
+{
+    NSMutableParagraphStyle *centred = [[NSMutableParagraphStyle alloc] init];
+    centred.alignment = NSTextAlignmentCenter;
+    NSDictionary *plain = @{
+        NSFontAttributeName:            [NSFont systemFontOfSize:NSFont.smallSystemFontSize],
+        NSForegroundColorAttributeName: NSColor.labelColor,
+        NSParagraphStyleAttributeName:  centred,
+    };
+    NSArray<NSArray<NSString *> *> *links = @[
+        @[@"camb.io",     about_site_url],
+        @[@"BSD License", about_license_url],
+    ];
+
+    NSMutableAttributedString *credits = [[NSMutableAttributedString alloc] init];
+    for (NSArray<NSString *> *link in links) {
+        if (credits.length > 0) {
+            [credits appendAttributedString:
+                [[NSAttributedString alloc] initWithString:@"  ·  " attributes:plain]];
+        }
+        NSMutableDictionary *attrs = [plain mutableCopy];
+        attrs[NSLinkAttributeName] = [NSURL URLWithString:link[1]];
+        [credits appendAttributedString:
+            [[NSAttributedString alloc] initWithString:link[0] attributes:attrs]];
+    }
+    return credits;
+}
+
+/*
+ * show_about: — Files ▸ About Files: the standard About panel. Its version
+ * line reads "Version <VERSION> (built <date>)": the version comes from
+ * Info.plist and the build date from its FilesBuildDate key (UTC, ISO
+ * 8601), both written by the Makefile; without a readable build date the
+ * line is just the version. The copyright line is Info.plist's
+ * NSHumanReadableCopyright, and the credits link to camb.io and the
+ * license (about_credits).
  *
  * Inputs:
  *   sender — menu item (unused)
@@ -458,13 +500,14 @@ applicationShouldHandleReopen:(NSApplication *)app hasVisibleWindows:(BOOL)visib
 - (void)
 show_about:(id)sender
 {
+    NSMutableDictionary *options = [NSMutableDictionary dictionary];
+    options[NSAboutPanelOptionCredits] = about_credits();
+
     NSString *stamp = NSBundle.mainBundle.infoDictionary[@"FilesBuildDate"];
     NSDate *built   = stamp ? [[[NSISO8601DateFormatter alloc] init] dateFromString:stamp] : nil;
-    NSDictionary *options = @{};
     if (built) {
-        options = @{ NSAboutPanelOptionApplicationVersion:
-                     [@"built " stringByAppendingString:
-                         files_format_date(built, NSDateFormatterMediumStyle)] };
+        options[NSAboutPanelOptionApplicationVersion] =
+            [@"built " stringByAppendingString:files_format_date(built, NSDateFormatterMediumStyle)];
     }
     [NSApp orderFrontStandardAboutPanelWithOptions:options];
 }
