@@ -203,9 +203,9 @@ build_context_menu
 
     add(@"Open",          @selector(open_selected:));
     [menu addItem:NSMenuItem.separatorItem];
-    add(@"Cut",           @selector(cut_action:));
-    add(@"Copy",          @selector(copy_action:));
-    add(@"Paste",         @selector(paste_action:));
+    add(@"Cut",           @selector(cut:));
+    add(@"Copy",          @selector(copy:));
+    add(@"Paste",         @selector(paste:));
     [menu addItem:NSMenuItem.separatorItem];
     add(@"Move to Trash", @selector(move_to_trash_action:));
     add(@"Rename",        @selector(begin_rename:));
@@ -767,7 +767,12 @@ cell_text_for_column:(NSString *)col_id
 
 /*
  * apply_auto_fit — resizes every column to the widest content across all
- * visible rows, respecting each column's minWidth.
+ * rows, respecting each column's minWidth, then gives the Name column
+ * whatever width is left over (or takes back the overflow, down to its
+ * minWidth) so the columns exactly fill the visible width. A horizontal
+ * scrollbar therefore only appears when the view is narrower than the
+ * minimum the columns need — the same result AppKit's first-column
+ * autoresizing reaches after a manual window resize.
  */
 - (void)
 apply_auto_fit
@@ -779,6 +784,7 @@ apply_auto_fit
     static const CGFloat kCellExtra = 2 + 2;           /* l-pad + r-pad */
     static const CGFloat kColPad    = 10;              /* header side padding + margin */
 
+    CGFloat total = 0;
     for (NSTableColumn *col in self.table.tableColumns) {
         NSString *col_id = col.identifier;
 
@@ -799,7 +805,24 @@ apply_auto_fit
         }
 
         col.width = MAX(col.minWidth, max_w);
+        total    += col.width + self.table.intercellSpacing.width;
     }
+
+    /* Fit to the visible width. With legacy (always-visible) scrollers the
+     * vertical scroller takes width whenever the rows overflow, and it may
+     * not be tiled in yet on the first load, so reserve it up front. */
+    CGFloat rows_h = self.filtered_items.count
+                   * (self.table.rowHeight + self.table.intercellSpacing.height)
+                   + NSHeight(self.table.headerView.frame);
+    Class v_scroller = rows_h > NSHeight(self.scroll.frame) ? NSScroller.class : Nil;
+    CGFloat avail = [NSScrollView contentSizeForFrameSize:self.scroll.frame.size
+                                  horizontalScrollerClass:Nil
+                                    verticalScrollerClass:v_scroller
+                                               borderType:self.scroll.borderType
+                                              controlSize:NSControlSizeRegular
+                                            scrollerStyle:self.scroll.scrollerStyle].width;
+    NSTableColumn *name_col = [self.table tableColumnWithIdentifier:kColName];
+    name_col.width = MAX(name_col.minWidth, name_col.width + (avail - total));
 }
 
 /* ── Status bar ──────────────────────────────────────────────────────── */
@@ -1011,6 +1034,14 @@ acceptsFirstResponder
     return YES;
 }
 
+/*
+ * keyDown: — Return/Enter begins an inline rename; Escape cancels one.
+ * Move to Trash is deliberately not bound to a bare Delete key: it is only
+ * reachable via ⌘⌫ (Edit menu key equivalent), matching Finder.
+ *
+ * Inputs:
+ *   event — key-down event; unhandled keys are passed to super
+ */
 - (void)
 keyDown:(NSEvent *)event
 {
@@ -1025,12 +1056,6 @@ keyDown:(NSEvent *)event
     /* Escape: cancel rename */
     if (event.keyCode == 53) {
         [self cancel_rename];
-        return;
-    }
-
-    /* Backspace/Delete without modifiers: move to trash */
-    if ([chars isEqualToString:@"\x7f"] || [chars isEqualToString:@"\x08"]) {
-        [self move_to_trash_action:nil];
         return;
     }
 
@@ -1060,10 +1085,10 @@ open_selected:(id)sender
 }
 
 /*
- * copy_action: — copies selected URLs to the pasteboard.
+ * copy: — copies selected URLs to the pasteboard.
  */
 - (IBAction)
-copy_action:(id)sender
+copy:(id)sender
 {
     NSArray<NSURL *> *sel = [self selected_urls];
     if (sel.count > 0) {
@@ -1072,10 +1097,10 @@ copy_action:(id)sender
 }
 
 /*
- * cut_action: — copies selected URLs as a cut operation.
+ * cut: — copies selected URLs as a cut operation.
  */
 - (IBAction)
-cut_action:(id)sender
+cut:(id)sender
 {
     NSArray<NSURL *> *sel = [self selected_urls];
     if (sel.count > 0) {
@@ -1084,10 +1109,10 @@ cut_action:(id)sender
 }
 
 /*
- * paste_action: — pastes from pasteboard into the current directory.
+ * paste: — pastes from pasteboard into the current directory.
  */
 - (IBAction)
-paste_action:(id)sender
+paste:(id)sender
 {
     if (!self.current_dir) return;
     if (![FilesFileOps pasteboard_has_files]) return;
@@ -1166,10 +1191,10 @@ get_info_action:(id)sender
 }
 
 /*
- * select_all_action: — selects all rows in the table.
+ * selectAll: — selects all rows in the table.
  */
 - (IBAction)
-select_all_action:(id)sender
+selectAll:(id)sender
 {
     [self.table selectAll:sender];
 }
@@ -1433,7 +1458,8 @@ proposedDropOperation:(NSTableViewDropOperation)op
 
 /*
  * tableView:acceptDrop:row:dropOperation: — copies dragged files to the
- * resolved destination via FilesFileOps (handles collisions and shows progress).
+ * resolved destination via FilesFileOps transfer_urls (progress panel,
+ * conflict prompts, cancel).
  *
  * Inputs:
  *   tv   — table view
@@ -1458,24 +1484,14 @@ dropOperation:(NSTableViewDropOperation)op
     if (!dest) return NO;
 
     __weak FilesBrowserView *ws = self;
-    [FilesFileOps run_copy_srcs:srcs
-                             to:dest
-                         is_cut:NO
-                  hash_validate:NO
-                    cancel_flag:nil
-                    known_total:0
-                       progress:nil
-                     completion:^(NSError *err, NSDictionary *_) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (err && err.code != NSUserCancelledError) {
-                NSAlert *alert        = [[NSAlert alloc] init];
-                alert.messageText     = @"Copy failed";
-                alert.informativeText = err.localizedDescription ?: @"Unknown error";
-                [alert runModal];
-            }
-            FilesBrowserView *s = ws;
-            if (s) [s reload_directory];
-        });
+    [FilesFileOps transfer_urls:srcs to:dest is_cut:NO completion:^(NSError *err) {
+        if (err && err.code != NSUserCancelledError) {
+            NSAlert *alert        = [[NSAlert alloc] init];
+            alert.messageText     = @"Copy failed";
+            alert.informativeText = err.localizedDescription ?: @"Unknown error";
+            [alert runModal];
+        }
+        [ws reload_directory];
     }];
     return YES;
 }

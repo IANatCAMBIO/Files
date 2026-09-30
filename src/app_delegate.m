@@ -210,10 +210,14 @@ build_menu_bar
     /* ── Edit menu ── */
     NSMenuItem *edit_mi = [[NSMenuItem alloc] init];
     NSMenu *edit_menu   = [[NSMenu alloc] initWithTitle:@"Edit"];
-    [edit_menu addItem:make_item(@"Cut",        @selector(cut_action:),    @"x", 0)];
-    [edit_menu addItem:make_item(@"Copy",       @selector(copy_action:),   @"c", 0)];
-    [edit_menu addItem:make_item(@"Paste",      @selector(paste_action:),  @"v", 0)];
-    [edit_menu addItem:make_item(@"Select All", @selector(select_all_action:), @"a", 0)];
+    [edit_menu addItem:make_item(@"Undo",       @selector(undo:),   @"z", 0)];
+    [edit_menu addItem:make_item(@"Redo",       @selector(redo:),   @"z",
+                                 NSEventModifierFlagShift)];
+    [edit_menu addItem:NSMenuItem.separatorItem];
+    [edit_menu addItem:make_item(@"Cut",        @selector(cut:),    @"x", 0)];
+    [edit_menu addItem:make_item(@"Copy",       @selector(copy:),   @"c", 0)];
+    [edit_menu addItem:make_item(@"Paste",      @selector(paste:),  @"v", 0)];
+    [edit_menu addItem:make_item(@"Select All", @selector(selectAll:), @"a", 0)];
     [edit_menu addItem:NSMenuItem.separatorItem];
     {
         NSMenuItem *trash = make_item(@"Move to Trash",

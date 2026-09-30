@@ -1,17 +1,14 @@
 #import "file_ops.h"
 #import "copy_progress.h"
 #import "file_hash.h"
-#include <CommonCrypto/CommonDigest.h>
-#include <fcntl.h>
-#include <unistd.h>
+#include <copyfile.h>
+#include <errno.h>
+#include <stdio.h>
+#include <string.h>
 #include <sys/stat.h>
-#include <sys/clonefile.h>
 
 /* Custom pasteboard type used to record whether the copy was a cut. */
 static NSString * const kCutFlagType = @"com.salt.files.cut-flag";
-
-/* Read/write chunk size for copy_file_chunked. */
-#define COPY_CHUNK (1024 * 1024)  /* 1 MB */
 
 /* ── C helpers ──────────────────────────────────────────────────────────── */
 
@@ -46,248 +43,346 @@ unique_dest_url(NSString *name, NSURL *dir)
 }
 
 /*
- * chunk_ctx_t — context passed to copy_file_chunked's chunk callback.
- */
-typedef struct {
-    NSString             *file_name;
-    int64_t               file_total;
-    int64_t              *total_done;
-    int64_t               total_total;
-    FileCopyProgressBlock  progress;
-    volatile int32_t      *cancel;
-} chunk_ctx_t;
-
-/*
- * chunk_callback — invoked by copy_file_chunked after each 1 MB chunk.
+ * item_exists — lstat-based existence test that does not follow symlinks,
+ * so a dangling symlink at the destination still counts as a conflict.
  *
  * Inputs:
- *   file_done — bytes transferred for the current file so far
- *   ctx       — pointer to chunk_ctx_t
+ *   url — file URL to test
+ *
+ * Output: YES if anything (file, directory, symlink) exists at url.
  */
-static void
-chunk_callback(int64_t file_done, void *ctx)
+static BOOL
+item_exists(NSURL *url)
 {
-    chunk_ctx_t *c = (chunk_ctx_t *)ctx;
-    *c->total_done += (int64_t)COPY_CHUNK;
-    if (c->progress) {
-        double bps = 0; /* instantaneous; copy_progress computes sliding window */
-        c->progress(c->file_name, file_done, c->file_total,
-                    *c->total_done, c->total_total, bps);
-    }
+    struct stat st;
+    return lstat(url.fileSystemRepresentation, &st) == 0;
 }
 
 /*
- * copy_file_chunked — copy src_fd to dst_fd in 1 MB chunks, computing
- * SHA-256 of source bytes as they are read.
- *
- * F_NOCACHE is applied to both fds to avoid polluting the page cache for
- * large files.
+ * posix_error — wraps an errno value in an NSError carrying the offending path.
  *
  * Inputs:
- *   src_fd     — open readable file descriptor
- *   dst_fd     — open writable file descriptor
- *   src_digest — 32-byte output buffer; filled with SHA-256 of bytes read
- *   chunk_cb   — called after each chunk with bytes-transferred-so-far; may be NULL
- *   cb_ctx     — passed to chunk_cb unchanged
- *   cancel     — if non-NULL and *cancel != 0, aborts early (returns -2)
+ *   code — errno value
+ *   url  — file URL the failure relates to
  *
- * Output: bytes copied on success; -1 on I/O error; -2 if cancelled.
- */
-static int64_t
-copy_file_chunked(int src_fd, int dst_fd,
-                   uint8_t src_digest[32],
-                   void (*chunk_cb)(int64_t, void *), void *cb_ctx,
-                   volatile int32_t *cancel)
-{
-    /* F_NOCACHE is set by the caller on src_fd; do NOT set it on dst_fd —
-     * forcing uncached destination writes stalls indefinitely on some volumes. */
-
-    CC_SHA256_CTX sha;
-    CC_SHA256_Init(&sha);
-
-    uint8_t *buf = malloc(COPY_CHUNK);
-    if (!buf) return -1;
-
-    int64_t total = 0;
-    ssize_t n;
-    int64_t ret = 0;
-
-    while ((n = read(src_fd, buf, COPY_CHUNK)) > 0) {
-        if (cancel && *cancel) {
-            ret = -2; break;
-        }
-        CC_SHA256_Update(&sha, buf, (CC_LONG)n);
-        if (write(dst_fd, buf, (size_t)n) != n) { ret = -1; break; }
-        total += n;
-        if (chunk_cb) chunk_cb(total, cb_ctx);
-    }
-    if (n < 0 && ret == 0) ret = -1;
-
-    free(buf);
-
-    if (ret == 0 && src_digest) {
-        CC_SHA256_Final(src_digest, &sha);
-    }
-    return ret == 0 ? total : ret;
-}
-
-/*
- * copy_single_file — copy src_url to dst_url, optionally validate, delete src.
- *
- * Tries clonefile(2) first for zero-I/O CoW on the same APFS volume. Falls
- * back to a manual chunked copy (with progress callbacks) for cross-volume
- * transfers or when hash validation is required.
- *
- * Inputs:
- *   src_url       — source file URL
- *   dst_url       — destination file URL (already uniqued)
- *   is_cut        — YES = unlink src on success
- *   hash_validate — YES = SHA-256 compare src and dst (forces manual path)
- *   cancel        — cancellation flag pointer; may be NULL
- *   total_done    — running byte total shared across the operation (updated)
- *   total_total   — total bytes for the whole operation
- *   progress      — progress block; may be nil
- *   hash_results  — NSMutableDictionary<NSURL *, NSNumber *>; updated if hash_validate
- *
- * Output: nil on success, NSError on failure.
+ * Output: NSError in NSPOSIXErrorDomain.
  */
 static NSError *
-copy_single_file(NSURL *src_url, NSURL *dst_url,
-                  BOOL is_cut, BOOL hash_validate,
-                  volatile int32_t *cancel,
-                  int64_t *total_done, int64_t total_total,
-                  FileCopyProgressBlock progress,
-                  NSMutableDictionary *hash_results)
+posix_error(int code, NSURL *url)
 {
-    /* Create destination parent directory if needed */
-    NSString *dst_dir = dst_url.path.stringByDeletingLastPathComponent;
-    [[NSFileManager defaultManager]
-        createDirectoryAtPath:dst_dir
-  withIntermediateDirectories:YES attributes:nil error:nil];
+    return [NSError errorWithDomain:NSPOSIXErrorDomain code:code
+                           userInfo:@{NSFilePathErrorKey: url.path ?: @""}];
+}
 
-    /* Fast path: APFS CoW clone — zero I/O, instant regardless of file size.
-     * Skipped when hash_validate is YES because we need to read both files.
-     * File size is obtained from the destination after cloning (stat on a
-     * freshly created local file never blocks). */
-    if (!hash_validate) {
-        if (clonefile(src_url.path.UTF8String, dst_url.path.UTF8String, 0) == 0) {
-            struct stat dst_st;
-            int64_t sz = (stat(dst_url.path.UTF8String, &dst_st) == 0)
-                         ? dst_st.st_size : 0;
-            *total_done += sz;
-            if (progress) {
-                progress(src_url.lastPathComponent, sz, sz, *total_done, total_total, 0);
-            }
-            if (is_cut) {
-                [[NSFileManager defaultManager] removeItemAtURL:src_url error:nil];
-            }
-            return nil;
-        }
+/*
+ * described_error — builds an NSError with a user-facing description.
+ *
+ * Inputs:
+ *   text — localized description shown in alerts and the transfer log
+ *
+ * Output: NSError in NSCocoaErrorDomain (NSFileWriteUnknownError).
+ */
+static NSError *
+described_error(NSString *text)
+{
+    return [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileWriteUnknownError
+                           userInfo:@{NSLocalizedDescriptionKey: text}];
+}
+
+/*
+ * sibling_temp_url — returns a hidden, unique URL next to dst. Items are
+ * staged here and only renamed onto dst once they are complete, so an
+ * interrupted or failed transfer never touches what is already at dst.
+ *
+ * Inputs:
+ *   dst — final destination URL
+ *   tag — short label embedded in the name ("tmp" or "old")
+ *
+ * Output: URL in the same directory as dst (same volume, so rename(2) works).
+ */
+static NSURL *
+sibling_temp_url(NSURL *dst, NSString *tag)
+{
+    NSString *name = [NSString stringWithFormat:@".%@.files-%@-%@",
+                      dst.lastPathComponent, tag, NSUUID.UUID.UUIDString];
+    return [dst.URLByDeletingLastPathComponent URLByAppendingPathComponent:name];
+}
+
+/*
+ * copy_ctx_t — state shared with copy_status_cb for one top-level item.
+ */
+typedef struct {
+    FileCopyProgressBlock  progress;    /* may be nil */
+    volatile int32_t      *cancel;      /* may be NULL */
+    int64_t                total_done;  /* bytes across the whole operation */
+    NSString              *file_name;   /* file currently being copied */
+    int64_t                file_total;  /* its size */
+    int64_t                file_done;   /* bytes of it copied so far */
+    int                    err;         /* errno from the first COPYFILE_ERR */
+} copy_ctx_t;
+
+/*
+ * report_progress — advances the current file to `copied` bytes and emits a
+ * progress callback.
+ *
+ * Inputs:
+ *   c      — copy context
+ *   copied — bytes of the current file copied so far (monotonic)
+ */
+static void
+report_progress(copy_ctx_t *c, int64_t copied)
+{
+    if (copied > c->file_done) {
+        c->total_done += copied - c->file_done;
+        c->file_done   = copied;
+    }
+    if (c->progress) {
+        c->progress(c->file_name, c->file_done, c->file_total,
+                    c->total_done, 0, 0);
+    }
+}
+
+/*
+ * copy_status_cb — copyfile(3) status callback. Reports per-file and
+ * per-chunk progress, honours the cancel flag, and aborts on the first error
+ * (copyfile's default is to skip unreadable items and still return success).
+ *
+ * Inputs:
+ *   what, stage — copyfile event (COPYFILE_RECURSE_FILE / COPYFILE_COPY_DATA,
+ *                 COPYFILE_START / COPYFILE_PROGRESS / COPYFILE_FINISH / COPYFILE_ERR)
+ *   state       — copyfile state (queried for COPYFILE_STATE_COPIED)
+ *   src, dst    — paths of the item being processed
+ *   ctx         — copy_ctx_t pointer
+ *
+ * Output: COPYFILE_CONTINUE, or COPYFILE_QUIT on cancel or error.
+ */
+static int
+copy_status_cb(int what, int stage, copyfile_state_t state,
+               const char *src, const char *dst, void *ctx)
+{
+    (void)dst;
+    copy_ctx_t *c = (copy_ctx_t *)ctx;
+
+    if (c->cancel && *c->cancel) return COPYFILE_QUIT;
+    if (stage == COPYFILE_ERR) {
+        if (c->err == 0) c->err = errno ? errno : EIO;
+        return COPYFILE_QUIT;
     }
 
-    /* Manual chunked copy — used for cross-volume transfers or hash validation.
-     * File size is read via fstat() on the already-open source fd to avoid
-     * blocking on getResourceValue: from the copy thread. */
-    int src_fd = open(src_url.path.UTF8String, O_RDONLY);
-    if (src_fd < 0) {
-        return [NSError errorWithDomain:NSPOSIXErrorDomain code:errno
-                               userInfo:@{NSFilePathErrorKey: src_url.path}];
+    if (what == COPYFILE_RECURSE_FILE && stage == COPYFILE_START) {
+        struct stat st;
+        c->file_name  = @(src).lastPathComponent;
+        c->file_total = (lstat(src, &st) == 0) ? st.st_size : 0;
+        c->file_done  = 0;
+        report_progress(c, 0);
+    } else if (what == COPYFILE_COPY_DATA && stage == COPYFILE_PROGRESS) {
+        off_t copied = 0;
+        copyfile_state_get(state, COPYFILE_STATE_COPIED, &copied);
+        report_progress(c, copied);
+    } else if (what == COPYFILE_RECURSE_FILE && stage == COPYFILE_FINISH) {
+        /* Clones produce no COPY_DATA events; account for the whole file. */
+        report_progress(c, c->file_total);
     }
-    fcntl(src_fd, F_NOCACHE, 1);  /* avoid polluting page cache on reads */
+    return COPYFILE_CONTINUE;
+}
 
-    struct stat src_st;
-    int64_t file_total = (fstat(src_fd, &src_st) == 0) ? src_st.st_size : 0;
+/*
+ * copy_tree — copies src (file, directory tree, or symlink) to dst, which
+ * must not exist. Uses copyfile(3) so APFS clones are used where possible and
+ * xattrs, ACLs, Finder info, flags and timestamps are preserved; symlinks are
+ * copied as links. A partial dst is removed on failure.
+ *
+ * Inputs:
+ *   src — source URL
+ *   dst — destination URL (must not exist)
+ *   c   — copy context (progress, cancel flag)
+ *
+ * Output: nil on success; NSUserCancelledError on cancel; otherwise an error.
+ */
+static NSError *
+copy_tree(NSURL *src, NSURL *dst, copy_ctx_t *c)
+{
+    copyfile_state_t state = copyfile_state_alloc();
+    copyfile_state_set(state, COPYFILE_STATE_STATUS_CB, (const void *)&copy_status_cb);
+    copyfile_state_set(state, COPYFILE_STATE_STATUS_CTX, c);
 
-    int dst_fd = open(dst_url.path.UTF8String, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-    if (dst_fd < 0) {
-        close(src_fd);
-        return [NSError errorWithDomain:NSPOSIXErrorDomain code:errno
-                               userInfo:@{NSFilePathErrorKey: dst_url.path}];
-    }
-    /* No F_NOCACHE on dst — buffered writes are faster and don't stall */
+    c->err = 0;
+    int rc = copyfile(src.fileSystemRepresentation, dst.fileSystemRepresentation,
+                      state,
+                      COPYFILE_ALL | COPYFILE_RECURSIVE | COPYFILE_CLONE
+                      | COPYFILE_EXCL | COPYFILE_NOFOLLOW_SRC);
+    int saved_errno = errno;
+    copyfile_state_free(state);
 
-    uint8_t src_digest[32] = {0};
-    chunk_ctx_t ctx = {
-        .file_name   = src_url.lastPathComponent,
-        .file_total  = file_total,
-        .total_done  = total_done,
-        .total_total = total_total,
-        .progress    = progress,
-        .cancel      = cancel,
-    };
-    int64_t copied = copy_file_chunked(src_fd, dst_fd, src_digest,
-                                        chunk_callback, &ctx, cancel);
-    close(src_fd);
-    close(dst_fd);
+    if (rc == 0) return nil;
 
-    if (copied == -2) {
-        unlink(dst_url.path.UTF8String);
+    [NSFileManager.defaultManager removeItemAtURL:dst error:nil];
+    if (c->cancel && *c->cancel) {
         return [NSError errorWithDomain:NSCocoaErrorDomain
                                    code:NSUserCancelledError userInfo:nil];
     }
-    if (copied < 0) {
-        unlink(dst_url.path.UTF8String);
-        return [NSError errorWithDomain:NSPOSIXErrorDomain code:EIO
-                               userInfo:@{NSFilePathErrorKey: dst_url.path}];
+    return posix_error(c->err ? c->err : saved_errno, src);
+}
+
+/*
+ * same_contents — SHA-256 compares two regular files.
+ *
+ * Inputs:
+ *   a, b — file URLs
+ *
+ * Output: YES if both hash successfully and the digests match.
+ */
+static BOOL
+same_contents(NSURL *a, NSURL *b)
+{
+    uint8_t da[32], db[32];
+    return file_sha256(a.fileSystemRepresentation, da) == 0
+        && file_sha256(b.fileSystemRepresentation, db) == 0
+        && memcmp(da, db, sizeof da) == 0;
+}
+
+/*
+ * verify_copy — SHA-256 compares every regular file under src with its
+ * counterpart under copy, recording one result per file keyed by the file's
+ * final URL under dst.
+ *
+ * Inputs:
+ *   src          — original item (file or directory)
+ *   copy         — staged copy of src (same relative layout)
+ *   dst          — URL the copy will be committed to (used for result keys)
+ *   hash_results — receives dst-relative URL -> @YES / @NO
+ *
+ * Output: YES if every file matched.
+ */
+static BOOL
+verify_copy(NSURL *src, NSURL *copy, NSURL *dst, NSMutableDictionary *hash_results)
+{
+    struct stat st;
+    if (lstat(src.fileSystemRepresentation, &st) != 0) return NO;
+    if (S_ISREG(st.st_mode)) {
+        BOOL ok = same_contents(src, copy);
+        hash_results[dst] = @(ok);
+        return ok;
+    }
+    if (!S_ISDIR(st.st_mode)) return YES;  /* symlinks etc. carry no data */
+
+    BOOL all_ok = YES;
+    NSDirectoryEnumerator *e = [NSFileManager.defaultManager enumeratorAtPath:src.path];
+    for (NSString *rel in e) {
+        if (![e.fileAttributes[NSFileType] isEqualToString:NSFileTypeRegular]) continue;
+        BOOL ok = same_contents([src URLByAppendingPathComponent:rel],
+                                [copy URLByAppendingPathComponent:rel]);
+        hash_results[[dst URLByAppendingPathComponent:rel]] = @(ok);
+        if (!ok) all_ok = NO;
+    }
+    return all_ok;
+}
+
+/*
+ * commit_item — renames a fully staged item onto dst.
+ *
+ * Without replace, dst must not exist (RENAME_EXCL). With replace, the
+ * existing dst is first renamed aside, the staged item renamed into place,
+ * and only then is the old item deleted; if the second rename fails the old
+ * item is put back. The existing dst is therefore never lost on failure.
+ *
+ * Inputs:
+ *   staged  — complete item in the destination directory
+ *   dst     — final URL
+ *   replace — YES to replace an existing dst
+ *
+ * Output: nil on success, NSError on failure (staged is left in place).
+ */
+static NSError *
+commit_item(NSURL *staged, NSURL *dst, BOOL replace)
+{
+    const char *staged_p = staged.fileSystemRepresentation;
+    const char *dst_p    = dst.fileSystemRepresentation;
+
+    if (!replace || !item_exists(dst)) {
+        return renamex_np(staged_p, dst_p, RENAME_EXCL) == 0
+            ? nil : posix_error(errno, dst);
     }
 
-    /* Copy POSIX permissions from source */
-    NSDictionary *src_attrs = [[NSFileManager defaultManager]
-                                   attributesOfItemAtPath:src_url.path error:nil];
-    if (src_attrs[NSFilePosixPermissions]) {
-        [[NSFileManager defaultManager]
-            setAttributes:@{NSFilePosixPermissions: src_attrs[NSFilePosixPermissions]}
-             ofItemAtPath:dst_url.path
-                    error:nil];
+    NSURL *old = sibling_temp_url(dst, @"old");
+    if (rename(dst_p, old.fileSystemRepresentation) != 0) {
+        return posix_error(errno, dst);
     }
-
-    /* SHA-256 validate */
-    if (hash_validate) {
-        uint8_t dst_digest[32];
-        BOOL ok = (file_sha256(dst_url.path.UTF8String, dst_digest) == 0) &&
-                  (memcmp(src_digest, dst_digest, 32) == 0);
-        hash_results[dst_url] = @(ok);
+    if (rename(staged_p, dst_p) != 0) {
+        int saved_errno = errno;
+        rename(old.fileSystemRepresentation, dst_p);
+        return posix_error(saved_errno, dst);
     }
-
-    /* Move-semantics: delete source after successful copy */
-    if (is_cut) {
-        [[NSFileManager defaultManager] removeItemAtURL:src_url error:nil];
-    }
-
+    /* The new item is in place; a failed cleanup only leaves a hidden
+     * ".<name>.files-old-*" item behind, never data loss. */
+    [NSFileManager.defaultManager removeItemAtURL:old error:nil];
     return nil;
 }
 
 /*
- * collect_pairs — recursively collect (src, dst) file URL pairs.
- * Creates destination directory structure as it descends.
+ * transfer_item — copies or moves one top-level item to dst.
+ *
+ * The item is staged under a hidden sibling name of dst and committed with
+ * commit_item only once it is complete (and, if requested, hash-verified),
+ * so cancel, I/O errors and validation failures leave dst untouched.
+ * Moves try rename(2) first; across volumes they copy, verify, commit, and
+ * only then delete the source.
  *
  * Inputs:
- *   src     — source item URL (file or directory)
- *   dst_dir — destination parent directory URL
- *   pairs   — mutable array of @{@"src": NSURL, @"dst": NSURL} dictionaries
+ *   src           — source item URL
+ *   dst           — final destination URL
+ *   replace       — YES to replace an existing dst (user chose Replace)
+ *   is_cut        — YES = move (source removed on success)
+ *   hash_validate — YES = SHA-256 verify copied files before committing
+ *   c             — copy context (progress, cancel flag)
+ *   hash_results  — receives per-file verification results; may be nil
+ *
+ * Output: nil on success, NSError otherwise.
  */
-static void
-collect_pairs(NSURL *src, NSURL *dst_dir, NSMutableArray *pairs)
+static NSError *
+transfer_item(NSURL *src, NSURL *dst, BOOL replace, BOOL is_cut,
+              BOOL hash_validate, copy_ctx_t *c, NSMutableDictionary *hash_results)
 {
-    NSNumber *is_dir = nil;
-    [src getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
+    NSURL *staged = sibling_temp_url(dst, @"tmp");
 
-    NSURL *dst = [dst_dir URLByAppendingPathComponent:src.lastPathComponent];
-
-    if (is_dir.boolValue) {
-        [NSFileManager.defaultManager
-            createDirectoryAtURL:dst
-     withIntermediateDirectories:YES attributes:nil error:nil];
-        NSArray *children = [NSFileManager.defaultManager
-            contentsOfDirectoryAtURL:src
-          includingPropertiesForKeys:@[NSURLIsDirectoryKey]
-                             options:0 error:nil];
-        for (NSURL *child in children) {
-            collect_pairs(child, dst, pairs);
+    if (is_cut) {
+        if (renamex_np(src.fileSystemRepresentation, staged.fileSystemRepresentation,
+                       RENAME_EXCL) == 0) {
+            c->file_name  = src.lastPathComponent;
+            c->file_total = 0;
+            c->file_done  = 0;
+            report_progress(c, 0);
+            NSError *err = commit_item(staged, dst, replace);
+            if (err) {
+                rename(staged.fileSystemRepresentation, src.fileSystemRepresentation);
+            }
+            return err;
         }
-    } else {
-        [pairs addObject:@{@"src": src, @"dst": dst}];
+        if (errno != EXDEV) return posix_error(errno, src);
     }
+
+    NSError *err = copy_tree(src, staged, c);
+    if (err) return err;
+
+    if (hash_validate && !verify_copy(src, staged, dst, hash_results)) {
+        [NSFileManager.defaultManager removeItemAtURL:staged error:nil];
+        return described_error([NSString stringWithFormat:
+            @"SHA-256 validation failed for \"%@\". Nothing was replaced and "
+             "the source was kept.", src.lastPathComponent]);
+    }
+
+    err = commit_item(staged, dst, replace);
+    if (err) {
+        [NSFileManager.defaultManager removeItemAtURL:staged error:nil];
+        return err;
+    }
+
+    if (is_cut && ![NSFileManager.defaultManager removeItemAtURL:src error:&err]) {
+        return described_error([NSString stringWithFormat:
+            @"\"%@\" was copied but the original could not be removed: %@",
+            src.lastPathComponent, err.localizedDescription]);
+    }
+    return nil;
 }
 
 /* ── FilesFileOps implementation ────────────────────────────────────────── */
@@ -350,15 +445,23 @@ urls_from_pasteboard
  * run_copy_srcs:to:is_cut:hash_validate:conflict:cancel_flag:progress:completion: —
  * core copy engine. Runs entirely on a background queue.
  *
+ * Each top-level source is handled by transfer_item (staged copy, then
+ * rename into place). Before that:
+ *   - copying a folder into itself or one of its subfolders is rejected;
+ *   - an item pasted into its own folder is duplicated (" copy" suffix) on
+ *     copy, and skipped on cut;
+ *   - an existing file or folder at the destination triggers `conflict`.
+ *
  * Inputs:
  *   srcs          — source URLs
  *   dest          — destination directory URL
- *   is_cut        — YES = delete sources on success
- *   hash_validate — YES = SHA-256 verify each file
- *   conflict      — called when a destination file already exists; nil = keep both
+ *   is_cut        — YES = move sources
+ *   hash_validate — YES = SHA-256 verify each copied file before committing
+ *   conflict      — called when the destination item exists; nil = keep both
  *   cancel_flag   — pointer to int32_t cancel flag; may be NULL
- *   progress      — chunk callback; may be nil
- *   completion    — called on main queue when done
+ *   progress      — progress callback; may be nil
+ *   completion    — called on main queue with the first error (nil on
+ *                   success) and per-file hash results (nil unless hash_validate)
  */
 + (void)
 run_copy_srcs:(NSArray<NSURL *> *)srcs
@@ -371,79 +474,52 @@ hash_validate:(BOOL)hash_validate
    completion:(void (^)(NSError *, NSDictionary<NSURL *, NSNumber *> *))completion
 {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        /* Build (src, dst) pairs, resolving conflicts at the top-level item. */
-        NSMutableArray *pairs = [NSMutableArray array];
-        NSError *first_err = nil;
+        NSMutableDictionary *hash_results =
+            hash_validate ? [NSMutableDictionary dictionary] : nil;
+        copy_ctx_t ctx = { .progress = progress, .cancel = cancel_flag };
+        NSString *dest_path = dest.URLByStandardizingPath.path;
+        NSError *first_err  = nil;
 
         for (NSURL *src in srcs) {
-            NSURL *naive_dst = [dest URLByAppendingPathComponent:src.lastPathComponent];
-            NSNumber *is_dir = nil;
-            [src getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
+            if (cancel_flag && *cancel_flag) {
+                first_err = [NSError errorWithDomain:NSCocoaErrorDomain
+                                               code:NSUserCancelledError userInfo:nil];
+                break;
+            }
 
-            NSURL *top_dst;
-            if (!is_dir.boolValue &&
-                [NSFileManager.defaultManager fileExistsAtPath:naive_dst.path]) {
-                FilesConflictResolution res = conflict
-                    ? conflict(src, naive_dst)
-                    : FilesConflictKeepBoth;
+            NSString *src_path = src.URLByStandardizingPath.path;
+            if ([dest_path isEqualToString:src_path] ||
+                [dest_path hasPrefix:[src_path stringByAppendingString:@"/"]]) {
+                first_err = described_error([NSString stringWithFormat:
+                    @"\"%@\" can't be copied into itself.", src.lastPathComponent]);
+                break;
+            }
+
+            NSURL *dst   = [dest URLByAppendingPathComponent:src.lastPathComponent];
+            BOOL replace = NO;
+            if ([dst.URLByStandardizingPath.path isEqualToString:src_path]) {
+                if (is_cut) continue;              /* moving onto itself: no-op */
+                dst = unique_dest_url(src.lastPathComponent, dest);
+            } else if (item_exists(dst)) {
+                FilesConflictResolution res = conflict ? conflict(src, dst)
+                                                       : FilesConflictKeepBoth;
                 if (res == FilesConflictCancel) {
                     first_err = [NSError errorWithDomain:NSCocoaErrorDomain
                                                    code:NSUserCancelledError userInfo:nil];
                     break;
                 }
-                top_dst = (res == FilesConflictKeepBoth)
-                    ? unique_dest_url(src.lastPathComponent, dest)
-                    : naive_dst;
-            } else {
-                top_dst = naive_dst;
-            }
-
-            if (is_dir.boolValue) {
-                [NSFileManager.defaultManager
-                    createDirectoryAtURL:top_dst
-             withIntermediateDirectories:YES attributes:nil error:nil];
-                NSArray *children = [NSFileManager.defaultManager
-                    contentsOfDirectoryAtURL:src
-                  includingPropertiesForKeys:@[NSURLIsDirectoryKey]
-                                     options:0 error:nil];
-                for (NSURL *child in children) {
-                    collect_pairs(child, top_dst, pairs);
-                }
-            } else {
-                [pairs addObject:@{@"src": src, @"dst": top_dst}];
-            }
-        }
-
-        NSMutableDictionary *hash_results =
-            hash_validate ? [NSMutableDictionary dictionary] : nil;
-        __block int64_t total_done = 0;
-
-        if (!first_err) {
-            for (NSDictionary *pair in pairs) {
-                if (cancel_flag && *cancel_flag) {
-                    first_err = [NSError errorWithDomain:NSCocoaErrorDomain
-                                                   code:NSUserCancelledError userInfo:nil];
-                    break;
-                }
-                NSError *err = copy_single_file(pair[@"src"], pair[@"dst"],
-                                                 is_cut, hash_validate,
-                                                 cancel_flag,
-                                                 &total_done, 0,
-                                                 progress, hash_results);
-                if (err && !first_err) first_err = err;
-                if (err && err.code == NSUserCancelledError) break;
-            }
-        }
-
-        /* For cut operations, remove source directories after all files moved */
-        if (is_cut && !first_err) {
-            for (NSURL *src in srcs) {
-                NSNumber *is_dir = nil;
-                [src getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
-                if (is_dir.boolValue) {
-                    [NSFileManager.defaultManager removeItemAtURL:src error:nil];
+                if (res == FilesConflictKeepBoth) {
+                    dst = unique_dest_url(src.lastPathComponent, dest);
+                } else {
+                    replace = YES;
                 }
             }
+
+            NSError *err = transfer_item(src, dst, replace, is_cut, hash_validate,
+                                         &ctx, hash_results);
+            if (err && !first_err) first_err = err;
+            if (err.code == NSUserCancelledError &&
+                [err.domain isEqualToString:NSCocoaErrorDomain]) break;
         }
 
         NSDictionary *frozen_results = [hash_results copy];
@@ -482,8 +558,31 @@ paste_to_directory:(NSURL *)dest
 }
 
 /*
- * paste_to_directory:completion: — convenience wrapper that reads the hash
- * preference from NSUserDefaults and routes through FilesCopyProgress.
+ * transfer_urls:to:is_cut:completion: — copies or moves srcs into dest with
+ * the progress panel, honouring the "files.copy.hash_validation" preference.
+ *
+ * Inputs:
+ *   srcs       — source file/directory URLs
+ *   dest       — destination directory URL
+ *   is_cut     — YES = move instead of copy
+ *   completion — called on main queue; error is nil on success
+ */
++ (void)
+transfer_urls:(NSArray<NSURL *> *)srcs
+           to:(NSURL *)dest
+       is_cut:(BOOL)is_cut
+   completion:(void (^)(NSError *))completion
+{
+    BOOL hash = [NSUserDefaults.standardUserDefaults
+                     boolForKey:@"files.copy.hash_validation"];
+    [FilesCopyProgress begin_copy:srcs to:dest is_cut:is_cut
+                    hash_validate:hash
+                       completion:completion];
+}
+
+/*
+ * paste_to_directory:completion: — copies (or, after a cut, moves) the
+ * pasteboard's files into dest via transfer_urls:to:is_cut:completion:.
  *
  * Inputs:
  *   dest       — destination directory URL
@@ -500,12 +599,7 @@ paste_to_directory:(NSURL *)dest completion:(void (^)(NSError *))completion
     BOOL is_cut = [self pasteboard_is_cut];
     if (is_cut) [NSPasteboard.generalPasteboard clearContents];
 
-    BOOL hash = [NSUserDefaults.standardUserDefaults
-                     boolForKey:@"files.copy.hash_validation"];
-
-    [FilesCopyProgress begin_copy:srcs to:dest is_cut:is_cut
-                    hash_validate:hash
-                       completion:completion];
+    [self transfer_urls:srcs to:dest is_cut:is_cut completion:completion];
 }
 
 /*

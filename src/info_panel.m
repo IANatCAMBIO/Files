@@ -447,8 +447,11 @@ populate_fields:(NSURL *)url
         NSURLNameKey, NSURLFileSizeKey, NSURLFileAllocatedSizeKey,
         NSURLIsDirectoryKey, NSURLLocalizedTypeDescriptionKey,
         NSURLCreationDateKey, NSURLContentModificationDateKey,
-        NSURLIsWritableKey
+        NSURLIsUserImmutableKey
     ];
+    /* url often comes from the browser listing with values cached at list
+     * time; drop them so the panel shows the item's current state. */
+    [url removeAllCachedResourceValues];
     NSDictionary<NSURLResourceKey, id> *res =
         [url resourceValuesForKeys:keys error:nil];
 
@@ -510,9 +513,9 @@ populate_fields:(NSURL *)url
         self.group_value.stringValue = @"—";
     }
 
-    /* Lock */
-    NSNumber *writable = res[NSURLIsWritableKey];
-    self.lock_check.state = (writable && !writable.boolValue)
+    /* Lock — the user-immutable flag (uchg), same flag lock_toggled: sets.
+     * Read-only permissions alone do not make an item "Locked". */
+    self.lock_check.state = [res[NSURLIsUserImmutableKey] boolValue]
                             ? NSControlStateValueOn
                             : NSControlStateValueOff;
 
@@ -546,8 +549,9 @@ populate_fields:(NSURL *)url
 
 /*
  * perms_popup_changed: — reads the three permission popups and applies the new
- * mode to the current file via chmod(2), preserving file-type and setuid/setgid/
- * sticky bits from the existing mode.
+ * mode to the current item via lchmod(2), preserving file-type and setuid/
+ * setgid/sticky bits from the existing mode. lstat/lchmod act on a symlink
+ * itself (never its target), matching the mode shown by populate_fields:.
  *
  * Inputs:
  *   sender — any of the three NSPopUpButton controls (unused; all three are read)
@@ -568,7 +572,7 @@ perms_popup_changed:(id)sender
     mode_t other   = (mode_t)(self.other_perms_popup.selectedTag & 7);
     mode_t new_mode = special | (owner << 6) | (group << 3) | other;
 
-    if (chmod(self.current_url.fileSystemRepresentation, new_mode) != 0) {
+    if (lchmod(self.current_url.fileSystemRepresentation, new_mode) != 0) {
         NSString *err_str = [NSString stringWithUTF8String:strerror(errno)];
         NSAlert *alert        = [[NSAlert alloc] init];
         alert.messageText     = @"Could not change permissions";
@@ -631,7 +635,10 @@ hash_check_toggled:(NSButton *)sender
 }
 
 /*
- * lock_toggled: — toggles the immutable flag on the current file.
+ * lock_toggled: — sets or clears the user-immutable flag (uchg) on the
+ * current item via NSURLIsUserImmutableKey — the same key populate_fields:
+ * reads, and like it, applied to a symlink itself rather than its target.
+ * On failure shows an alert and reverts the checkbox.
  *
  * Inputs:
  *   sender — the lock checkbox
@@ -641,11 +648,10 @@ lock_toggled:(NSButton *)sender
 {
     if (!self.current_url) return;
     BOOL lock = (sender.state == NSControlStateValueOn);
-    NSDictionary *attrs = @{NSFileImmutable: @(lock)};
     NSError *err = nil;
-    BOOL ok = [NSFileManager.defaultManager setAttributes:attrs
-                                             ofItemAtPath:self.current_url.path
-                                                    error:&err];
+    BOOL ok = [self.current_url setResourceValue:@(lock)
+                                          forKey:NSURLIsUserImmutableKey
+                                           error:&err];
     if (!ok) {
         NSAlert *alert = [[NSAlert alloc] init];
         alert.messageText     = @"Could not change lock status";

@@ -839,16 +839,18 @@ observeValueForKeyPath:(NSString *)keyPath
 toggle_sidebar_action:(id)sender
 {
     if (self.info_sidebar.hidden) {
-        /* Expand: set frames directly so the sidebar springs back to its last width. */
+        /* Expand to kSidebarW (less if the browser would drop below 400pt).
+         * Move the divider with setPosition: rather than setting subview
+         * frames directly, so NSSplitView updates its own layout state, then
+         * rebuild the window's cursor rects: without that the divider gets no
+         * resize-cursor rect until the next window resize, so it can't be
+         * found or grabbed. */
         CGFloat sv_w = self.content_split.bounds.size.width;
-        CGFloat sv_h = self.content_split.bounds.size.height;
         CGFloat div  = self.content_split.dividerThickness;
-        CGFloat sidebar_w = MIN(MAX(kSidebarW, 140.0), sv_w - div - 400.0);
-        CGFloat browser_w = sv_w - div - sidebar_w;
+        CGFloat sidebar_w = MIN(kSidebarW, sv_w - div - 400.0);
         self.info_sidebar.hidden = NO;
-        self.browser_container.frame = NSMakeRect(0, 0, browser_w, sv_h);
-        self.info_sidebar.frame      = NSMakeRect(browser_w + div, 0, sidebar_w, sv_h);
-        [self.content_split setNeedsDisplay:YES];
+        [self.content_split setPosition:sv_w - div - sidebar_w ofDividerAtIndex:0];
+        [self.window invalidateCursorRectsForView:self.content_split];
         [self refresh_sidebar_for_active_pane];
     } else {
         /* Collapse: keep divider alive during setPosition: so it is not a no-op. */

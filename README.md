@@ -16,7 +16,7 @@ A minimalist macOS file manager written in Objective-C + AppKit.
 
 ## Prerequisites
 
-- macOS 13.0 (Ventura) or later
+- macOS 14.0 (Sonoma) or later
 - Xcode Command Line Tools (`xcode-select --install`)
 
 ## Installation
@@ -25,7 +25,7 @@ A minimalist macOS file manager written in Objective-C + AppKit.
 make install
 ```
 
-This builds the app bundle and copies it to `/Applications/files.app`.
+This builds the app bundle and copies it to `~/Applications/files.app` (per-user; no `sudo` needed). Re-running `make install` replaces the previous copy.
 
 ## First run
 
@@ -33,7 +33,7 @@ This builds the app bundle and copies it to `/Applications/files.app`.
 make run
 ```
 
-Or double-click `files.app` in Finder after installing.
+Or double-click `files.app` in `~/Applications` after installing.
 
 ## Keyboard shortcuts
 
@@ -42,7 +42,7 @@ Or double-click `files.app` in Finder after installing.
 | Copy           | ⌘C                 |
 | Cut            | ⌘X                 |
 | Paste          | ⌘V                 |
-| Move to Trash  | ⌫ or ⌘⌫           |
+| Move to Trash  | ⌘⌫                 |
 | New Folder     | ⌘⇧N                |
 | Get Info       | ⌘I                 |
 | Select All     | ⌘A                 |

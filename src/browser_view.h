@@ -123,15 +123,18 @@
 - (void)end_spotlight_search;
 
 /*
- * Action methods wired to the menu / responder chain.
+ * Action methods wired to the menu / responder chain. copy:, cut:, paste:
+ * and selectAll: are the standard AppKit editing selectors, so when a text
+ * field (address bar, search, inline rename) is first responder its field
+ * editor handles them instead and they act on text, not files.
  */
-- (IBAction)copy_action:(id)sender;
-- (IBAction)cut_action:(id)sender;
-- (IBAction)paste_action:(id)sender;
+- (IBAction)copy:(id)sender;
+- (IBAction)cut:(id)sender;
+- (IBAction)paste:(id)sender;
 - (IBAction)move_to_trash_action:(id)sender;
 - (IBAction)new_folder_action:(id)sender;
 - (IBAction)get_info_action:(id)sender;
-- (IBAction)select_all_action:(id)sender;
+- (IBAction)selectAll:(id)sender;
 - (IBAction)go_back_action:(id)sender;
 - (IBAction)go_forward_action:(id)sender;
 - (IBAction)go_home_action:(id)sender;

@@ -34,9 +34,24 @@
 + (NSArray<NSURL *> *)urls_from_pasteboard;
 
 /*
- * paste_to_directory:completion: — moves or copies pasteboard files to dest.
+ * transfer_urls:to:is_cut:completion: — copies or moves srcs into dest,
+ * showing the progress panel (conflict prompts, cancel, speed graph).
  * Reads NSUserDefaults key "files.copy.hash_validation" for hash behaviour.
- * Shows a progress panel for transfers >= 10 MB.
+ *
+ * Inputs:
+ *   srcs       — source file/directory URLs
+ *   dest       — destination directory URL
+ *   is_cut     — YES = move instead of copy
+ *   completion — called on main queue; error is nil on success
+ */
++ (void)transfer_urls:(NSArray<NSURL *> *)srcs
+                   to:(NSURL *)dest
+               is_cut:(BOOL)is_cut
+           completion:(void (^)(NSError *))completion;
+
+/*
+ * paste_to_directory:completion: — moves or copies pasteboard files to dest.
+ * Delegates to transfer_urls:to:is_cut:completion:.
  *
  * Inputs:
  *   dest       — destination directory URL
@@ -45,18 +60,19 @@
 + (void)paste_to_directory:(NSURL *)dest completion:(void (^)(NSError *))completion;
 
 /*
- * FileCopyProgressBlock — progress callback for chunked copies.
+ * FileCopyProgressBlock — progress callback for copies.
  *
- * Called on the background copy queue after every 1 MB chunk.
- * All byte counts are in bytes.
+ * Called on the background copy queue when each file starts, after every
+ * 1 MB of data copied (cloned files report no intermediate chunks), and when
+ * each file finishes. All byte counts are in bytes.
  *
  * Parameters:
  *   current_file — filename (last path component) of the file being copied
  *   file_done    — bytes copied so far for the current file
  *   file_total   — total bytes in the current file
  *   total_done   — bytes copied across all files in this operation
- *   total_total  — total bytes across all files in this operation
- *   bps          — instantaneous bytes-per-second for this chunk
+ *   total_total  — always 0 (no pre-scan is performed)
+ *   bps          — always 0 (the caller computes speed)
  */
 typedef void (^FileCopyProgressBlock)(NSString *current_file,
                                        int64_t   file_done,
@@ -83,7 +99,9 @@ typedef void (^FileCopyProgressBlock)(NSString *current_file,
                                      NSDictionary<NSURL *, NSNumber *> *hash_results))completion;
 
 /*
- * FilesConflictResolution — outcome of a per-file conflict prompt.
+ * FilesConflictResolution — outcome of a per-item conflict prompt.
+ * Overwrite replaces the existing file or folder only after the new item has
+ * been fully copied (and verified, if requested).
  */
 typedef NS_ENUM(NSInteger, FilesConflictResolution) {
     FilesConflictCancel    = 0,
@@ -92,12 +110,13 @@ typedef NS_ENUM(NSInteger, FilesConflictResolution) {
 };
 
 /*
- * FilesConflictBlock — called (from any thread) when a destination file already
- * exists. Must block until the user responds; return the chosen resolution.
+ * FilesConflictBlock — called on the background copy queue when a destination
+ * file or folder already exists. Must block until the user responds; return
+ * the chosen resolution.
  *
  * Parameters:
- *   src — source file URL
- *   dst — conflicting destination file URL
+ *   src — source item URL
+ *   dst — conflicting destination item URL
  */
 typedef FilesConflictResolution (^FilesConflictBlock)(NSURL *src, NSURL *dst);
 
@@ -106,15 +125,21 @@ typedef FilesConflictResolution (^FilesConflictBlock)(NSURL *src, NSURL *dst);
  * core copy engine; takes source URLs directly (not from pasteboard).
  *
  * Runs on a background queue; calls completion on the main queue.
+ * Uses copyfile(3) (APFS clones, full metadata, symlinks kept as links) and
+ * rename(2) for same-volume moves. Each item is staged under a hidden name
+ * and renamed into place only when complete, so cancel, errors and failed
+ * validation never damage an existing destination or delete the source.
+ * Copying a folder into itself is rejected; pasting into the source's own
+ * folder duplicates on copy and is a no-op on cut.
  *
  * Inputs:
  *   srcs          — source file/directory URLs
  *   dest          — destination directory URL
- *   is_cut        — YES = delete sources after successful copy
- *   hash_validate — YES = SHA-256 verify each file after copying
- *   conflict      — called when a destination file already exists; nil = keep both
+ *   is_cut        — YES = move sources (deleted only after a successful commit)
+ *   hash_validate — YES = SHA-256 verify each file before committing
+ *   conflict      — called when a destination item already exists; nil = keep both
  *   cancel_flag   — pointer to an int32_t; set to non-zero to abort; may be NULL
- *   progress      — chunk progress callback; may be nil
+ *   progress      — progress callback; may be nil
  *   completion    — called on main queue with error and hash_results dict
  */
 + (void)run_copy_srcs:(NSArray<NSURL *> *)srcs
