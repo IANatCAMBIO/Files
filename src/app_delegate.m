@@ -271,6 +271,9 @@ build_menu_bar
     [file_menu addItem:make_item(@"New Folder",
                                  @selector(new_folder_action:),
                                  @"n", NSEventModifierFlagShift)];
+    [file_menu addItem:make_item(@"New File",
+                                 @selector(new_file_action:),
+                                 @"n", NSEventModifierFlagOption)];
     [file_menu addItem:make_item(@"Get Info",
                                  @selector(get_info_action:),
                                  @"i", 0)];

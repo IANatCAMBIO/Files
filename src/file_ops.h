@@ -132,16 +132,21 @@ typedef FilesConflictResolution (^FilesConflictBlock)(NSURL *src, NSURL *dst);
 + (void)move_to_trash:(NSArray<NSURL *> *)urls completion:(void (^)(NSError *))completion;
 
 /*
- * create_folder_in:name:completion: — creates a new directory.
+ * create_item_in:name:folder:completion: — creates a new, empty folder or
+ * file. If name is taken, " copy", " copy 2", … is appended (before any
+ * extension). A file is created exclusively (O_EXCL), so an item that
+ * appears concurrently is never overwritten.
  *
  * Inputs:
  *   parent     — parent directory URL
- *   name       — folder name; "untitled folder" if nil
- *   completion — called on main queue with new URL or error
+ *   name       — desired name, e.g. "untitled folder" or "untitled.txt"
+ *   folder     — YES for a folder, NO for an empty file
+ *   completion — called on main queue with the new URL, or nil and an error
  */
-+ (void)create_folder_in:(NSURL *)parent
-                    name:(NSString *)name
-              completion:(void (^)(NSURL *, NSError *))completion;
++ (void)create_item_in:(NSURL *)parent
+                  name:(NSString *)name
+                folder:(BOOL)folder
+            completion:(void (^)(NSURL *, NSError *))completion;
 
 /*
  * rename_url:to:completion: — renames a file or folder.

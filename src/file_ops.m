@@ -3,6 +3,8 @@
 #import "file_hash.h"
 #import "util.h"
 #include <copyfile.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
@@ -609,25 +611,33 @@ move_to_trash:(NSArray<NSURL *> *)urls
 }
 
 /*
- * create_folder_in:name:completion: — creates a directory in parent.
+ * create_item_in:name:folder:completion: — creates an empty folder or file
+ * under a unique name, off the main thread.
  *
  * Inputs:
  *   parent     — parent directory URL
- *   name       — folder name; defaults to "untitled folder" if nil/empty
- *   completion — called on main queue with new URL or error
+ *   name       — desired name
+ *   folder     — YES for a folder, NO for an empty file
+ *   completion — called on main queue with the new URL, or nil and an error
  */
 + (void)
-create_folder_in:(NSURL *)parent
-             name:(NSString *)name
-       completion:(void (^)(NSURL *, NSError *))completion
+create_item_in:(NSURL *)parent
+          name:(NSString *)name
+        folder:(BOOL)folder
+    completion:(void (^)(NSURL *, NSError *))completion
 {
-    if (name.length == 0) name = @"untitled folder";
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSURL *dest  = unique_dest_url(name, parent);
         NSError *err = nil;
-        BOOL ok = [NSFileManager.defaultManager
-                       createDirectoryAtURL:dest
-                  withIntermediateDirectories:NO attributes:nil error:&err];
+        BOOL ok;
+        if (folder) {
+            ok = [NSFileManager.defaultManager createDirectoryAtURL:dest
+                                        withIntermediateDirectories:NO attributes:nil error:&err];
+        } else {
+            int fd = open(dest.fileSystemRepresentation, O_WRONLY | O_CREAT | O_EXCL, 0644);
+            ok = (fd >= 0);
+            if (ok) close(fd); else err = posix_error(errno, dest);
+        }
         dispatch_async(dispatch_get_main_queue(), ^{
             if (completion) completion(ok ? dest : nil, ok ? nil : err);
         });

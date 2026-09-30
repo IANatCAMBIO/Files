@@ -410,6 +410,7 @@ build_context_menu
     [menu addItem:NSMenuItem.separatorItem];
     add(@"Get Info",      @selector(get_info_action:));
     add(@"New Folder",    @selector(new_folder_action:));
+    add(@"New File",      @selector(new_file_action:));
 
     return menu;
 }
@@ -1536,24 +1537,27 @@ move_to_trash_action:(id)sender
 }
 
 /*
- * new_folder_action: — creates an "untitled folder" in the current folder,
- * then selects it and starts an inline rename once the listing shows it.
+ * create_and_rename: — creates a new folder or empty file in the current
+ * folder, then selects it and starts an inline rename once the listing
+ * shows it (the name is pre-selected without its extension).
  *
  * Inputs:
- *   sender — menu item (unused)
+ *   folder — YES for "untitled folder", NO for "untitled.txt"
  */
-- (IBAction)
-new_folder_action:(id)sender
+- (void)
+create_and_rename:(BOOL)folder
 {
     if (!self.current_dir) return;
     __weak FilesBrowserView *ws = self;
-    [FilesFileOps create_folder_in:self.current_dir
-                              name:@"untitled folder"
-                        completion:^(NSURL *new_url, NSError *err) {
+    [FilesFileOps create_item_in:self.current_dir
+                            name:folder ? @"untitled folder" : @"untitled.txt"
+                          folder:folder
+                      completion:^(NSURL *new_url, NSError *err) {
         FilesBrowserView *s = ws;
         if (!s) return;
         if (err) {
-            files_show_error(@"Could not create folder", err, s.window);
+            files_show_error(folder ? @"Could not create folder" : @"Could not create file",
+                             err, s.window);
             return;
         }
         [s reload_directory_then:^{
@@ -1567,6 +1571,32 @@ new_folder_action:(id)sender
             [s begin_rename:nil];
         }];
     }];
+}
+
+/*
+ * new_folder_action: — File ▸ New Folder: creates "untitled folder" in the
+ * current folder and starts renaming it.
+ *
+ * Inputs:
+ *   sender — menu item or toolbar item (unused)
+ */
+- (IBAction)
+new_folder_action:(id)sender
+{
+    [self create_and_rename:YES];
+}
+
+/*
+ * new_file_action: — File ▸ New File: creates an empty "untitled.txt" in the
+ * current folder and starts renaming it.
+ *
+ * Inputs:
+ *   sender — menu item or toolbar item (unused)
+ */
+- (IBAction)
+new_file_action:(id)sender
+{
+    [self create_and_rename:NO];
 }
 
 /*

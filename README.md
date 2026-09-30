@@ -23,7 +23,8 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   are shown. Copies use APFS clones
   when possible and keep extended attributes, tags, ACLs and dates; nothing
   at the destination is replaced until the new copy is complete
-- Move to Trash, Empty Trash, New Folder, inline rename (Return; the name
+- Move to Trash, Empty Trash, New Folder and New File (File menu, right-click,
+  or the toolbar's + button), inline rename (Return; the name
   without its extension is selected, ready to type)
 - App bundles open like folders; right-click ▸ Run Application launches one
 - Symbolic links are followed (a link to a folder opens that folder)
@@ -70,6 +71,7 @@ Or double-click `files.app` in `~/Applications` after installing.
 | Cut            | ⌘X                 |
 | Paste          | ⌘V                 |
 | New Window     | ⌘N                 |
+| New File       | ⌥⌘N                |
 | Move to Trash  | ⌘⌫                 |
 | Add Bookmark   | ⌘D                 |
 | Open in Terminal | ⌘⇧T              |

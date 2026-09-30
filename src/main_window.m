@@ -18,6 +18,7 @@ static NSString * const tb_search        = @"files.search";
 static NSString * const tb_open_terminal = @"files.open-terminal";
 static NSString * const tb_dual_pane     = @"files.dual-pane";
 static NSString * const tb_sidebar       = @"files.sidebar";
+static NSString * const tb_new_item      = @"files.new-item";
 
 static const CGFloat bookmarks_bar_h = 28.0;
 static const CGFloat status_h        = 20.0;
@@ -559,7 +560,7 @@ observeValueForKeyPath:(NSString *)keyPath
 static NSArray<NSToolbarItemIdentifier> *
 toolbar_identifiers(void)
 {
-    return @[tb_back, tb_forward, tb_up, tb_reload,
+    return @[tb_back, tb_forward, tb_up, tb_reload, tb_new_item,
              NSToolbarFlexibleSpaceItemIdentifier,
              tb_path,
              NSToolbarFlexibleSpaceItemIdentifier,
@@ -659,6 +660,21 @@ willBeInsertedIntoToolbar:(BOOL)flag
         return button_item(identifier, @"Info Sidebar", @"sidebar.right",
                            @selector(toggle_sidebar_action:), self);
 
+    if ([identifier isEqualToString:tb_new_item]) {
+        NSMenu *menu = [[NSMenu alloc] initWithTitle:@"New"];
+        NSMenuItem *folder = [menu addItemWithTitle:@"New Folder"
+                                             action:@selector(new_folder_action:) keyEquivalent:@""];
+        NSMenuItem *file   = [menu addItemWithTitle:@"New File"
+                                             action:@selector(new_file_action:) keyEquivalent:@""];
+        folder.target = self;
+        file.target   = self;
+        NSMenuToolbarItem *item = [[NSMenuToolbarItem alloc] initWithItemIdentifier:identifier];
+        item.menu    = menu;
+        item.label   = @"New";
+        item.toolTip = @"New Folder or File";
+        item.image   = [NSImage imageWithSystemSymbolName:@"plus" accessibilityDescription:@"New"];
+        return item;
+    }
     if ([identifier isEqualToString:tb_search]) {
         NSSearchToolbarItem *item = [[NSSearchToolbarItem alloc] initWithItemIdentifier:identifier];
         item.searchField.target            = self;
@@ -812,6 +828,31 @@ go_downloads_action:(id)sender
 go_documents_action:(id)sender
 {
     [[self active_browser] navigate_to:files_directory_url(NSDocumentDirectory)];
+}
+
+/*
+ * new_folder_action: — New Folder in the active pane (reached from the menu
+ * or toolbar even when a text field, not the browser, has focus).
+ *
+ * Inputs:
+ *   sender — menu item or toolbar menu item (unused)
+ */
+- (IBAction)
+new_folder_action:(id)sender
+{
+    [[self active_browser] new_folder_action:sender];
+}
+
+/*
+ * new_file_action: — New File in the active pane (see new_folder_action:).
+ *
+ * Inputs:
+ *   sender — menu item or toolbar menu item (unused)
+ */
+- (IBAction)
+new_file_action:(id)sender
+{
+    [[self active_browser] new_file_action:sender];
 }
 
 /*

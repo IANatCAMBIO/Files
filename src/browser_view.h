@@ -131,6 +131,7 @@
 - (IBAction)paste:(id)sender;
 - (IBAction)move_to_trash_action:(id)sender;
 - (IBAction)new_folder_action:(id)sender;
+- (IBAction)new_file_action:(id)sender;
 - (IBAction)get_info_action:(id)sender;
 - (IBAction)selectAll:(id)sender;
 

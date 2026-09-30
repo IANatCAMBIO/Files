@@ -125,7 +125,11 @@ static NSString * const perm_items[] = {
 @interface FilesVCenterCell : NSTextFieldCell
 @end
 
-@implementation FilesVCenterCell
+@implementation FilesVCenterCell {
+    /* YES while the field editor is being placed: its frame arrives already
+     * centered, so drawingRectForBounds: must not center it again. */
+    BOOL _placing_editor;
+}
 
 /*
  * drawingRectForBounds: — shrinks the drawing rect to the natural text height
@@ -134,19 +138,57 @@ static NSString * const perm_items[] = {
  * Inputs:
  *   bounds — full cell bounds
  *
- * Output: adjusted rect for text drawing/editing.
+ * Output: adjusted rect for text drawing.
  */
 - (NSRect)
 drawingRectForBounds:(NSRect)bounds
 {
-    NSRect r   = [super drawingRectForBounds:bounds];
-    NSSize sz  = [super cellSizeForBounds:bounds];
+    NSRect r = [super drawingRectForBounds:bounds];
+    if (_placing_editor) return r;
+    NSSize  sz = [super cellSizeForBounds:bounds];
     CGFloat dy = floor((r.size.height - sz.height) / 2.0);
     if (dy > 0) {
         r.origin.y    += dy;
         r.size.height -= dy * 2.0;
     }
     return r;
+}
+
+/*
+ * editWithFrame:inView:editor:delegate:event: — places the field editor in
+ * the same vertically centered rect the text is drawn in, so the text does
+ * not jump when editing starts.
+ *
+ * Inputs:
+ *   frame, view, editor, delegate, event — as for NSCell
+ */
+- (void)
+editWithFrame:(NSRect)frame inView:(NSView *)view editor:(NSText *)editor
+     delegate:(id)delegate event:(NSEvent *)event
+{
+    NSRect centered = [self drawingRectForBounds:frame];
+    _placing_editor = YES;
+    [super editWithFrame:centered inView:view editor:editor delegate:delegate event:event];
+    _placing_editor = NO;
+}
+
+/*
+ * selectWithFrame:inView:editor:delegate:start:length: — as
+ * editWithFrame:…, for editing that begins with a selection (tabbing or
+ * clicking into the field).
+ *
+ * Inputs:
+ *   frame, view, editor, delegate, start, length — as for NSCell
+ */
+- (void)
+selectWithFrame:(NSRect)frame inView:(NSView *)view editor:(NSText *)editor
+       delegate:(id)delegate start:(NSInteger)start length:(NSInteger)length
+{
+    NSRect centered = [self drawingRectForBounds:frame];
+    _placing_editor = YES;
+    [super selectWithFrame:centered inView:view editor:editor delegate:delegate
+                     start:start length:length];
+    _placing_editor = NO;
 }
 
 @end
@@ -708,6 +750,34 @@ controlTextDidEndEditing:(NSNotification *)obj
             self.current_url = new_url;
         }
     }];
+}
+
+/*
+ * control:textView:doCommandBySelector: — in the name field, Return commits
+ * the rename and Escape restores the current name; either way editing ends
+ * and the field loses focus (instead of AppKit re-selecting all the text).
+ *
+ * Inputs:
+ *   control  — the control being edited
+ *   textView — its field editor (unused)
+ *   cmd      — the command selector
+ *
+ * Output: YES if the command was handled.
+ */
+- (BOOL)
+control:(NSControl *)control
+textView:(NSTextView *)textView
+doCommandBySelector:(SEL)cmd
+{
+    if (control != self.name_field) return NO;
+    if (cmd == @selector(cancelOperation:)) {
+        [self.name_field abortEditing];
+        self.name_field.stringValue = self.current_url.lastPathComponent ?: @"";
+    } else if (cmd != @selector(insertNewline:)) {
+        return NO;
+    }
+    [self.window makeFirstResponder:nil];  /* Return: ends editing -> rename */
+    return YES;
 }
 
 /*
