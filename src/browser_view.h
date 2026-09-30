@@ -1,8 +1,10 @@
 #import <Cocoa/Cocoa.h>
 
 /*
- * FilesBrowserView — NSView subclass containing the file-list table, status
- * bar, FSEvents watcher, and back/forward navigation stack.
+ * FilesBrowserView — NSView subclass containing the file-list table, the
+ * folder watcher (FSEvents), Spotlight search, and the back/forward history.
+ * It has no status bar of its own; it reports status text through
+ * status_text_handler. All methods must be called on the main thread.
  */
 @interface FilesBrowserView : NSView
 
@@ -47,13 +49,15 @@
  */
 - (instancetype)init_with_frame:(NSRect)frame NS_DESIGNATED_INITIALIZER;
 - (instancetype)initWithFrame:(NSRect)frame NS_UNAVAILABLE;
+- (instancetype)initWithCoder:(NSCoder *)coder NS_UNAVAILABLE;
 
 /*
- * navigate_to: — navigates to url, pushing the previous location onto the
- * back stack and clearing the forward stack.
+ * navigate_to: — shows url if it is a folder, pushing the previous location
+ * onto the back stack (capped at 100 entries) and clearing the forward
+ * stack; any other item is opened with its default application.
  *
  * Inputs:
- *   url — target directory URL
+ *   url — target URL
  */
 - (void)navigate_to:(NSURL *)url;
 
@@ -68,12 +72,16 @@
 - (void)go_forward;
 
 /*
- * can_go_back — returns YES if a back navigation target exists.
+ * can_go_back — whether a back navigation target exists.
+ *
+ * Output: YES if go_back would navigate.
  */
 - (BOOL)can_go_back;
 
 /*
- * can_go_forward — returns YES if a forward navigation target exists.
+ * can_go_forward — whether a forward navigation target exists.
+ *
+ * Output: YES if go_forward would navigate.
  */
 - (BOOL)can_go_forward;
 
@@ -101,29 +109,16 @@
 - (void)set_search_filter:(NSString *)text;
 
 /*
- * reload_directory — re-reads the current directory and refreshes the table.
- * Safe to call from any context that holds a reference to this view.
+ * reload_directory — re-reads the current folder on a background queue and
+ * refreshes the table when the listing arrives (selection kept by path).
+ * No-op while Spotlight results are displayed.
  */
 - (void)reload_directory;
 
 /*
- * begin_spotlight_search:scope: — starts an NSMetadataQuery Spotlight search
- * for filenames containing query within scope directory and its subdirectories.
- *
- * Inputs:
- *   query — search string (matched against kMDItemDisplayName, case-insensitive)
- *   scope — directory URL to scope the search to
- */
-- (void)begin_spotlight_search:(NSString *)query scope:(NSURL *)scope;
-
-/*
- * end_spotlight_search — stops any active Spotlight search and restores the
- * directory listing for the current directory.
- */
-- (void)end_spotlight_search;
-
-/*
- * Action methods wired to the menu / responder chain. copy:, cut:, paste:
+ * Action methods wired to the menu / responder chain (Go-menu and view
+ * toggles live on FilesMainWindow so they work whatever has focus and apply
+ * to the active or every pane). copy:, cut:, paste:
  * and selectAll: are the standard AppKit editing selectors, so when a text
  * field (address bar, search, inline rename) is first responder its field
  * editor handles them instead and they act on text, not files.
@@ -135,27 +130,21 @@
 - (IBAction)new_folder_action:(id)sender;
 - (IBAction)get_info_action:(id)sender;
 - (IBAction)selectAll:(id)sender;
-- (IBAction)go_back_action:(id)sender;
-- (IBAction)go_forward_action:(id)sender;
-- (IBAction)go_home_action:(id)sender;
-- (IBAction)go_desktop_action:(id)sender;
-- (IBAction)go_downloads_action:(id)sender;
-- (IBAction)go_documents_action:(id)sender;
 
 /*
- * toggle_hidden_files_action: — toggles "files.show_hidden_files" in
- * NSUserDefaults and reloads the current directory.
- */
-- (IBAction)toggle_hidden_files_action:(id)sender;
-
-/*
- * empty_trash_action: — confirms and permanently deletes all items in ~/.Trash.
+ * empty_trash_action: — confirms, then permanently deletes everything in the
+ * Trash on a background queue.
+ *
+ * Inputs:
+ *   sender — the Empty Trash button (unused)
  */
 - (IBAction)empty_trash_action:(id)sender;
 
 /*
- * apply_auto_fit — resizes every column to fit its widest content.
- * Called by FilesMainWindow when the Auto-Fit Columns toggle is turned on.
+ * apply_auto_fit — sizes columns to their content and lets the Name column
+ * absorb the remaining width. Runs automatically after each navigation when
+ * files_pref_auto_fit is on; FilesMainWindow also calls it when the Auto-Fit
+ * Columns toggle is turned on.
  */
 - (void)apply_auto_fit;
 

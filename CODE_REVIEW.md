@@ -8,6 +8,32 @@ Severity: **H** = fix before release, **M** = should fix, **L** = cleanup.
 
 ---
 
+## Status (2026-09-30)
+
+**Done in the second pass (sections 1–4):**
+- Dead code removed: `sidebar.*`, `ribbon.png`, unused APIs, the macOS 11/12 fallbacks, `initWithCoder:` overrides and singleton `dealloc`s.
+- Duplicates consolidated into `util.*`: settings keys, standard folder URLs, byte/rate/date formatting (now base-1000 everywhere) and error alerts. Hashing is consolidated in `file_hash.*`: a single-pass, cancellable, `F_NOCACHE` SHA-256/MD5.
+- Navigation now goes through one `load_location:`, which fixes the stale search results and wrong Empty Trash button after Back/Forward.
+- Performance:
+  - Cells use cached formatters, an icon cache, and prefetched permission modes (no `lstat` per cell).
+  - The folder watcher ignores events below the shown folder and coalesces the rest.
+  - Folders are listed on a background queue.
+  - Auto-fit runs only on navigation or toggle, and measures at most 2000 rows.
+- AppKit instead of hand-rolled UI: `NSSplitViewController` for the sidebar; plain `NSToolbarItem`s and `NSSearchToolbarItem`; `NSWorkspace` for Terminal; `menuNeedsUpdate:` for Devices.
+- Unmount now unmounts only the selected volume.
+- Memory:
+  - The speed graph's buffer is bounded and decimated.
+  - The transfer log is capped at 1000 lines, and main-queue progress updates are throttled.
+  - Quick Look thumbnails are requested at the right size.
+  - The Info panel cancels its hash when the selection changes.
+  - The back/forward history is capped at 100.
+- Docs: README and BUILD.md refreshed; the wrong comments fixed; every function has a comment block.
+
+**Still open (not in the requested scope):**
+- Packages treated as folders, and symlinked folders.
+- Rename-field placement: switch to the table's native editing.
+- The bookmarks bar's "Trash migration" re-adds Trash on every launch.
+
 ## 0. Release blockers
 
 **Status (2026-09-30, uncommitted):** B1–B7, B9–B12 fixed. B8 resolved by dropping macOS 13 support: the deployment target, Info.plist and docs now say 14.0. `make install` now installs to `~/Applications` and replaces the old copy instead of nesting inside it. Sections 1–5 below are still open. The one exception is the copy engine: it now uses `copyfile(3)`/`rename(2)` (see section 3).

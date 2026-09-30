@@ -11,9 +11,10 @@ CC       = clang
 # -MMD -MP: emit build/*.d header-dependency files so editing a header
 # rebuilds every object that includes it.
 CFLAGS   = -fobjc-arc -O2 -Wall -Wextra -Wno-unused-parameter \
-           -Wno-deprecated-declarations -Werror=unguarded-availability \
+           -Werror=unguarded-availability \
            -mmacosx-version-min=14.0 -I src -MMD -MP
-LDFLAGS  = -framework Cocoa -framework CoreServices -framework QuickLookThumbnailing
+LDFLAGS  = -framework Cocoa -framework CoreServices -framework QuickLookThumbnailing \
+           -framework UniformTypeIdentifiers
 SRCS     = $(wildcard src/*.m)
 OBJS     = $(patsubst src/%.m,build/%.o,$(SRCS))
 DEPS     = $(OBJS:.o=.d)

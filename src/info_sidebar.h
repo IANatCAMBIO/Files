@@ -17,7 +17,9 @@
 
 /*
  * show_urls: — display aggregate info for a multi-item selection.
- * Shows an item count and combined file size; no thumbnail.
+ * Shows an item count and the combined size of the selected files (folder
+ * contents are not counted; the size is marked "excl. folders" when any
+ * folder is selected, "—" if only folders are); no thumbnail.
  *
  * Inputs:
  *   urls — selected URLs (count > 1)
@@ -25,7 +27,8 @@
 - (void)show_urls:(NSArray<NSURL *> *)urls;
 
 /*
- * clear — reset to empty state (no item selected).
+ * clear — reset to empty state (no item selected, or sidebar collapsed).
+ * Cancels any in-flight Quick Look request and drops the thumbnail image.
  */
 - (void)clear;
 

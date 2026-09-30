@@ -1,19 +1,24 @@
 #import "speed_graph.h"
+#import "util.h"
 
-#define INITIAL_CAP  256    /* starting buffer capacity (doubles as needed) */
-#define EMA_ALPHA    0.7    /* exponential moving average weight on previous sample */
+/* Fixed number of sample slots; a power of two so pair-merging halves it evenly. */
+enum { sample_capacity = 512 };
+
+static const double ema_alpha   = 0.7;  /* EMA weight on the previous smoothed value */
+static const double y_floor_bps = 1e6;  /* minimum Y scale: 1 MB/s */
 
 @implementation FilesSpeedGraph {
-    double     *_samples;    /* EMA-smoothed instantaneous speed, linear array */
-    NSUInteger  _count;      /* samples recorded so far */
-    NSUInteger  _capacity;   /* allocated slots in _samples */
-    double      _current_bps;
-    double      _y_max;      /* running maximum of stored samples */
-    double      _avg_bps;    /* latest running-average bps from the caller */
+    double     _samples[sample_capacity]; /* per-slot max of smoothed speed */
+    NSUInteger _count;          /* slots in use */
+    NSUInteger _stride;         /* samples merged into each slot (1, 2, 4, …) */
+    NSUInteger _last_fill;      /* samples merged into the last slot so far */
+    double     _last_smoothed;  /* most recent EMA value (EMA input for next sample) */
+    double     _y_max;          /* maximum of all stored samples */
+    double     _avg_bps;        /* latest running-average bps from the caller */
 }
 
 /*
- * initWithFrame: — allocate the initial sample buffers.
+ * initWithFrame: — initialize an empty graph.
  *
  * Inputs:
  *   frame_rect — initial frame
@@ -25,29 +30,34 @@ initWithFrame:(NSRect)frame_rect
 {
     self = [super initWithFrame:frame_rect];
     if (!self) return nil;
-    _capacity    = INITIAL_CAP;
-    _samples     = calloc(_capacity, sizeof(double));
-    _count       = 0;
-    _current_bps = 0;
-    _y_max       = 1.0;
+    _stride = 1;
+    _y_max  = 1.0;
     return self;
 }
 
 /*
- * dealloc — free the heap-allocated sample buffers.
+ * decimate — halve the buffer by merging adjacent slot pairs, keeping the
+ * larger value of each pair so peaks survive. Each slot then covers twice as
+ * many samples as before. Called only when the buffer is full, so every slot
+ * (including the last) is complete afterwards.
  */
 - (void)
-dealloc
+decimate
 {
-    free(_samples);
+    for (NSUInteger i = 0; i < sample_capacity / 2; i++) {
+        _samples[i] = fmax(_samples[2 * i], _samples[2 * i + 1]);
+    }
+    _count     = sample_capacity / 2;
+    _stride   *= 2;
+    _last_fill = _stride;
 }
 
 /*
- * add_sample:average: — append a smoothed sample; grow the buffer if needed.
+ * add_sample:average: — smooth bps and store it, merging into the last slot
+ * until that slot holds _stride samples; decimates when the buffer is full.
  *
- * Applies an exponential moving average (EMA_ALPHA) to the stored value so the
- * graph line is smooth while _current_bps retains the raw measurement for labels.
- * avg_bps is accepted for API compatibility but not stored.
+ * The stored value is an exponential moving average (ema_alpha) of bps so the
+ * graph is smooth. avg_bps is drawn as the reference line.
  *
  * Inputs:
  *   bps     — raw instantaneous bytes per second
@@ -56,124 +66,68 @@ dealloc
 - (void)
 add_sample:(double)bps average:(double)avg_bps
 {
-    _current_bps = bps;
-    _avg_bps     = avg_bps;
+    _avg_bps = avg_bps;
 
     double smoothed = (_count > 0)
-        ? EMA_ALPHA * _samples[_count - 1] + (1.0 - EMA_ALPHA) * bps
+        ? ema_alpha * _last_smoothed + (1.0 - ema_alpha) * bps
         : bps;
+    _last_smoothed = smoothed;
 
-    if (_count == _capacity) {
-        _capacity *= 2;
-        _samples   = realloc(_samples, _capacity * sizeof(double));
+    if (_count > 0 && _last_fill < _stride) {
+        _samples[_count - 1] = fmax(_samples[_count - 1], smoothed);
+        _last_fill++;
+    } else {
+        if (_count == sample_capacity) [self decimate];
+        _samples[_count++] = smoothed;
+        _last_fill = 1;
     }
-    _samples[_count] = smoothed;
-    _count++;
 
     if (smoothed > _y_max) _y_max = smoothed;
 
     [self setNeedsDisplay:YES];
 }
 
-- (double)current_bps { return _current_bps; }
-
 /*
- * sample_path:count:y_max:plot_w:plot_h:left_margin:bottom_margin: —
- * build an NSBezierPath tracing the top edge of a data series.
+ * draw_speed_area:y_max: — fill the area under the stored samples.
  *
- * All samples are mapped into the available plot width, so the x-axis
- * resolution adjusts automatically as the copy runs.  When the sample
- * count exceeds the pixel width, each output pixel column shows the
- * maximum value in its sample bucket (preserves spikes).
+ * Samples are spread across the plot width. When there are more samples than
+ * pixel columns, each column shows the maximum of its bucket (preserves
+ * spikes). Needs at least two samples; draws nothing otherwise.
  *
  * Inputs:
- *   buf           — linear array of bps values, length ≥ count
- *   count         — number of valid samples
- *   y_max         — value that maps to the top of the plot area
- *   plot_w/plot_h — plot area dimensions in points
- *   left_margin   — left offset of the plot area
- *   bottom_margin — bottom offset of the plot area
- *
- * Output: open path suitable for stroke or for closing to the baseline.
- */
-- (NSBezierPath *)
-sample_path:(double *)buf
-       count:(NSUInteger)count
-       y_max:(double)y_max
-      plot_w:(CGFloat)plot_w
-      plot_h:(CGFloat)plot_h
- left_margin:(CGFloat)left_margin
-bottom_margin:(CGFloat)bottom_margin
-{
-    NSBezierPath *path = [NSBezierPath bezierPath];
-    if (count == 0) return path;
-    if (count == 1) {
-        CGFloat y = bottom_margin + (CGFloat)(_samples[0] / y_max) * plot_h;
-        [path moveToPoint:NSMakePoint(left_margin, y)];
-        [path lineToPoint:NSMakePoint(left_margin + plot_w, y)];
-        return path;
-    }
-
-    NSUInteger n_pts = (NSUInteger)plot_w;  /* one output point per pixel column */
-    if (n_pts < 2) n_pts = 2;
-
-    if (count <= n_pts) {
-        /* Fewer samples than pixels: plot each sample directly. */
-        for (NSUInteger i = 0; i < count; i++) {
-            CGFloat x = left_margin
-                      + (CGFloat)i / (CGFloat)(count - 1) * plot_w;
-            CGFloat y = bottom_margin
-                      + (CGFloat)(buf[i] / y_max) * plot_h;
-            if (i == 0) [path moveToPoint:NSMakePoint(x, y)];
-            else        [path lineToPoint:NSMakePoint(x, y)];
-        }
-    } else {
-        /* More samples than pixels: max-per-bucket downsampling. */
-        for (NSUInteger p = 0; p < n_pts; p++) {
-            NSUInteger s = (NSUInteger)((double)p       * count / n_pts);
-            NSUInteger e = (NSUInteger)((double)(p + 1) * count / n_pts);
-            if (e > count) e = count;
-            double v = 0.0;
-            for (NSUInteger k = s; k < e; k++) {
-                if (buf[k] > v) v = buf[k];
-            }
-            CGFloat x = left_margin
-                      + (CGFloat)p / (CGFloat)(n_pts - 1) * plot_w;
-            CGFloat y = bottom_margin + (CGFloat)(v / y_max) * plot_h;
-            if (p == 0) [path moveToPoint:NSMakePoint(x, y)];
-            else        [path lineToPoint:NSMakePoint(x, y)];
-        }
-    }
-    return path;
-}
-
-/*
- * draw_area_fill:color:count:y_max:plot_w:plot_h:left_margin:bottom_margin: —
- * fill the area under a data series.
- *
- * Inputs:
- *   buf   — linear bps array
- *   color — fill color
- *   remaining args forwarded to sample_path:
+ *   plot  — plot area rectangle in view coordinates
+ *   y_max — value that maps to the top of the plot area
  */
 - (void)
-draw_area_fill:(double *)buf
-          color:(NSColor *)color
-          count:(NSUInteger)count
-          y_max:(double)y_max
-         plot_w:(CGFloat)plot_w
-         plot_h:(CGFloat)plot_h
-    left_margin:(CGFloat)left_margin
-  bottom_margin:(CGFloat)bottom_margin
+draw_speed_area:(NSRect)plot y_max:(double)y_max
 {
-    if (count < 2) return;
-    NSBezierPath *area = [self sample_path:buf count:count y_max:y_max
-                                   plot_w:plot_w plot_h:plot_h
-                               left_margin:left_margin bottom_margin:bottom_margin];
-    [area lineToPoint:NSMakePoint(left_margin + plot_w, bottom_margin)];
-    [area lineToPoint:NSMakePoint(left_margin,           bottom_margin)];
+    if (_count < 2) return;
+
+    CGFloat    left   = NSMinX(plot);
+    CGFloat    bottom = NSMinY(plot);
+    CGFloat    plot_w = NSWidth(plot);
+    CGFloat    plot_h = NSHeight(plot);
+    NSUInteger n_pts  = (NSUInteger)plot_w;  /* one output point per pixel column */
+    if (n_pts < 2) n_pts = 2;
+    if (n_pts > _count) n_pts = _count;
+
+    NSBezierPath *area = [NSBezierPath bezierPath];
+    for (NSUInteger p = 0; p < n_pts; p++) {
+        NSUInteger s = p * _count / n_pts;
+        NSUInteger e = (p + 1) * _count / n_pts;
+        double     v = 0.0;
+        for (NSUInteger k = s; k < e; k++) {
+            if (_samples[k] > v) v = _samples[k];
+        }
+        NSPoint pt = NSMakePoint(left + (CGFloat)p / (CGFloat)(n_pts - 1) * plot_w,
+                                 bottom + (CGFloat)(v / y_max) * plot_h);
+        if (p == 0) [area moveToPoint:pt];
+        else        [area lineToPoint:pt];
+    }
+    [area lineToPoint:NSMakePoint(left + plot_w, bottom)];
+    [area lineToPoint:NSMakePoint(left,          bottom)];
     [area closePath];
-    [color setFill];
+    [[NSColor.systemGreenColor colorWithAlphaComponent:0.25] setFill];
     [area fill];
 }
 
@@ -194,102 +148,81 @@ drawRect:(NSRect)dirty
 
     if (_count == 0) return;
 
-    double y_max   = _y_max * 1.1;
-    double y_floor = 1024.0 * 1024.0;  /* minimum Y scale: 1 MB/s */
-    if (y_max < y_floor) y_max = y_floor;
-
-    CGFloat left_margin   = 52.0;
-    CGFloat bottom_margin = 4.0;
-    CGFloat plot_w = b.size.width  - left_margin - 4.0;
-    CGFloat plot_h = b.size.height - bottom_margin - 4.0;
+    double y_max = _y_max * 1.1;
+    if (y_max < y_floor_bps) y_max = y_floor_bps;
 
     NSDictionary *label_attrs = @{
         NSFontAttributeName:            [NSFont systemFontOfSize:10.0],
         NSForegroundColorAttributeName: NSColor.secondaryLabelColor
     };
 
+    /* The left gutter is sized to the widest Y label (plus label_pad on each
+     * side), so labels never cross the view border whatever the scale. */
+    static const CGFloat label_pad = 4.0;
+    static const double  grid_fracs[] = { 0.25, 0.50, 0.75 };
+    NSString *labels[3];
+    CGFloat   label_w = 0.0;
+    for (int i = 0; i < 3; i++) {
+        labels[i] = files_format_rate(grid_fracs[i] * y_max);
+        label_w   = MAX(label_w, [labels[i] sizeWithAttributes:label_attrs].width);
+    }
+
+    CGFloat left_margin   = ceil(label_w) + 2.0 * label_pad;
+    CGFloat bottom_margin = 4.0;
+    NSRect  plot = NSMakeRect(left_margin, bottom_margin,
+                              b.size.width  - left_margin - 4.0,
+                              b.size.height - bottom_margin - 4.0);
+
     /* ── Y gridlines + labels ──────────────────────────────────────────────── */
 
-    NSArray<NSNumber *> *grid_fracs = @[@0.25, @0.50, @0.75];
     CGFloat dash[2] = {3.0, 3.0};
 
-    for (NSNumber *frac in grid_fracs) {
-        CGFloat f  = frac.doubleValue;
-        CGFloat y  = bottom_margin + f * plot_h;
-        double bps = f * y_max;
+    for (int i = 0; i < 3; i++) {
+        CGFloat y = NSMinY(plot) + (CGFloat)grid_fracs[i] * NSHeight(plot);
 
         NSBezierPath *grid = [NSBezierPath bezierPath];
-        [grid moveToPoint:NSMakePoint(left_margin, y)];
-        [grid lineToPoint:NSMakePoint(left_margin + plot_w, y)];
+        [grid moveToPoint:NSMakePoint(NSMinX(plot), y)];
+        [grid lineToPoint:NSMakePoint(NSMaxX(plot), y)];
         [grid setLineDash:dash count:2 phase:0];
         grid.lineWidth = 0.5;
         [NSColor.separatorColor setStroke];
         [grid stroke];
 
-        NSString *label;
-        if (bps >= 1024.0 * 1024.0 * 1024.0) {
-            label = [NSString stringWithFormat:@"%.1f GB/s",
-                     bps / (1024.0 * 1024.0 * 1024.0)];
-        } else if (bps >= 1024.0 * 1024.0) {
-            label = [NSString stringWithFormat:@"%.0f MB/s",
-                     bps / (1024.0 * 1024.0)];
-        } else {
-            label = [NSString stringWithFormat:@"%.0f KB/s", bps / 1024.0];
-        }
-        NSSize  ls  = [label sizeWithAttributes:label_attrs];
-        NSPoint lpt = NSMakePoint(left_margin - ls.width - 4.0,
-                                  y - ls.height / 2.0);
-        [label drawAtPoint:lpt withAttributes:label_attrs];
+        NSSize ls = [labels[i] sizeWithAttributes:label_attrs];
+        [labels[i] drawAtPoint:NSMakePoint(left_margin - ls.width - label_pad,
+                                           y - ls.height / 2.0)
+                withAttributes:label_attrs];
     }
 
-    /* ── Speed lines ───────────────────────────────────────────────────────── */
+    /* ── Speed area ────────────────────────────────────────────────────────── */
 
-    [self draw_area_fill:_samples
-                  color:[NSColor.systemGreenColor colorWithAlphaComponent:0.25]
-                  count:_count
-                  y_max:y_max
-                 plot_w:plot_w
-                 plot_h:plot_h
-            left_margin:left_margin
-          bottom_margin:bottom_margin];
+    [self draw_speed_area:plot y_max:y_max];
 
     /* ── Average speed reference line + label ────────────────────────────── */
 
     if (_avg_bps > 0.0) {
-        CGFloat y_avg = bottom_margin + (CGFloat)(_avg_bps / y_max) * plot_h;
+        CGFloat y_avg = NSMinY(plot) + (CGFloat)(_avg_bps / y_max) * NSHeight(plot);
 
         NSBezierPath *avg_line = [NSBezierPath bezierPath];
-        [avg_line moveToPoint:NSMakePoint(left_margin,          y_avg)];
-        [avg_line lineToPoint:NSMakePoint(left_margin + plot_w, y_avg)];
+        [avg_line moveToPoint:NSMakePoint(NSMinX(plot), y_avg)];
+        [avg_line lineToPoint:NSMakePoint(NSMaxX(plot), y_avg)];
         avg_line.lineWidth = 1.0;
         [NSColor.secondaryLabelColor setStroke];
         [avg_line stroke];
 
-        NSString *avg_str;
-        if (_avg_bps >= 1024.0 * 1024.0 * 1024.0)
-            avg_str = [NSString stringWithFormat:@"%.1f GB/s",
-                       _avg_bps / (1024.0 * 1024.0 * 1024.0)];
-        else if (_avg_bps >= 1024.0 * 1024.0)
-            avg_str = [NSString stringWithFormat:@"%.1f MB/s",
-                       _avg_bps / (1024.0 * 1024.0)];
-        else
-            avg_str = [NSString stringWithFormat:@"%.0f KB/s",
-                       _avg_bps / 1024.0];
-
+        NSString     *avg_str   = files_format_rate(_avg_bps);
         NSDictionary *avg_attrs = @{
             NSFontAttributeName:            [NSFont systemFontOfSize:9.0],
             NSForegroundColorAttributeName: NSColor.secondaryLabelColor
         };
-        NSSize  asz = [avg_str sizeWithAttributes:avg_attrs];
-        CGFloat ax  = left_margin + plot_w - asz.width - 3.0;
-        CGFloat ay  = y_avg + 2.0;
-        [avg_str drawAtPoint:NSMakePoint(ax, ay) withAttributes:avg_attrs];
+        NSSize asz = [avg_str sizeWithAttributes:avg_attrs];
+        [avg_str drawAtPoint:NSMakePoint(NSMaxX(plot) - asz.width - 3.0, y_avg + 2.0)
+              withAttributes:avg_attrs];
     }
 
     /* ── Plot border ───────────────────────────────────────────────────────── */
 
-    NSBezierPath *border = [NSBezierPath bezierPathWithRect:
-        NSMakeRect(left_margin, bottom_margin, plot_w, plot_h)];
+    NSBezierPath *border = [NSBezierPath bezierPathWithRect:plot];
     border.lineWidth = 0.5;
     [NSColor.separatorColor setStroke];
     [border stroke];

@@ -4,15 +4,26 @@ A minimalist macOS file manager written in Objective-C + AppKit.
 
 ## Features
 
-- List-view file browser with Name, Size, Kind, and Date Modified columns
-- Sidebar with Favorites (Home, Desktop, Downloads, Documents, Applications) and Devices (mounted volumes)
-- Full file operations: Cut, Copy, Paste, Move to Trash, New Folder, Rename
-- Get Info panel with icon, size, permissions, owner/group, dates, and lock status
-- Eject removable volumes from the sidebar
-- FSEvents-based live directory watching
-- Back/forward navigation with path control toolbar
-- Inline search filter
-- Context menu and standard keyboard shortcuts
+- List-view browser with Name, Size, Kind, Permissions and Date Modified
+  columns; click a header to sort (folders first, Finder-style name order)
+- Optional auto-fit columns (View ▸ Auto-Fit Columns)
+- Single- or dual-pane browsing (View ▸ Dual Pane, ⇧⌘2; Tab switches panes)
+- Bookmarks bar (Home, Desktop, Downloads, Documents, Applications, Trash);
+  ⌘D or the ★ button adds the current folder, right-click removes one
+- Collapsible info sidebar with a Quick Look thumbnail and file details
+- Get Info panel: size, dates, owner/group, editable permissions, Locked
+  flag, rename, and optional SHA-256 / MD5 checksums
+- Copy, cut and paste, and drag and drop, with a progress panel (speed graph,
+  transfer log, cancel), Keep Both / Replace prompts, and optional SHA-256
+  verification (View ▸ Validate Copies with SHA-256). Copies use APFS clones
+  when possible and keep extended attributes, tags, ACLs and dates; nothing
+  at the destination is replaced until the new copy is complete
+- Move to Trash, Empty Trash, New Folder, inline rename
+- Spotlight search within the current folder
+- Live updates when the current folder changes
+- Devices menu and an All Mounts panel with per-volume unmount
+- Address bar (accepts `~` and relative paths), back/forward/up, Open in
+  Terminal, show/hide hidden files
 
 ## Prerequisites
 
@@ -43,6 +54,9 @@ Or double-click `files.app` in `~/Applications` after installing.
 | Cut            | ⌘X                 |
 | Paste          | ⌘V                 |
 | Move to Trash  | ⌘⌫                 |
+| Add Bookmark   | ⌘D                 |
+| Open in Terminal | ⌘⇧T              |
+| Dual Pane      | ⌘⇧2                |
 | New Folder     | ⌘⇧N                |
 | Get Info       | ⌘I                 |
 | Select All     | ⌘A                 |

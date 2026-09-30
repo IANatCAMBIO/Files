@@ -2,10 +2,34 @@
 
 NSString * const FilesVolumesChangedNotification = @"FilesVolumesChangedNotification";
 
+/*
+ * volume_keys — the resource keys mounted_volumes prefetches and the other
+ * methods read, defined once.
+ *
+ * Output: NSArray of NSURLResourceKey, never nil.
+ */
+static NSArray<NSURLResourceKey> *
+volume_keys(void)
+{
+    static NSArray<NSURLResourceKey> *keys;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        keys = @[NSURLVolumeLocalizedNameKey,
+                 NSURLVolumeIsRootFileSystemKey,
+                 NSURLVolumeIsInternalKey,
+                 NSURLVolumeIsLocalKey,
+                 NSURLVolumeIsEjectableKey,
+                 NSURLVolumeIsRemovableKey];
+    });
+    return keys;
+}
+
 @implementation FilesVolumeManager
 
 /*
  * shared — returns the singleton, creating it on first call.
+ *
+ * Output: FilesVolumeManager singleton, never nil.
  */
 + (instancetype)
 shared
@@ -19,9 +43,10 @@ shared
 }
 
 /*
- * init_internal — designated initialiser; registers workspace notifications.
+ * init_internal — private initialiser; registers for workspace mount,
+ * unmount and rename notifications.
  *
- * Output: self
+ * Output: self, or nil if [super init] fails.
  */
 - (instancetype)
 init_internal
@@ -31,41 +56,37 @@ init_internal
         return nil;
     }
     NSNotificationCenter *ws_nc = NSWorkspace.sharedWorkspace.notificationCenter;
-    [ws_nc addObserver:self
-              selector:@selector(volumes_changed:)
-                  name:NSWorkspaceDidMountNotification
-                object:nil];
-    [ws_nc addObserver:self
-              selector:@selector(volumes_changed:)
-                  name:NSWorkspaceDidUnmountNotification
-                object:nil];
+    for (NSNotificationName name in @[NSWorkspaceDidMountNotification,
+                                      NSWorkspaceDidUnmountNotification,
+                                      NSWorkspaceDidRenameVolumeNotification]) {
+        [ws_nc addObserver:self
+                  selector:@selector(volumes_changed:)
+                      name:name
+                    object:nil];
+    }
     return self;
 }
 
-- (void)dealloc
-{
-    [NSWorkspace.sharedWorkspace.notificationCenter removeObserver:self];
-}
-
 /*
- * volumes_changed: — called when a volume is mounted or unmounted; posts
- * FilesVolumesChangedNotification on the main queue.
+ * volumes_changed: — workspace notification handler (already delivered on
+ * the main thread); re-posts it as FilesVolumesChangedNotification.
  *
  * Inputs:
- *   note — workspace notification (unused)
+ *   note — workspace mount/unmount/rename notification (unused)
+ *
+ * Output: none.
  */
 - (void)
 volumes_changed:(NSNotification *)note
 {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [NSNotificationCenter.defaultCenter
-            postNotificationName:FilesVolumesChangedNotification
-                          object:self];
-    });
+    [NSNotificationCenter.defaultCenter
+        postNotificationName:FilesVolumesChangedNotification
+                      object:self];
 }
 
 /*
- * mounted_volumes — returns visible mounted volumes.
+ * mounted_volumes — returns visible mounted volumes with volume_keys()
+ * prefetched.
  *
  * Output: NSArray<NSURL *>, never nil.
  */
@@ -74,69 +95,75 @@ mounted_volumes
 {
     NSArray<NSURL *> *vols =
         [NSFileManager.defaultManager
-            mountedVolumeURLsIncludingResourceValuesForKeys:@[]
+            mountedVolumeURLsIncludingResourceValuesForKeys:volume_keys()
             options:NSVolumeEnumerationSkipHiddenVolumes];
     return vols ?: @[];
 }
 
 /*
- * display_name_for_volume: — returns the volume's display name.
+ * display_name_for_volume: — returns the volume's localized (Finder) name.
  *
  * Inputs:
  *   url — volume root URL
  *
- * Output: display name string.
+ * Output: display name string, or the last path component on failure.
  */
 - (NSString *)
 display_name_for_volume:(NSURL *)url
 {
     NSString *name = nil;
-    [url getResourceValue:&name forKey:NSURLVolumeNameKey error:nil];
+    [url getResourceValue:&name forKey:NSURLVolumeLocalizedNameKey error:nil];
     return name ?: url.lastPathComponent;
 }
 
 /*
- * can_eject_volume: — returns YES if volume is ejectable or removable.
+ * can_unmount_volume: — applies the rule documented in volume_manager.h:
+ * not root, and (network or external or ejectable or removable).
  *
  * Inputs:
  *   url — volume root URL
+ *
+ * Output: YES if the volume may be unmounted, NO otherwise (including when
+ *         its resource values cannot be read).
  */
 - (BOOL)
-can_eject_volume:(NSURL *)url
+can_unmount_volume:(NSURL *)url
 {
-    NSNumber *ejectable = nil;
-    NSNumber *removable = nil;
-    [url getResourceValue:&ejectable forKey:NSURLVolumeIsEjectableKey error:nil];
-    [url getResourceValue:&removable forKey:NSURLVolumeIsRemovableKey error:nil];
-    return ejectable.boolValue || removable.boolValue;
+    NSDictionary<NSURLResourceKey, id> *v = [url resourceValuesForKeys:volume_keys()
+                                                                  error:nil];
+    if (!v || [v[NSURLVolumeIsRootFileSystemKey] boolValue]) {
+        return NO;
+    }
+    return ![v[NSURLVolumeIsLocalKey] boolValue]
+        || ![v[NSURLVolumeIsInternalKey] boolValue]
+        || [v[NSURLVolumeIsEjectableKey] boolValue]
+        || [v[NSURLVolumeIsRemovableKey] boolValue];
 }
 
 /*
- * eject_volume:completion: — ejects volume on background queue.
+ * unmount_volume:completion: — unmounts only this volume via NSFileManager
+ * (asynchronous, no thread blocked).
  *
  * Inputs:
  *   url        — volume root URL
- *   completion — called on main queue with nil error on success
+ *   completion — called on the main thread with nil error on success; may be nil
+ *
+ * Output: none (result delivered through completion).
  */
 - (void)
-eject_volume:(NSURL *)url
-  completion:(void (^)(NSError *))completion
+unmount_volume:(NSURL *)url
+    completion:(void (^)(NSError *err))completion
 {
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSError *err = nil;
-        BOOL ok = [NSWorkspace.sharedWorkspace unmountAndEjectDeviceAtURL:url
-                                                                    error:&err];
-        if (!ok && !err) {
-            err = [NSError errorWithDomain:NSCocoaErrorDomain
-                                      code:NSFileWriteUnknownError
-                                  userInfo:@{NSLocalizedDescriptionKey: @"Eject failed"}];
-        }
+    [NSFileManager.defaultManager
+        unmountVolumeAtURL:url
+                   options:0
+         completionHandler:^(NSError *err) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (completion) {
-                completion(ok ? nil : err);
+                completion(err);
             }
         });
-    });
+    }];
 }
 
 @end

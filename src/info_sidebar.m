@@ -1,33 +1,68 @@
 #import "info_sidebar.h"
+#import "util.h"
 #import <QuickLookThumbnailing/QuickLookThumbnailing.h>
 
 /* ── Layout constants (isFlipped = YES: y=0 at top, increases downward) ─── */
-static const CGFloat kPad       = 8.0;
-static const CGFloat kPrevH     = 150.0;   /* thumbnail area height */
-static const CGFloat kRowH      = 18.0;    /* metadata row height */
-static const CGFloat kNameH     = 34.0;    /* name label (up to 2 lines) */
-static const CGFloat kKeyW      = 62.0;    /* key column width */
-static const CGFloat kKeyValGap = 4.0;     /* gap between key and value */
+static const CGFloat pad          = 8.0;
+static const CGFloat prev_h       = 150.0;   /* thumbnail area height */
+static const CGFloat row_h        = 18.0;    /* metadata row height */
+static const CGFloat name_h       = 34.0;    /* name label (up to 2 lines) */
+static const CGFloat key_w        = 62.0;    /* key column width */
+static const CGFloat key_val_gap  = 4.0;     /* gap between key and value */
 
-static const CGFloat kSep1Y     = kPad + kPrevH + 6.0;          /* 164 */
-static const CGFloat kNameY     = kSep1Y + 1.0 + 6.0;           /* 171 */
-static const CGFloat kSep2Y     = kNameY + kNameH + 4.0;        /* 209 */
-static const CGFloat kFirstRowY = kSep2Y + 1.0 + 6.0;           /* 216 */
+static const CGFloat sep1_y       = pad + prev_h + 6.0;           /* 164 */
+static const CGFloat name_y       = sep1_y + 1.0 + 6.0;           /* 171 */
+static const CGFloat sep2_y       = name_y + name_h + 4.0;        /* 209 */
+static const CGFloat first_row_y  = sep2_y + 1.0 + 6.0;           /* 216 */
 
-/* Key strings for each metadata row, in display order. */
-static NSString * const kRowKeys[] = { @"Kind", @"Size", @"Created", @"Modified" };
-static const NSUInteger kRowCount  = 4;
+/* Metadata rows, in display order; indexes row_keys and _row_vals. */
+enum { row_kind, row_size, row_created, row_modified, row_count };
+static NSString * const row_keys[row_count] = {
+    [row_kind]     = @"Kind",
+    [row_size]     = @"Size",
+    [row_created]  = @"Created",
+    [row_modified] = @"Modified",
+};
+
+/*
+ * multi_selection_icon — the image shown for a multi-item selection:
+ * documents.png from the app bundle (copied there by the Makefile), falling
+ * back to the system "multiple documents" image. Loaded from disk once.
+ *
+ * Output: shared NSImage (never nil).
+ */
+static NSImage *
+multi_selection_icon(void)
+{
+    static NSImage *icon;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *path = [NSBundle.mainBundle pathForResource:@"documents" ofType:@"png"];
+        icon = path ? [[NSImage alloc] initWithContentsOfFile:path] : nil;
+        if (!icon) icon = [NSImage imageNamed:NSImageNameMultipleDocuments];
+    });
+    return icon;
+}
 
 @implementation FilesInfoSidebar {
     NSImageView  *_preview_view;
     NSTextField  *_name_label;
-    NSTextField  *_row_vals[4]; /* parallel to kRowKeys */
+    NSTextField  *_row_vals[row_count]; /* parallel to row_keys */
 
-    NSURL                        *_current_url;
     QLThumbnailGenerationRequest *_pending_request;
 }
 
-- (BOOL)isFlipped { return YES; }
+/*
+ * isFlipped — makes the view's coordinate system top-down so the layout
+ * constants read as distances from the top edge.
+ *
+ * Output: YES.
+ */
+- (BOOL)
+isFlipped
+{
+    return YES;
+}
 
 /*
  * initWithFrame: — builds all subviews.
@@ -72,27 +107,27 @@ drawRect:(NSRect)dirty
 build_views
 {
     CGFloat w         = self.bounds.size.width;
-    CGFloat content_w = w - 2.0 * kPad;
-    CGFloat val_x     = kPad + kKeyW + kKeyValGap;
-    CGFloat val_w     = w - val_x - kPad;
+    CGFloat content_w = w - 2.0 * pad;
+    CGFloat val_x     = pad + key_w + key_val_gap;
+    CGFloat val_w     = w - val_x - pad;
 
     /* ── Thumbnail ── */
     _preview_view = [[NSImageView alloc]
-        initWithFrame:NSMakeRect(kPad, kPad, content_w, kPrevH)];
+        initWithFrame:NSMakeRect(pad, pad, content_w, prev_h)];
     _preview_view.imageScaling   = NSImageScaleProportionallyUpOrDown;
     _preview_view.imageAlignment = NSImageAlignCenter;
     _preview_view.autoresizingMask = NSViewWidthSizable;
     [self addSubview:_preview_view];
 
     /* ── Separator 1 ── */
-    NSBox *sep1      = [[NSBox alloc] initWithFrame:NSMakeRect(0, kSep1Y, w, 1)];
+    NSBox *sep1      = [[NSBox alloc] initWithFrame:NSMakeRect(0, sep1_y, w, 1)];
     sep1.boxType     = NSBoxSeparator;
     sep1.autoresizingMask = NSViewWidthSizable;
     [self addSubview:sep1];
 
     /* ── Name label ── */
     _name_label = [NSTextField labelWithString:@""];
-    _name_label.frame                = NSMakeRect(kPad, kNameY, content_w, kNameH);
+    _name_label.frame                = NSMakeRect(pad, name_y, content_w, name_h);
     _name_label.alignment            = NSTextAlignmentCenter;
     _name_label.font                 = [NSFont boldSystemFontOfSize:12.0];
     _name_label.lineBreakMode        = NSLineBreakByTruncatingMiddle;
@@ -101,18 +136,18 @@ build_views
     [self addSubview:_name_label];
 
     /* ── Separator 2 ── */
-    NSBox *sep2      = [[NSBox alloc] initWithFrame:NSMakeRect(0, kSep2Y, w, 1)];
+    NSBox *sep2      = [[NSBox alloc] initWithFrame:NSMakeRect(0, sep2_y, w, 1)];
     sep2.boxType     = NSBoxSeparator;
     sep2.autoresizingMask = NSViewWidthSizable;
     [self addSubview:sep2];
 
     /* ── Metadata rows ── */
-    for (NSUInteger i = 0; i < kRowCount; i++) {
-        CGFloat y = kFirstRowY + i * kRowH;
+    for (NSUInteger i = 0; i < row_count; i++) {
+        CGFloat y = first_row_y + i * row_h;
 
         NSTextField *key_lbl = [NSTextField labelWithString:
-            [kRowKeys[i] stringByAppendingString:@":"]];
-        key_lbl.frame             = NSMakeRect(kPad, y, kKeyW, kRowH);
+            [row_keys[i] stringByAppendingString:@":"]];
+        key_lbl.frame             = NSMakeRect(pad, y, key_w, row_h);
         key_lbl.alignment         = NSTextAlignmentRight;
         key_lbl.font              = [NSFont systemFontOfSize:10.0];
         key_lbl.textColor         = NSColor.secondaryLabelColor;
@@ -120,8 +155,9 @@ build_views
         [self addSubview:key_lbl];
 
         _row_vals[i] = [NSTextField labelWithString:@"—"];
-        _row_vals[i].frame            = NSMakeRect(val_x, y, val_w, kRowH);
+        _row_vals[i].frame            = NSMakeRect(val_x, y, val_w, row_h);
         _row_vals[i].font             = [NSFont systemFontOfSize:11.0];
+        _row_vals[i].lineBreakMode    = NSLineBreakByTruncatingTail;
         _row_vals[i].autoresizingMask = NSViewWidthSizable;
         [self addSubview:_row_vals[i]];
     }
@@ -130,7 +166,8 @@ build_views
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 
 /*
- * cancel_pending — cancels any in-flight QL thumbnail request.
+ * cancel_pending — cancels any in-flight QL thumbnail request. A completion
+ * that still arrives afterwards fails the identity check in show_url:.
  */
 - (void)
 cancel_pending
@@ -142,41 +179,37 @@ cancel_pending
 }
 
 /*
- * format_size: — formats a byte count as a human-readable string.
+ * request_thumbnail: — asks Quick Look for a thumbnail of url sized to the
+ * preview view (in points, at the window's backing scale) and shows it when
+ * it arrives, unless a newer request or clear/cancel has superseded it.
  *
  * Inputs:
- *   bytes — byte count
- *
- * Output: formatted string, e.g. "128 KB"
+ *   url — item to thumbnail
  */
-- (NSString *)
-format_size:(int64_t)bytes
+- (void)
+request_thumbnail:(NSURL *)url
 {
-    NSByteCountFormatter *fmt = [[NSByteCountFormatter alloc] init];
-    fmt.countStyle = NSByteCountFormatterCountStyleFile;
-    return [fmt stringFromByteCount:bytes];
-}
+    CGFloat scale = self.window.backingScaleFactor;
+    if (scale <= 0) scale = 2.0;
 
-/*
- * format_date: — formats an NSDate in medium date + short time style.
- *
- * Inputs:
- *   date — date to format, or nil
- *
- * Output: formatted string, or em-dash on nil.
- */
-- (NSString *)
-format_date:(NSDate *)date
-{
-    if (!date) return @"—";
-    static NSDateFormatter *fmt;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        fmt = [[NSDateFormatter alloc] init];
-        fmt.dateStyle = NSDateFormatterMediumStyle;
-        fmt.timeStyle = NSDateFormatterShortStyle;
-    });
-    return [fmt stringFromDate:date];
+    QLThumbnailGenerationRequest *req = [[QLThumbnailGenerationRequest alloc]
+        initWithFileAtURL:url
+                     size:_preview_view.bounds.size
+                    scale:scale
+      representationTypes:QLThumbnailGenerationRequestRepresentationTypeThumbnail];
+    _pending_request = req;
+
+    __weak FilesInfoSidebar *ws = self;
+    [QLThumbnailGenerator.sharedGenerator
+        generateBestRepresentationForRequest:req
+        completionHandler:^(QLThumbnailRepresentation *rep, NSError *err) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                FilesInfoSidebar *s = ws;
+                if (!s || s->_pending_request != req) return;
+                s->_pending_request = nil;
+                if (rep) s->_preview_view.image = rep.NSImage;
+            });
+        }];
 }
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
@@ -193,65 +226,38 @@ format_date:(NSDate *)date
 show_url:(NSURL *)url
 {
     [self cancel_pending];
-    _current_url = url;
 
-    /* ── Metadata (kernel-cached reads) ── */
-    NSString *name = nil;
-    [url getResourceValue:&name forKey:NSURLNameKey error:nil];
-    _name_label.stringValue = name ?: url.lastPathComponent ?: @"";
+    NSDictionary<NSURLResourceKey, id> *res =
+        [url resourceValuesForKeys:@[
+            NSURLNameKey, NSURLLocalizedTypeDescriptionKey, NSURLIsDirectoryKey,
+            NSURLFileSizeKey, NSURLCreationDateKey, NSURLContentModificationDateKey,
+        ] error:nil];
 
-    NSString *kind = nil;
-    [url getResourceValue:&kind forKey:NSURLLocalizedTypeDescriptionKey error:nil];
-    _row_vals[0].stringValue = kind ?: @"—";
+    _name_label.stringValue = res[NSURLNameKey] ?: url.lastPathComponent ?: @"";
+    _row_vals[row_kind].stringValue = res[NSURLLocalizedTypeDescriptionKey] ?: @"—";
 
-    NSNumber *is_dir = nil;
-    [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
-    if (is_dir.boolValue) {
-        _row_vals[1].stringValue = @"—";
-    } else {
-        NSNumber *sz = nil;
-        [url getResourceValue:&sz forKey:NSURLFileSizeKey error:nil];
-        _row_vals[1].stringValue = sz ? [self format_size:sz.longLongValue] : @"—";
-    }
+    NSNumber *sz = res[NSURLFileSizeKey];
+    _row_vals[row_size].stringValue = ([res[NSURLIsDirectoryKey] boolValue] || !sz)
+                                      ? @"—" : files_format_bytes(sz.longLongValue);
+    _row_vals[row_size].toolTip = nil;
 
-    NSDate *created = nil;
-    [url getResourceValue:&created forKey:NSURLCreationDateKey error:nil];
-    _row_vals[2].stringValue = [self format_date:created];
-
-    NSDate *modified = nil;
-    [url getResourceValue:&modified forKey:NSURLContentModificationDateKey error:nil];
-    _row_vals[3].stringValue = [self format_date:modified];
+    _row_vals[row_created].stringValue =
+        files_format_date(res[NSURLCreationDateKey], NSDateFormatterMediumStyle);
+    _row_vals[row_modified].stringValue =
+        files_format_date(res[NSURLContentModificationDateKey], NSDateFormatterMediumStyle);
 
     /* ── Immediate placeholder icon, then async QL thumbnail ── */
     NSImage *icon = [NSWorkspace.sharedWorkspace iconForFile:url.path];
     icon.size = NSMakeSize(128, 128);
     _preview_view.image = icon;
-
-    CGFloat scale = NSScreen.mainScreen.backingScaleFactor;
-    CGSize  sz    = CGSizeMake(_preview_view.bounds.size.width * scale,
-                               _preview_view.bounds.size.height * scale);
-    _pending_request = [[QLThumbnailGenerationRequest alloc]
-        initWithFileAtURL:url
-                     size:sz
-                    scale:scale
-      representationTypes:QLThumbnailGenerationRequestRepresentationTypeThumbnail];
-
-    __weak FilesInfoSidebar *ws = self;
-    [QLThumbnailGenerator.sharedGenerator
-        generateBestRepresentationForRequest:_pending_request
-        completionHandler:^(QLThumbnailRepresentation *rep, NSError *err) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                FilesInfoSidebar *s = ws;
-                if (!s || ![s->_current_url isEqual:url] || !rep) return;
-                s->_preview_view.image  = rep.NSImage;
-                s->_pending_request     = nil;
-            });
-        }];
+    [self request_thumbnail:url];
 }
 
 /*
  * show_urls: — shows aggregate info for a multi-item selection: item count
- * and combined file size. Directories are excluded from the size total.
+ * and the combined size of the selected files. Folder contents are not
+ * walked; when folders are selected the size is marked "excl. folders", and
+ * is "—" if only folders are selected.
  *
  * Inputs:
  *   urls — selected URLs (count > 1)
@@ -260,49 +266,54 @@ show_url:(NSURL *)url
 show_urls:(NSArray<NSURL *> *)urls
 {
     [self cancel_pending];
-    _current_url = nil;
 
-    /* Load documents.png from the app bundle (copied there by the Makefile). */
-    NSString *img_path = [NSBundle.mainBundle pathForResource:@"documents" ofType:@"png"];
-    NSImage  *multi_icon = img_path ? [[NSImage alloc] initWithContentsOfFile:img_path] : nil;
-    if (!multi_icon) {
-        multi_icon = [NSImage imageNamed:NSImageNameMultipleDocuments];
-    }
-    _preview_view.image = multi_icon;
-
-    NSUInteger count = urls.count;
+    _preview_view.image = multi_selection_icon();
     _name_label.stringValue  = [NSString stringWithFormat:@"%lu items selected",
-                                 (unsigned long)count];
-    _row_vals[0].stringValue = @"—"; /* Kind */
-    _row_vals[2].stringValue = @"—"; /* Created */
-    _row_vals[3].stringValue = @"—"; /* Modified */
+                                 (unsigned long)urls.count];
+    _row_vals[row_kind].stringValue     = @"—";
+    _row_vals[row_created].stringValue  = @"—";
+    _row_vals[row_modified].stringValue = @"—";
 
-    /* Sum file sizes; skip directories. */
-    int64_t total    = 0;
-    BOOL    has_dirs = NO;
+    NSArray<NSURLResourceKey> *keys = @[NSURLIsDirectoryKey, NSURLFileSizeKey];
+    int64_t    total    = 0;
+    NSUInteger n_files  = 0;
+    BOOL       has_dirs = NO;
     for (NSURL *u in urls) {
-        NSNumber *is_dir = nil;
-        [u getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
-        if (is_dir.boolValue) { has_dirs = YES; continue; }
-        NSNumber *sz = nil;
-        [u getResourceValue:&sz forKey:NSURLFileSizeKey error:nil];
-        total += sz.longLongValue;
+        NSDictionary<NSURLResourceKey, id> *res = [u resourceValuesForKeys:keys error:nil];
+        if ([res[NSURLIsDirectoryKey] boolValue]) {
+            has_dirs = YES;
+            continue;
+        }
+        total += [res[NSURLFileSizeKey] longLongValue];
+        n_files++;
     }
-    _row_vals[1].stringValue = has_dirs ? @"—" : [self format_size:total];
+
+    NSTextField *size_field = _row_vals[row_size];
+    if (n_files == 0) {
+        size_field.stringValue = @"—";
+    } else if (has_dirs) {
+        size_field.stringValue = [NSString stringWithFormat:@"%@ (excl. folders)",
+                                  files_format_bytes(total)];
+    } else {
+        size_field.stringValue = files_format_bytes(total);
+    }
+    size_field.toolTip = has_dirs ? @"Folder contents are not counted in the total." : nil;
 }
 
 /*
- * clear — resets to empty state when no item is selected.
+ * clear — resets to empty state when no item is selected (or the sidebar is
+ * collapsed): cancels any in-flight Quick Look request and drops the
+ * thumbnail image so it is not kept in memory.
  */
 - (void)
 clear
 {
     [self cancel_pending];
-    _current_url        = nil;
     _preview_view.image = nil;
     _name_label.stringValue = @"";
-    for (NSUInteger i = 0; i < kRowCount; i++) {
+    for (NSUInteger i = 0; i < row_count; i++) {
         _row_vals[i].stringValue = @"—";
+        _row_vals[i].toolTip     = nil;
     }
 }
 

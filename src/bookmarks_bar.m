@@ -1,23 +1,18 @@
 #import "bookmarks_bar.h"
+#import "util.h"
 
-static NSString * const kBookmarksDefaultsKey = @"files.bookmarks";
-static const CGFloat kBtnGap     = 4.0;
-static const CGFloat kBtnPadLeft = 4.0;
-static const CGFloat kStarBtnW   = 26.0;
-static const CGFloat kStarBtnGap = 3.0;
+static NSString * const bookmarks_defaults_key = @"files.bookmarks";
+static const CGFloat btn_gap     = 4.0;
+static const CGFloat btn_pad_left = 4.0;
+static const CGFloat star_btn_w   = 26.0;
+static const CGFloat star_btn_gap = 3.0;
 
 @implementation FilesBookmarksBar {
     NSMutableArray<NSURL *> *_bookmarks;
     NSScrollView            *_scroll_view;
     NSView                  *_btn_container;
     NSButton                *_star_button;
-    NSButton                *_trash_btn;   /* weak ref into _btn_container; nil if no Trash bookmark */
-}
-
-- (instancetype)initWithCoder:(NSCoder *)coder
-{
-    (void)coder;
-    return [self init_with_frame:NSZeroRect];
+    NSButton                *_trash_btn;   /* the Trash bookmark's button (in _btn_container); nil if none */
 }
 
 /*
@@ -44,16 +39,15 @@ init_with_frame:(NSRect)frame
 
 /*
  * load_bookmarks — fills _bookmarks from NSUserDefaults, or initialises
- * defaults (Home, Desktop, Downloads, Documents, Applications).
+ * defaults (Home, Desktop, Downloads, Documents, Applications, Trash).
  */
 - (void)
 load_bookmarks
 {
-    NSString *home      = NSHomeDirectory();
-    NSString *trash_path = [home stringByAppendingPathComponent:@".Trash"];
+    NSString *trash_path = files_directory_url(NSTrashDirectory).path;
 
     NSArray<NSString *> *saved =
-        [NSUserDefaults.standardUserDefaults arrayForKey:kBookmarksDefaultsKey];
+        [NSUserDefaults.standardUserDefaults arrayForKey:bookmarks_defaults_key];
     if (saved.count > 0) {
         _bookmarks = [NSMutableArray array];
         for (NSString *path in saved) {
@@ -72,12 +66,12 @@ load_bookmarks
     }
 
     _bookmarks = [@[
-        [NSURL fileURLWithPath:home],
-        [NSURL fileURLWithPath:[home stringByAppendingPathComponent:@"Desktop"]],
-        [NSURL fileURLWithPath:[home stringByAppendingPathComponent:@"Downloads"]],
-        [NSURL fileURLWithPath:[home stringByAppendingPathComponent:@"Documents"]],
-        [NSURL fileURLWithPath:@"/Applications"],
-        [NSURL fileURLWithPath:trash_path],
+        files_home_url(),
+        files_directory_url(NSDesktopDirectory),
+        files_directory_url(NSDownloadsDirectory),
+        files_directory_url(NSDocumentDirectory),
+        files_directory_url(NSApplicationDirectory),
+        files_directory_url(NSTrashDirectory),
     ] mutableCopy];
 }
 
@@ -91,7 +85,7 @@ persist_bookmarks
     for (NSURL *url in _bookmarks) {
         [paths addObject:url.path];
     }
-    [NSUserDefaults.standardUserDefaults setObject:paths forKey:kBookmarksDefaultsKey];
+    [NSUserDefaults.standardUserDefaults setObject:paths forKey:bookmarks_defaults_key];
 }
 
 /*
@@ -112,9 +106,9 @@ setup_star_button
     _star_button.target     = nil;   /* send up the responder chain */
     _star_button.action     = @selector(add_bookmark_action:);
     _star_button.toolTip    = @"Add Current Folder to Bookmarks";
-    _star_button.frame      = NSMakeRect(kBtnPadLeft,
+    _star_button.frame      = NSMakeRect(btn_pad_left,
                                          (bar_h - btn_h) / 2.0,
-                                         kStarBtnW, btn_h);
+                                         star_btn_w, btn_h);
     _star_button.autoresizingMask = NSViewMaxXMargin;
     [self addSubview:_star_button];
 }
@@ -127,7 +121,7 @@ setup_star_button
 - (void)
 setup_scroll_view
 {
-    CGFloat offset = kBtnPadLeft + kStarBtnW + kStarBtnGap;
+    CGFloat offset = btn_pad_left + star_btn_w + star_btn_gap;
     CGFloat bar_w  = self.bounds.size.width;
     CGFloat bar_h  = self.bounds.size.height;
 
@@ -135,7 +129,6 @@ setup_scroll_view
                        NSMakeRect(offset, 0, bar_w - offset, bar_h)];
     _scroll_view.hasVerticalScroller   = NO;
     _scroll_view.hasHorizontalScroller = NO;
-    _scroll_view.autohidesScrollers    = YES;
     _scroll_view.drawsBackground       = NO;
     _scroll_view.autoresizingMask      = NSViewWidthSizable | NSViewHeightSizable;
     [self addSubview:_scroll_view];
@@ -155,21 +148,22 @@ rebuild_buttons
                          NSMakeRect(0, 0, self.bounds.size.width, bar_h)];
 
     _trash_btn = nil;
-    CGFloat x = kBtnPadLeft;
+    CGFloat x = btn_pad_left;
     for (NSUInteger i = 0; i < _bookmarks.count; i++) {
         NSURL *url = _bookmarks[i];
 
+        BOOL is_trash = files_same_path(url, files_directory_url(NSTrashDirectory));
         NSString *name;
-        if ([url.path isEqualToString:NSHomeDirectory()]) {
+        if (files_same_path(url, files_home_url())) {
             name = @"Home";
-        } else if ([url.lastPathComponent isEqualToString:@".Trash"]) {
+        } else if (is_trash) {
             name = @"Trash";
         } else {
             name = url.lastPathComponent;
         }
 
         NSImage *icon;
-        if ([url.lastPathComponent isEqualToString:@".Trash"]) {
+        if (is_trash) {
             icon = [NSImage imageNamed:NSImageNameTrashEmpty];
         } else {
             icon = [NSWorkspace.sharedWorkspace iconForFile:url.path]
@@ -206,9 +200,9 @@ rebuild_buttons
         r.origin      = NSMakePoint(x, (bar_h - r.size.height) / 2.0);
         btn.frame     = r;
 
-        if ([url.lastPathComponent isEqualToString:@".Trash"]) _trash_btn = btn;
+        if (is_trash) _trash_btn = btn;
         [_btn_container addSubview:btn];
-        x += r.size.width + kBtnGap;
+        x += r.size.width + btn_gap;
     }
     [self update_trash_icon];
 
@@ -229,12 +223,13 @@ rebuild_buttons
 update_trash_icon
 {
     if (!_trash_btn) return;
-    NSString *trash_path =
-        [NSHomeDirectory() stringByAppendingPathComponent:@".Trash"];
+    NSURL *trash = files_directory_url(NSTrashDirectory);
     __weak NSButton *btn = _trash_btn;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        /* Ignore .DS_Store and other hidden files, as Finder does. */
         NSArray *items = [NSFileManager.defaultManager
-            contentsOfDirectoryAtPath:trash_path error:nil];
+            contentsOfDirectoryAtURL:trash includingPropertiesForKeys:nil
+                             options:NSDirectoryEnumerationSkipsHiddenFiles error:nil];
         BOOL has_items = items.count > 0;
         dispatch_async(dispatch_get_main_queue(), ^{
             NSButton *b = btn;
@@ -290,7 +285,7 @@ remove_bookmark_clicked:(NSMenuItem *)sender
 add_bookmark:(NSURL *)url
 {
     for (NSURL *existing in _bookmarks) {
-        if ([existing.path isEqualToString:url.path]) return;
+        if (files_same_path(existing, url)) return;
     }
     [_bookmarks addObject:url];
     [self persist_bookmarks];
@@ -306,7 +301,6 @@ add_bookmark:(NSURL *)url
 - (void)
 drawRect:(NSRect)dirty
 {
-    [super drawRect:dirty];
     [NSColor.separatorColor setStroke];
     NSBezierPath *line = [NSBezierPath bezierPath];
     [line moveToPoint:NSMakePoint(0, 0.5)];

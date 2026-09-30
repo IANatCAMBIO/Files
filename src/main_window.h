@@ -3,8 +3,11 @@
 @class FilesBrowserPane;
 
 /*
- * FilesMainWindow — NSWindowController that owns the main application window.
- * Contains the toolbar, bookmarks bar, and one or two browser panes.
+ * FilesMainWindow — NSWindowController that owns the main application window:
+ * toolbar, bookmarks bar, one or two browser panes, the collapsible info
+ * sidebar and the status bar. It sits in the responder chain behind the
+ * panes and implements the Go-menu, toolbar and view-preference actions,
+ * which apply to the active pane (or to every pane for preferences).
  */
 @interface FilesMainWindow : NSWindowController
 
@@ -14,6 +17,8 @@
  * Output: self or nil on failure.
  */
 - (instancetype)init NS_DESIGNATED_INITIALIZER;
+- (instancetype)initWithWindow:(NSWindow *)window NS_UNAVAILABLE;
+- (instancetype)initWithCoder:(NSCoder *)coder NS_UNAVAILABLE;
 
 /*
  * active_pane — returns the currently active browser pane.
@@ -21,21 +26,5 @@
  * Output: FilesBrowserPane (never nil).
  */
 - (FilesBrowserPane *)active_pane;
-
-/*
- * toggle_dual_pane: — switches between single-pane and dual-pane layouts.
- *
- * Inputs:
- *   sender — menu item or toolbar button
- */
-- (IBAction)toggle_dual_pane:(id)sender;
-
-/*
- * open_terminal_clicked: — opens Terminal.app at the active pane's directory.
- *
- * Inputs:
- *   sender — toolbar button or menu item
- */
-- (IBAction)open_terminal_clicked:(id)sender;
 
 @end

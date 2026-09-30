@@ -4,128 +4,128 @@
 #import "browser_view.h"
 #import "info_panel.h"
 #import "info_sidebar.h"
+#import "util.h"
 
 /* Toolbar item identifiers */
-static NSString * const kToolbarBack         = @"files.back";
-static NSString * const kToolbarForward      = @"files.forward";
-static NSString * const kToolbarUp           = @"files.up";
-static NSString * const kToolbarReload       = @"files.reload";
-static NSString * const kToolbarHiddenFiles  = @"files.hidden-files";
-static NSString * const kToolbarPath         = @"files.path";
-static NSString * const kToolbarSearch       = @"files.search";
-static NSString * const kToolbarOpenTerminal = @"files.open-terminal";
-static NSString * const kToolbarDualPane     = @"files.dual-pane";
-static NSString * const kToolbarSidebar      = @"files.sidebar";
+static NSString * const tb_back          = @"files.back";
+static NSString * const tb_forward       = @"files.forward";
+static NSString * const tb_up            = @"files.up";
+static NSString * const tb_reload        = @"files.reload";
+static NSString * const tb_hidden_files  = @"files.hidden-files";
+static NSString * const tb_path          = @"files.path";
+static NSString * const tb_search        = @"files.search";
+static NSString * const tb_open_terminal = @"files.open-terminal";
+static NSString * const tb_dual_pane     = @"files.dual-pane";
+static NSString * const tb_sidebar       = @"files.sidebar";
 
-static const CGFloat kBookmarksBarH = 28.0;
-static const CGFloat kSidebarW      = 180.0;
-static const CGFloat kStatusH       = 20.0;
+static const CGFloat bookmarks_bar_h = 28.0;
+static const CGFloat status_h        = 20.0;
+static const CGFloat sidebar_w       = 180.0;  /* initial info sidebar width */
+static const CGFloat sidebar_min_w   = 140.0;
+static const CGFloat browser_min_w   = 400.0;
 
-@interface FilesMainWindow ()
-    <NSToolbarDelegate, NSSplitViewDelegate>
+/* KVO context for the window's firstResponder (dual-pane focus tracking). */
+static void *first_responder_ctx = &first_responder_ctx;
 
-/* Toolbar controls */
-@property (nonatomic, strong) NSButton      *back_button;
-@property (nonatomic, strong) NSButton      *forward_button;
-@property (nonatomic, strong) NSButton      *up_button;
-@property (nonatomic, strong) NSTextField   *address_bar;
-@property (nonatomic, strong) NSSearchField *search_field;
-@property (nonatomic, strong) NSButton      *dual_pane_btn;
+@interface FilesMainWindow () <NSToolbarDelegate, NSToolbarItemValidation>
+
+/* Toolbar views */
+@property (nonatomic, strong) NSTextField *address_bar;
 
 /* Layout */
-@property (nonatomic, strong) NSView            *browser_container; /* holds pane(s) */
-@property (nonatomic, strong) FilesBookmarksBar *bookmarks_bar;
+@property (nonatomic, strong) FilesBookmarksBar     *bookmarks_bar;
+@property (nonatomic, strong) NSSplitView           *pane_split;   /* holds 1 or 2 panes */
+@property (nonatomic, strong) NSSplitViewController *content_split_vc;
+@property (nonatomic, strong) NSSplitViewItem       *sidebar_item;
+@property (nonatomic, strong) FilesInfoSidebar      *info_sidebar;
 
 /* Panes */
 @property (nonatomic, strong) FilesBrowserPane *primary_pane;
 @property (nonatomic, strong) FilesBrowserPane *secondary_pane;    /* nil = single-pane */
-@property (nonatomic, strong) NSSplitView      *pane_split;        /* permanent; secondary_pane nil = single-pane */
 @property (nonatomic)         NSInteger         active_pane_index; /* 0 or 1 */
-@property (nonatomic)         BOOL              observing_responder;
 
-/* Sidebar */
-@property (nonatomic, strong) NSSplitView      *content_split;
-@property (nonatomic, strong) FilesInfoSidebar *info_sidebar;
-
-/* Status bar (full-width, below split) */
+/* Status bar (full-width, below the split) and floating Empty Trash button */
 @property (nonatomic, strong) NSTextField *status_label;
-@property (nonatomic, strong) NSButton    *status_trash_btn;
+@property (nonatomic, strong) NSButton    *empty_trash_btn;
 
 @end
 
-@implementation FilesMainWindow {
-    /* YES while the sidebar collapse setPosition: call is in flight.
-     * Keeps shouldHideDividerAtIndex: returning NO so the divider is still
-     * "live" and setPosition: is not a no-op. */
-    BOOL _collapsing_sidebar;
-
-    /* YES between entry and the next run-loop iteration after toggle_dual_pane:
-     * completes.  NSButtonTypePushOnPushOff fires the action more than once per
-     * physical click (once on mouse-down, once on mouse-up) via the AppKit
-     * tracking loop; the async clear blocks both re-entrant and sequential
-     * double-fires. */
-    BOOL _in_toggle_dual;
-}
-
-- (instancetype)initWithCoder:(NSCoder *)c { (void)c; return [self init]; }
+@implementation FilesMainWindow
 
 /*
- * init — builds window, toolbar, split view, sidebar, and primary browser pane.
+ * init — builds the window, toolbar, layout and primary browser pane, then
+ * shows the home folder. The window frame is restored from the previous
+ * session when one was saved; otherwise the window is centered.
  *
  * Output: self or nil.
  */
 - (instancetype)
 init
 {
-    NSRect frame = NSMakeRect(0, 0, 940, 620);
     NSWindowStyleMask style =
         NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
         NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable;
-
-    NSWindow *win = [[NSWindow alloc] initWithContentRect:frame
-                                               styleMask:style
-                                                 backing:NSBackingStoreBuffered
-                                                   defer:NO];
-    win.title             = @"Files";
-    win.minSize           = NSMakeSize(700, 450);
-    win.restorable        = YES;
+    NSWindow *win = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 940, 620)
+                                                styleMask:style
+                                                  backing:NSBackingStoreBuffered
+                                                    defer:NO];
+    win.title        = @"Files";
+    win.minSize      = NSMakeSize(700, 450);
+    win.toolbarStyle = NSWindowToolbarStyleExpanded;  /* titlebar above toolbar */
+    if (![win setFrameUsingName:@"FilesMainWindow"]) [win center];
     win.frameAutosaveName = @"FilesMainWindow";
-    /* Separate titlebar above the toolbar (traditional appearance). */
-    if (@available(macOS 11.0, *)) {
-        win.toolbarStyle = NSWindowToolbarStyleExpanded;
-    }
-    [win center];
 
     self = [super initWithWindow:win];
     if (!self) return nil;
 
     [self build_toolbar];
     [self build_layout];
-    [self wire_up];
+    [self.window addObserver:self forKeyPath:@"firstResponder"
+                     options:0 context:first_responder_ctx];
 
+    __weak FilesMainWindow *ws = self;
+    self.bookmarks_bar.selection_handler = ^(NSURL *url) {
+        [[ws active_browser] navigate_to:url];
+    };
+    [self.primary_pane.browser navigate_to:files_home_url()];
+
+    /* Deferred so it runs after the window's initial first-responder pass. */
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self.window makeFirstResponder:self.address_bar];
+    });
     return self;
+}
+
+/*
+ * dealloc — removes the firstResponder observer added in init.
+ */
+- (void)
+dealloc
+{
+    [self.window removeObserver:self forKeyPath:@"firstResponder" context:first_responder_ctx];
 }
 
 /* ── Layout ──────────────────────────────────────────────────────────────── */
 
 /*
- * build_toolbar — creates and attaches the NSToolbar.
+ * build_toolbar — creates and attaches the NSToolbar (items come from the
+ * NSToolbarDelegate methods below).
  */
 - (void)
 build_toolbar
 {
-    NSToolbar *tb    = [[NSToolbar alloc] initWithIdentifier:@"files.toolbar"];
-    tb.delegate      = self;
+    NSToolbar *tb = [[NSToolbar alloc] initWithIdentifier:@"files.toolbar"];
+    tb.delegate                = self;
     tb.allowsUserCustomization = NO;
-    tb.displayMode   = NSToolbarDisplayModeIconOnly;
-    self.window.toolbar = tb;
+    tb.displayMode             = NSToolbarDisplayModeIconOnly;
+    self.window.toolbar        = tb;
 }
 
 /*
- * build_layout — creates the bookmarks bar and an autoresizing 'area' view
- * below it. Inside area, an NSSplitView holds the browser_container (left)
- * and info_sidebar (right). The sidebar is collapsed after the first layout
- * pass so the browser fills the full width on launch.
+ * build_layout — bookmarks bar on top; below it the status bar and an
+ * NSSplitViewController whose left item holds the browser pane(s) and whose
+ * right item is the collapsible info sidebar (collapsed at launch). The
+ * split view controller manages collapsing, minimum widths and the divider.
  */
 - (void)
 build_layout
@@ -134,27 +134,19 @@ build_layout
     CGFloat w = content.bounds.size.width;
     CGFloat h = content.bounds.size.height;
 
-    /* Bookmarks bar — 28pt at the very top of the content view. */
     self.bookmarks_bar = [[FilesBookmarksBar alloc]
-        init_with_frame:NSMakeRect(0, h - kBookmarksBarH, w, kBookmarksBarH)];
+        init_with_frame:NSMakeRect(0, h - bookmarks_bar_h, w, bookmarks_bar_h)];
     self.bookmarks_bar.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
     [content addSubview:self.bookmarks_bar];
 
-    /* 'area' fills the content view below the bookmarks bar using only
-     * autoresizing — the content view's child list stays frame-based only. */
-    NSView *area = [[NSView alloc]
-        initWithFrame:NSMakeRect(0, 0, w, h - kBookmarksBarH)];
+    NSView *area = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, w, h - bookmarks_bar_h)];
     area.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     [content addSubview:area];
 
-    /* Full-width status bar at the very bottom of area. */
-    NSView *status_container = [[NSView alloc]
-        initWithFrame:NSMakeRect(0, 0, w, kStatusH)];
+    /* Status bar and its separator at the bottom of area. */
+    NSView *status_container = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, w, status_h)];
     status_container.autoresizingMask = NSViewWidthSizable | NSViewMaxYMargin;
     [area addSubview:status_container];
-
-    /* Floating Empty Trash button — icon-only circle, lower-right of area.
-     * Added to area (not status_container) so it overlays the browser. */
 
     self.status_label = [NSTextField labelWithString:@""];
     self.status_label.translatesAutoresizingMaskIntoConstraints = NO;
@@ -169,87 +161,78 @@ build_layout
                                                          constant:-8.0],
     ]];
 
-    /* 1pt separator above the status bar. */
-    NSBox *status_sep = [[NSBox alloc]
-        initWithFrame:NSMakeRect(0, kStatusH, w, 1)];
+    NSBox *status_sep = [[NSBox alloc] initWithFrame:NSMakeRect(0, status_h, w, 1)];
     status_sep.boxType          = NSBoxSeparator;
     status_sep.autoresizingMask = NSViewWidthSizable | NSViewMaxYMargin;
     [area addSubview:status_sep];
 
-    /* NSSplitView sits above the status bar. Left subview = browser, right = sidebar. */
-    CGFloat split_h = area.bounds.size.height - kStatusH - 1.0;
-    self.content_split = [[NSSplitView alloc]
-        initWithFrame:NSMakeRect(0, kStatusH + 1.0, w, split_h)];
-    self.content_split.vertical     = YES;
-    self.content_split.dividerStyle = NSSplitViewDividerStyleThin;
-    self.content_split.delegate     = self;
-    self.content_split.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    [area addSubview:self.content_split];
+    /* Browser side: pane_split permanently owns the pane(s); single-pane mode
+     * is pane_split with one child, so primary_pane is never reparented. */
+    CGFloat split_h = area.bounds.size.height - status_h - 1.0;
+    NSView *browser_container = [[NSView alloc]
+        initWithFrame:NSMakeRect(0, 0, w, split_h)];
+    browser_container.wantsLayer = YES;
 
-    /* Left: browser container. */
-    CGFloat browser_w = area.bounds.size.width - kSidebarW;
-    self.browser_container = [[NSView alloc]
-        initWithFrame:NSMakeRect(0, 0, browser_w, split_h)];
-    self.browser_container.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    self.browser_container.wantsLayer       = YES;
-    [self.content_split addSubview:self.browser_container];
-
-    /* pane_split permanently owns the browser panes.  In single-pane mode it
-     * holds only primary_pane (which fills the full width); in dual-pane mode
-     * secondary_pane is added alongside it.  Keeping primary_pane inside
-     * pane_split for its entire lifetime avoids CA-layer reparenting issues. */
-    self.pane_split = [[NSSplitView alloc]
-        initWithFrame:self.browser_container.bounds];
-    self.pane_split.vertical     = YES;
-    self.pane_split.dividerStyle = NSSplitViewDividerStyleThin;
+    self.pane_split = [[NSSplitView alloc] initWithFrame:browser_container.bounds];
+    self.pane_split.vertical         = YES;
+    self.pane_split.dividerStyle     = NSSplitViewDividerStyleThin;
     self.pane_split.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    [self.browser_container addSubview:self.pane_split];
+    [browser_container addSubview:self.pane_split];
 
-    self.primary_pane = [[FilesBrowserPane alloc]
-        init_with_frame:self.pane_split.bounds];
-    self.primary_pane.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    self.primary_pane = [[FilesBrowserPane alloc] init_with_frame:self.pane_split.bounds];
     [self.pane_split addSubview:self.primary_pane];
+    [self wire_pane:self.primary_pane];
 
-    /* Right: info sidebar. Given its real initial width so build_views can
-     * position its subviews correctly. */
+    /* Sidebar side. */
     self.info_sidebar = [[FilesInfoSidebar alloc]
-        initWithFrame:NSMakeRect(0, 0, kSidebarW, split_h)];
-    [self.content_split addSubview:self.info_sidebar];
+        initWithFrame:NSMakeRect(0, 0, sidebar_w, split_h)];
 
-    /* Floating Empty Trash button — icon-only, lower-right, overlays the browser. */
-    static const CGFloat kFABSize   = 36.0;
-    static const CGFloat kFABMargin = 14.0; /* distance from right/bottom edges of area */
-    NSImage *fab_icon = [NSImage imageNamed:NSImageNameTrashEmpty];
-    fab_icon = [fab_icon copy];
+    NSViewController *browser_vc = [[NSViewController alloc] init];
+    browser_vc.view = browser_container;
+    NSViewController *sidebar_vc = [[NSViewController alloc] init];
+    sidebar_vc.view = self.info_sidebar;
+
+    NSSplitViewItem *browser_item = [NSSplitViewItem splitViewItemWithViewController:browser_vc];
+    browser_item.minimumThickness = browser_min_w;
+
+    self.sidebar_item = [NSSplitViewItem splitViewItemWithViewController:sidebar_vc];
+    self.sidebar_item.canCollapse      = YES;
+    self.sidebar_item.minimumThickness = sidebar_min_w;
+    /* Higher holding priority: window resizes go to the browser, not the sidebar. */
+    self.sidebar_item.holdingPriority  = NSLayoutPriorityDefaultLow + 1;
+    self.sidebar_item.collapsed        = YES;
+
+    self.content_split_vc = [[NSSplitViewController alloc] init];
+    self.content_split_vc.splitView.dividerStyle = NSSplitViewDividerStyleThin;
+    [self.content_split_vc addSplitViewItem:browser_item];
+    [self.content_split_vc addSplitViewItem:self.sidebar_item];
+
+    NSView *split_view = self.content_split_vc.view;
+    split_view.frame            = NSMakeRect(0, status_h + 1.0, w, split_h);
+    split_view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [area addSubview:split_view];
+
+    /* Floating Empty Trash button — icon-only, lower-right, over the browser. */
+    static const CGFloat fab_size   = 36.0;
+    static const CGFloat fab_margin = 14.0;
+    NSImage *fab_icon = [[NSImage imageNamed:NSImageNameTrashEmpty] copy];
     fab_icon.size = NSMakeSize(20.0, 20.0);
-    self.status_trash_btn = [[NSButton alloc]
-        initWithFrame:NSMakeRect(w - kFABSize - kFABMargin,
-                                 kStatusH + 1.0 + kFABMargin,
-                                 kFABSize, kFABSize)];
-    self.status_trash_btn.image         = fab_icon;
-    self.status_trash_btn.imageScaling  = NSImageScaleProportionallyDown;
-    self.status_trash_btn.bezelStyle    = NSBezelStyleRegularSquare;
-    self.status_trash_btn.buttonType    = NSButtonTypeMomentaryLight;
-    self.status_trash_btn.target        = self;
-    self.status_trash_btn.action        = @selector(empty_trash_action:);
-    self.status_trash_btn.autoresizingMask = NSViewMinXMargin | NSViewMaxYMargin;
-    self.status_trash_btn.hidden        = YES;
-    self.status_trash_btn.toolTip       = @"Empty Trash";
-    [area addSubview:self.status_trash_btn positioned:NSWindowAbove relativeTo:nil];
-
-    /* Collapse the sidebar after the first layout pass so the browser fills
-     * the full width on launch. Cannot hide synchronously — NSSplitView has
-     * not yet measured its subviews at this point. */
-    dispatch_async(dispatch_get_main_queue(), ^{
-        _collapsing_sidebar = YES;
-        [self.content_split setPosition:self.content_split.bounds.size.width
-                       ofDividerAtIndex:0];
-        self.info_sidebar.hidden = YES;
-        _collapsing_sidebar = NO;
-    });
+    self.empty_trash_btn = [[NSButton alloc]
+        initWithFrame:NSMakeRect(w - fab_size - fab_margin, status_h + 1.0 + fab_margin,
+                                 fab_size, fab_size)];
+    self.empty_trash_btn.image            = fab_icon;
+    self.empty_trash_btn.imageScaling     = NSImageScaleProportionallyDown;
+    self.empty_trash_btn.bezelStyle       = NSBezelStyleRegularSquare;
+    self.empty_trash_btn.buttonType       = NSButtonTypeMomentaryLight;
+    self.empty_trash_btn.target           = self;
+    self.empty_trash_btn.action           = @selector(empty_trash_action:);
+    self.empty_trash_btn.autoresizingMask = NSViewMinXMargin | NSViewMaxYMargin;
+    self.empty_trash_btn.hidden           = YES;
+    self.empty_trash_btn.toolTip          = @"Empty Trash";
+    [area addSubview:self.empty_trash_btn positioned:NSWindowAbove relativeTo:nil];
 }
 
-/* ── Pane access ─────────────────────────────────────────────────────────── */
+/* ── Panes ───────────────────────────────────────────────────────────────── */
 
 /*
  * active_pane — returns the currently active browser pane.
@@ -259,10 +242,8 @@ build_layout
 - (FilesBrowserPane *)
 active_pane
 {
-    if (self.active_pane_index == 1 && self.secondary_pane) {
-        return self.secondary_pane;
-    }
-    return self.primary_pane;
+    return (self.active_pane_index == 1 && self.secondary_pane)
+        ? self.secondary_pane : self.primary_pane;
 }
 
 /*
@@ -276,218 +257,256 @@ active_browser
     return [self active_pane].browser;
 }
 
-/* ── Wiring ──────────────────────────────────────────────────────────────── */
-
 /*
- * wire_up — connects panes, toolbar controls, and info handler.
+ * all_browsers — the browser of every open pane.
+ *
+ * Output: array of one or two FilesBrowserView.
  */
-- (void)
-wire_up
+- (NSArray<FilesBrowserView *> *)
+all_browsers
 {
-    __weak FilesMainWindow *ws = self;
-
-    /* Wire primary pane */
-    self.primary_pane.navigation_handler = ^(NSURL *url) {
-        FilesMainWindow *s = ws;
-        if (!s || s.active_pane_index != 0) return;
-        [s update_toolbar_for_url:url];
-        [s.bookmarks_bar update_trash_icon];
-    };
-    self.primary_pane.info_handler = ^(NSArray<NSURL *> *urls) {
-        if (urls.firstObject) [FilesInfoPanel.shared show_for_url:urls.firstObject];
-    };
-
-    /* Bookmarks bar navigates the active pane */
-    self.bookmarks_bar.selection_handler = ^(NSURL *url) {
-        [[ws active_pane] navigate_to:url];
-    };
-
-    /* Sidebar selection tracking for primary pane. */
-    [self wire_sidebar_for_pane:self.primary_pane];
-    [self wire_status_for_pane:self.primary_pane];
-
-    /* Navigate home on launch */
-    [self.primary_pane navigate_to:[NSURL fileURLWithPath:NSHomeDirectory()]];
-
-    /* Defer focus so it runs after window-state restoration overrides initialFirstResponder. */
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self.window makeFirstResponder:self.address_bar];
-    });
+    return self.secondary_pane
+        ? @[self.primary_pane.browser, self.secondary_pane.browser]
+        : @[self.primary_pane.browser];
 }
 
 /*
- * update_toolbar_for_url: — refreshes toolbar controls after a navigation event.
+ * wire_pane: — connects a pane's browser callbacks to the window. Every
+ * callback records per-pane state, but only the active pane updates the
+ * shared toolbar, status bar, Empty Trash button and info sidebar.
  *
  * Inputs:
- *   url — new current directory URL
+ *   pane — pane to wire
+ */
+- (void)
+wire_pane:(FilesBrowserPane *)pane
+{
+    __weak FilesMainWindow  *ws = self;
+    __weak FilesBrowserPane *wp = pane;
+    FilesBrowserView *b = pane.browser;
+
+    b.navigation_handler = ^(NSURL *url) {
+        FilesMainWindow *s = ws;
+        if (!s || [s active_pane] != wp) return;
+        [s update_toolbar_for_url:url];
+        [s.bookmarks_bar update_trash_icon];
+    };
+    b.info_handler = ^(NSArray<NSURL *> *urls) {
+        [FilesInfoPanel.shared show_for_url:urls.firstObject];
+    };
+    b.sidebar_handler = ^(NSArray<NSURL *> *urls) {
+        FilesMainWindow *s = ws;
+        if (s && [s active_pane] == wp) [s refresh_sidebar_for_active_pane];
+    };
+    b.status_text_handler = ^(NSString *text) {
+        FilesMainWindow *s = ws;
+        FilesBrowserPane *p = wp;
+        if (!s || !p) return;
+        p.status_text = text;
+        /* Listings of the Trash are the signal that its contents changed. */
+        if (p.showing_trash) [s.bookmarks_bar update_trash_icon];
+        if ([s active_pane] == p) s.status_label.stringValue = text ?: @"";
+    };
+    b.trash_visible_handler = ^(BOOL show) {
+        FilesMainWindow *s = ws;
+        FilesBrowserPane *p = wp;
+        if (!s || !p) return;
+        p.showing_trash = show;
+        if ([s active_pane] == p) s.empty_trash_btn.hidden = !show;
+    };
+}
+
+/*
+ * set_active_pane: — makes pane index idx active and refreshes everything
+ * that follows the active pane: dimming, toolbar, status bar, Empty Trash
+ * button and info sidebar.
+ *
+ * Inputs:
+ *   idx — 0 (primary) or 1 (secondary)
+ */
+- (void)
+set_active_pane:(NSInteger)idx
+{
+    self.active_pane_index        = idx;
+    self.primary_pane.is_active   = (idx == 0);
+    self.secondary_pane.is_active = (idx == 1);
+
+    FilesBrowserPane *p = [self active_pane];
+    [self update_toolbar_for_url:p.browser.current_url];
+    self.status_label.stringValue = p.status_text ?: @"";
+    self.empty_trash_btn.hidden   = !p.showing_trash;
+    [self refresh_sidebar_for_active_pane];
+}
+
+/*
+ * update_toolbar_for_url: — refreshes the address bar, window title and
+ * toolbar item enablement after a navigation.
+ *
+ * Inputs:
+ *   url — directory now shown by the active pane
  */
 - (void)
 update_toolbar_for_url:(NSURL *)url
 {
     self.address_bar.stringValue = url.path ?: @"";
     self.window.title            = url.lastPathComponent ?: @"Files";
-    self.back_button.enabled    = [[self active_browser] can_go_back];
-    self.forward_button.enabled = [[self active_browser] can_go_forward];
-
-    /* Disable Up at filesystem root (path == "/"). */
-    if (self.up_button) {
-        NSString *parent = url.path.stringByDeletingLastPathComponent;
-        self.up_button.enabled = (parent.length > 0 &&
-                                  ![parent isEqualToString:url.path]);
-    }
+    [self.window.toolbar validateVisibleItems];
 }
 
 /* ── Dual pane ───────────────────────────────────────────────────────────── */
 
 /*
- * toggle_dual_pane: — switch between single-pane and dual-pane mode.
+ * toggle_dual_pane: — switches between single-pane and dual-pane mode. The
+ * second pane opens on the same folder as the first.
  *
  * Inputs:
- *   sender — menu item or toolbar button (unused)
+ *   sender — menu item or toolbar item (unused)
  */
 - (IBAction)
 toggle_dual_pane:(id)sender
 {
-    if (_in_toggle_dual) return;
-    _in_toggle_dual = YES;
-    __weak FilesMainWindow *ws = self;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        FilesMainWindow *s = ws;
-        if (s) s->_in_toggle_dual = NO;
-    });
-
     if (self.secondary_pane) {
-        /* Collapse to single pane.  primary_pane stays inside pane_split —
-         * we only remove secondary_pane so the split has one child and
-         * primary fills the full width.  No CA-layer reparenting. */
-        if (self.observing_responder) {
-            [self.window removeObserver:self forKeyPath:@"firstResponder"];
-            self.observing_responder = NO;
-        }
-
         [self.secondary_pane removeFromSuperview];
         self.secondary_pane = nil;
-
-        self.primary_pane.show_accent_border = NO;
-        self.primary_pane.is_active          = YES;
-        self.active_pane_index               = 0;
-
-        [self update_toolbar_for_url:[self.primary_pane current_url]];
+        self.primary_pane.in_dual_mode = NO;
+        [self set_active_pane:0];
         [self.window makeFirstResponder:self.primary_pane.browser];
-
     } else {
-        /* Expand to dual pane.  Add secondary_pane to the permanent
-         * pane_split; primary_pane does not move. */
         CGFloat split_w = self.pane_split.bounds.size.width;
-        CGFloat split_h = self.pane_split.bounds.size.height;
-
-        self.active_pane_index               = 0;
-        self.primary_pane.show_accent_border = YES;
-        self.primary_pane.is_active          = YES;
-
         self.secondary_pane = [[FilesBrowserPane alloc]
-            init_with_frame:NSMakeRect(0, 0, split_w / 2, split_h)];
-        self.secondary_pane.autoresizingMask   = NSViewWidthSizable | NSViewHeightSizable;
-        self.secondary_pane.show_accent_border = YES;
-        self.secondary_pane.is_active          = NO;
-
-        self.secondary_pane.navigation_handler = ^(NSURL *url) {
-            FilesMainWindow *s = ws;
-            if (!s || s.active_pane_index != 1) return;
-            [s update_toolbar_for_url:url];
-        };
-        self.secondary_pane.info_handler = ^(NSArray<NSURL *> *urls) {
-            if (urls.firstObject) [FilesInfoPanel.shared show_for_url:urls.firstObject];
-        };
-
-        [self wire_sidebar_for_pane:self.secondary_pane];
-        [self wire_status_for_pane:self.secondary_pane];
-        [self.secondary_pane navigate_to:self.primary_pane.current_url];
-
+            init_with_frame:NSMakeRect(0, 0, split_w / 2, self.pane_split.bounds.size.height)];
+        self.secondary_pane.in_dual_mode = YES;
+        self.primary_pane.in_dual_mode   = YES;
+        [self wire_pane:self.secondary_pane];
         [self.pane_split addSubview:self.secondary_pane];
         [self.pane_split setPosition:split_w / 2 ofDividerAtIndex:0];
-
-        if (!self.observing_responder) {
-            [self.window addObserver:self
-                          forKeyPath:@"firstResponder"
-                             options:0
-                             context:NULL];
-            self.observing_responder = YES;
-        }
+        [self set_active_pane:0];
+        [self.secondary_pane.browser navigate_to:self.primary_pane.browser.current_url];
     }
-
-    self.dual_pane_btn.state = self.secondary_pane
-        ? NSControlStateValueOn : NSControlStateValueOff;
+    [self.window.toolbar validateVisibleItems];
 }
 
-/* ── Open in Terminal ────────────────────────────────────────────────────── */
-
 /*
- * open_terminal_clicked: — open Terminal.app at the active pane's directory.
+ * keyDown: — Tab (without ⌘) in dual-pane mode moves focus to the other
+ * pane; the firstResponder observer then makes it active.
  *
  * Inputs:
- *   sender — toolbar button or menu item (unused)
- */
-- (IBAction)
-open_terminal_clicked:(id)sender
-{
-    NSString *path = [self active_pane].current_url.path ?: NSHomeDirectory();
-    NSTask *task = [[NSTask alloc] init];
-    task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/open"];
-    task.arguments = @[@"-a", @"Terminal", path];
-    NSError *err = nil;
-    [task launchAndReturnError:&err];
-    if (err) NSLog(@"open_terminal_clicked: %@", err.localizedDescription);
-}
-
-/* ── Tab key: switch active pane ─────────────────────────────────────────── */
-
-/*
- * keyDown: — intercepts Tab when dual-pane is active to switch focus.
- *
- * Inputs:
- *   event — key event
+ *   event — key event; anything else goes to super
  */
 - (void)
 keyDown:(NSEvent *)event
 {
-    if (self.secondary_pane &&
-        event.keyCode == 48 /* Tab */ &&
-        !(event.modifierFlags & NSEventModifierFlagCommand))
-    {
-        self.active_pane_index = (self.active_pane_index == 0) ? 1 : 0;
-        self.primary_pane.is_active   = (self.active_pane_index == 0);
-        self.secondary_pane.is_active = (self.active_pane_index == 1);
-        [[self active_pane].browser becomeFirstResponder];
-        [self update_toolbar_for_url:[self active_pane].current_url];
+    if (self.secondary_pane && event.keyCode == 48 /* Tab */ &&
+        !(event.modifierFlags & NSEventModifierFlagCommand)) {
+        FilesBrowserPane *other = (self.active_pane_index == 0)
+            ? self.secondary_pane : self.primary_pane;
+        [self.window makeFirstResponder:other.browser];
         return;
     }
     [super keyDown:event];
 }
 
+/*
+ * observeValueForKeyPath:ofObject:change:context: — when the window's first
+ * responder moves into a pane (dual-pane mode), makes that pane active so
+ * toolbar and menu actions target the pane the user last touched.
+ *
+ * Inputs:
+ *   keyPath, object, change — KVO arguments
+ *   context                 — first_responder_ctx for our observation
+ */
+- (void)
+observeValueForKeyPath:(NSString *)keyPath
+              ofObject:(id)object
+                change:(NSDictionary *)change
+               context:(void *)context
+{
+    if (context != first_responder_ctx) {
+        [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
+        return;
+    }
+    if (!self.secondary_pane) return;
+
+    NSResponder *r = self.window.firstResponder;
+    for (NSView *v = [r isKindOfClass:NSView.class] ? (NSView *)r : nil; v; v = v.superview) {
+        NSInteger idx = (v == self.primary_pane) ? 0 : (v == self.secondary_pane) ? 1 : -1;
+        if (idx < 0) continue;
+        if (idx != self.active_pane_index) [self set_active_pane:idx];
+        return;
+    }
+}
+
 /* ── NSToolbarDelegate ───────────────────────────────────────────────────── */
 
+/*
+ * toolbar_identifiers — the toolbar's items, left to right.
+ *
+ * Output: array of item identifiers.
+ */
+static NSArray<NSToolbarItemIdentifier> *
+toolbar_identifiers(void)
+{
+    return @[tb_back, tb_forward, tb_up, tb_reload,
+             NSToolbarFlexibleSpaceItemIdentifier,
+             tb_path,
+             NSToolbarFlexibleSpaceItemIdentifier,
+             tb_search, tb_hidden_files, tb_open_terminal,
+             tb_dual_pane, tb_sidebar];
+}
+
+/*
+ * toolbarAllowedItemIdentifiers: — every item the toolbar may show.
+ *
+ * Inputs:
+ *   toolbar — the toolbar (unused)
+ *
+ * Output: toolbar_identifiers().
+ */
 - (NSArray<NSToolbarItemIdentifier> *)
 toolbarAllowedItemIdentifiers:(NSToolbar *)toolbar
 {
-    return @[kToolbarBack, kToolbarForward, kToolbarUp, kToolbarReload,
-             NSToolbarFlexibleSpaceItemIdentifier,
-             kToolbarPath,
-             NSToolbarFlexibleSpaceItemIdentifier,
-             kToolbarSearch, kToolbarHiddenFiles, kToolbarOpenTerminal,
-             kToolbarDualPane, kToolbarSidebar];
+    return toolbar_identifiers();
 }
 
+/*
+ * toolbarDefaultItemIdentifiers: — the items shown (customization is off).
+ *
+ * Inputs:
+ *   toolbar — the toolbar (unused)
+ *
+ * Output: toolbar_identifiers().
+ */
 - (NSArray<NSToolbarItemIdentifier> *)
 toolbarDefaultItemIdentifiers:(NSToolbar *)toolbar
 {
-    /* Navigation cluster: ‹ › ↑ ↺  —  [address bar]  —  [search] 👁 >_ ⊟ ▣ */
-    return @[kToolbarBack, kToolbarForward, kToolbarUp, kToolbarReload,
-             NSToolbarFlexibleSpaceItemIdentifier,
-             kToolbarPath,
-             NSToolbarFlexibleSpaceItemIdentifier,
-             kToolbarSearch, kToolbarHiddenFiles, kToolbarOpenTerminal,
-             kToolbarDualPane, kToolbarSidebar];
+    return toolbar_identifiers();
+}
+
+/*
+ * button_item — a standard image toolbar item targeting self. Standard
+ * items get an overflow-menu representation and validation for free.
+ *
+ * Inputs:
+ *   ident  — item identifier
+ *   label  — label / tooltip text
+ *   symbol — SF Symbol name
+ *   action — selector sent to self
+ *   target — action target
+ *
+ * Output: configured NSToolbarItem.
+ */
+static NSToolbarItem *
+button_item(NSToolbarItemIdentifier ident, NSString *label, NSString *symbol,
+            SEL action, id target)
+{
+    NSToolbarItem *item = [[NSToolbarItem alloc] initWithItemIdentifier:ident];
+    item.label    = label;
+    item.toolTip  = label;
+    item.image    = [NSImage imageWithSystemSymbolName:symbol accessibilityDescription:label];
+    item.action   = action;
+    item.target   = target;
+    item.bordered = YES;
+    return item;
 }
 
 /*
@@ -499,209 +518,205 @@ toolbarDefaultItemIdentifiers:(NSToolbar *)toolbar
  *   identifier — item identifier string
  *   flag       — YES if actually being inserted
  *
- * Output: configured NSToolbarItem.
+ * Output: configured NSToolbarItem, or nil for an unknown identifier.
  */
 - (NSToolbarItem *)
 toolbar:(NSToolbar *)toolbar
 itemForItemIdentifier:(NSString *)identifier
 willBeInsertedIntoToolbar:(BOOL)flag
 {
-    NSToolbarItem *item = [[NSToolbarItem alloc] initWithItemIdentifier:identifier];
+    if ([identifier isEqualToString:tb_back])
+        return button_item(identifier, @"Back", @"chevron.left", @selector(go_back_action:), self);
+    if ([identifier isEqualToString:tb_forward])
+        return button_item(identifier, @"Forward", @"chevron.right", @selector(go_forward_action:), self);
+    if ([identifier isEqualToString:tb_up])
+        return button_item(identifier, @"Up", @"arrow.up", @selector(go_up_action:), self);
+    if ([identifier isEqualToString:tb_reload])
+        return button_item(identifier, @"Reload", @"arrow.clockwise", @selector(reload_action:), self);
+    if ([identifier isEqualToString:tb_hidden_files])
+        return button_item(identifier, @"Show Hidden Files", @"eye.slash",
+                           @selector(toggle_hidden_files_action:), self);
+    if ([identifier isEqualToString:tb_open_terminal])
+        return button_item(identifier, @"Open in Terminal", @"terminal",
+                           @selector(open_terminal_action:), self);
+    if ([identifier isEqualToString:tb_dual_pane])
+        return button_item(identifier, @"Dual Pane", @"rectangle.split.2x1",
+                           @selector(toggle_dual_pane:), self);
+    if ([identifier isEqualToString:tb_sidebar])
+        return button_item(identifier, @"Info Sidebar", @"sidebar.right",
+                           @selector(toggle_sidebar_action:), self);
 
-    if ([identifier isEqualToString:kToolbarBack]) {
-        self.back_button = [NSButton buttonWithTitle:@"‹"
-                                              target:self
-                                              action:@selector(back_clicked:)];
-        if (@available(macOS 11.0, *)) {
-            self.back_button.image =
-                [NSImage imageWithSystemSymbolName:@"chevron.left"
-                          accessibilityDescription:@"Back"];
-        }
-        self.back_button.bezelStyle = NSBezelStyleTexturedRounded;
-        self.back_button.enabled    = NO;
-        item.view    = self.back_button;
-        item.label   = @"Back";
-        item.minSize = item.maxSize = NSMakeSize(36, 26);
-
-    } else if ([identifier isEqualToString:kToolbarForward]) {
-        self.forward_button = [NSButton buttonWithTitle:@"›"
-                                                 target:self
-                                                 action:@selector(forward_clicked:)];
-        if (@available(macOS 11.0, *)) {
-            self.forward_button.image =
-                [NSImage imageWithSystemSymbolName:@"chevron.right"
-                          accessibilityDescription:@"Forward"];
-        }
-        self.forward_button.bezelStyle = NSBezelStyleTexturedRounded;
-        self.forward_button.enabled    = NO;
-        item.view    = self.forward_button;
-        item.label   = @"Forward";
-        item.minSize = item.maxSize = NSMakeSize(36, 26);
-
-    } else if ([identifier isEqualToString:kToolbarPath]) {
-        self.address_bar = [[NSTextField alloc]
-            initWithFrame:NSMakeRect(0, 0, 400, 22)];
-        self.address_bar.placeholderString  = @"Path";
-        self.address_bar.bezelStyle         = NSTextFieldRoundedBezel;
-        self.address_bar.font               = [NSFont monospacedSystemFontOfSize:12.0
-                                                                          weight:NSFontWeightRegular];
-        self.address_bar.target             = self;
-        self.address_bar.action             = @selector(address_bar_action:);
-        self.address_bar.focusRingType      = NSFocusRingTypeNone;
-        item.view    = self.address_bar;
-        item.label   = @"Path";
-        item.minSize = NSMakeSize(200, 26);
-        item.maxSize = NSMakeSize(800, 26);
-
-    } else if ([identifier isEqualToString:kToolbarUp]) {
-        self.up_button = [NSButton buttonWithTitle:@"↑"
-                                            target:self
-                                            action:@selector(go_up_clicked:)];
-        if (@available(macOS 11.0, *)) {
-            self.up_button.image =
-                [NSImage imageWithSystemSymbolName:@"arrow.up"
-                          accessibilityDescription:@"Up"];
-        }
-        self.up_button.bezelStyle = NSBezelStyleTexturedRounded;
-        self.up_button.enabled    = NO;
-        self.up_button.toolTip    = @"Go Up";
-        item.view    = self.up_button;
-        item.label   = @"Up";
-        item.minSize = item.maxSize = NSMakeSize(36, 26);
-
-    } else if ([identifier isEqualToString:kToolbarSearch]) {
-        self.search_field = [[NSSearchField alloc]
-            initWithFrame:NSMakeRect(0, 0, 117, 22)];
-        self.search_field.target              = self;
-        self.search_field.action              = @selector(search_changed:);
-        self.search_field.placeholderString   = @"Search";
-        item.view    = self.search_field;
-        item.label   = @"Search";
-        item.minSize = NSMakeSize(65, 26);
-        item.maxSize = NSMakeSize(169, 26);
-
-    } else if ([identifier isEqualToString:kToolbarReload]) {
-        NSButton *reload_btn = [NSButton buttonWithTitle:@"↻"
-                                                  target:self
-                                                  action:@selector(reload_clicked:)];
-        if (@available(macOS 11.0, *)) {
-            reload_btn.image =
-                [NSImage imageWithSystemSymbolName:@"arrow.clockwise"
-                          accessibilityDescription:@"Reload"];
-        }
-        reload_btn.bezelStyle = NSBezelStyleTexturedRounded;
-        reload_btn.toolTip    = @"Reload";
-        item.view    = reload_btn;
-        item.label   = @"Reload";
-        item.minSize = item.maxSize = NSMakeSize(36, 26);
-
-    } else if ([identifier isEqualToString:kToolbarHiddenFiles]) {
-        BOOL showing = [NSUserDefaults.standardUserDefaults
-                            boolForKey:@"files.show_hidden_files"];
-        NSButton *eye_btn = [NSButton buttonWithTitle:@"👁"
-                                               target:nil
-                                               action:@selector(toggle_hidden_files_action:)];
-        if (@available(macOS 11.0, *)) {
-            NSString *sym = showing ? @"eye" : @"eye.slash";
-            eye_btn.image = [NSImage imageWithSystemSymbolName:sym
-                                        accessibilityDescription:@"Show Hidden Files"];
-        }
-        [eye_btn setButtonType:NSButtonTypePushOnPushOff];
-        eye_btn.bezelStyle = NSBezelStyleTexturedRounded;
-        eye_btn.state      = showing ? NSControlStateValueOn : NSControlStateValueOff;
-        eye_btn.toolTip    = @"Show Hidden Files";
-        item.view    = eye_btn;
-        item.label   = @"Hidden";
-        item.minSize = item.maxSize = NSMakeSize(36, 26);
-
-    } else if ([identifier isEqualToString:kToolbarOpenTerminal]) {
-        NSButton *term_btn = [NSButton buttonWithTitle:@">_"
-                                                target:self
-                                                action:@selector(open_terminal_clicked:)];
-        if (@available(macOS 12.0, *)) {
-            NSImage *img = [NSImage imageWithSystemSymbolName:@"terminal"
-                                      accessibilityDescription:@"Open in Terminal"];
-            if (img) term_btn.image = img;
-        }
-        term_btn.bezelStyle = NSBezelStyleTexturedRounded;
-        term_btn.toolTip    = @"Open in Terminal";
-        item.view    = term_btn;
-        item.label   = @"Terminal";
-        item.minSize = item.maxSize = NSMakeSize(36, 26);
-
-    } else if ([identifier isEqualToString:kToolbarDualPane]) {
-        self.dual_pane_btn = [NSButton buttonWithTitle:@"[][]"
-                                                target:self
-                                                action:@selector(toggle_dual_pane:)];
-        if (@available(macOS 11.0, *)) {
-            self.dual_pane_btn.image =
-                [NSImage imageWithSystemSymbolName:@"rectangle.split.2x1"
-                          accessibilityDescription:@"Dual Pane"];
-        }
-        [self.dual_pane_btn setButtonType:NSButtonTypePushOnPushOff];
-        self.dual_pane_btn.bezelStyle = NSBezelStyleTexturedRounded;
-        self.dual_pane_btn.state      = self.secondary_pane
-            ? NSControlStateValueOn : NSControlStateValueOff;
-        self.dual_pane_btn.toolTip    = @"Dual Pane";
-        item.view    = self.dual_pane_btn;
-        item.label   = @"Dual Pane";
-        item.minSize = item.maxSize = NSMakeSize(36, 26);
-
-    } else if ([identifier isEqualToString:kToolbarSidebar]) {
-        NSButton *sidebar_btn = [NSButton buttonWithTitle:@"▣"
-                                                   target:self
-                                                   action:@selector(toggle_sidebar_action:)];
-        if (@available(macOS 11.0, *)) {
-            sidebar_btn.image = [NSImage imageWithSystemSymbolName:@"sidebar.right"
-                                          accessibilityDescription:@"Toggle Info Sidebar"];
-        }
-        [sidebar_btn setButtonType:NSButtonTypePushOnPushOff];
-        sidebar_btn.bezelStyle = NSBezelStyleTexturedRounded;
-        sidebar_btn.toolTip    = @"Toggle Info Sidebar";
-        item.view    = sidebar_btn;
-        item.label   = @"Sidebar";
-        item.minSize = item.maxSize = NSMakeSize(36, 26);
+    if ([identifier isEqualToString:tb_search]) {
+        NSSearchToolbarItem *item = [[NSSearchToolbarItem alloc] initWithItemIdentifier:identifier];
+        item.searchField.target            = self;
+        item.searchField.action            = @selector(search_changed:);
+        item.searchField.placeholderString = @"Search";
+        item.label                         = @"Search";
+        return item;
     }
 
-    return item;
+    if ([identifier isEqualToString:tb_path]) {
+        self.address_bar = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 400, 22)];
+        self.address_bar.placeholderString = @"Path";
+        self.address_bar.bezelStyle        = NSTextFieldRoundedBezel;
+        self.address_bar.font              = [NSFont monospacedSystemFontOfSize:12.0
+                                                                         weight:NSFontWeightRegular];
+        self.address_bar.target            = self;
+        self.address_bar.action            = @selector(address_bar_action:);
+        self.address_bar.focusRingType     = NSFocusRingTypeNone;
+        NSLayoutConstraint *pref = [self.address_bar.widthAnchor constraintEqualToConstant:400];
+        pref.priority = NSLayoutPriorityDefaultLow;
+        [NSLayoutConstraint activateConstraints:@[
+            [self.address_bar.widthAnchor constraintGreaterThanOrEqualToConstant:200],
+            [self.address_bar.widthAnchor constraintLessThanOrEqualToConstant:800],
+            pref,
+        ]];
+        NSToolbarItem *item = [[NSToolbarItem alloc] initWithItemIdentifier:identifier];
+        item.view  = self.address_bar;
+        item.label = @"Path";
+        return item;
+    }
+    return nil;
 }
 
-/* ── Toolbar actions ─────────────────────────────────────────────────────── */
-
 /*
- * back_clicked: — navigates the active pane back.
+ * validateToolbarItem: — enables Back/Forward/Up only when they can act and
+ * swaps the Hidden Files and Dual Pane images to reflect their state.
  *
  * Inputs:
- *   sender — back toolbar button
+ *   item — toolbar item being validated
+ *
+ * Output: YES if the item should be enabled.
  */
-- (void)
-back_clicked:(id)sender
+- (BOOL)
+validateToolbarItem:(NSToolbarItem *)item
+{
+    FilesBrowserView *b = [self active_browser];
+    SEL action = item.action;
+    if (action == @selector(go_back_action:))    return [b can_go_back];
+    if (action == @selector(go_forward_action:)) return [b can_go_forward];
+    if (action == @selector(go_up_action:)) {
+        NSString *path = b.current_url.path;
+        return path.length > 0 && ![path isEqualToString:@"/"];
+    }
+    if (action == @selector(toggle_hidden_files_action:)) {
+        BOOL on = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_show_hidden];
+        item.image = [NSImage imageWithSystemSymbolName:on ? @"eye" : @"eye.slash"
+                               accessibilityDescription:item.label];
+    } else if (action == @selector(toggle_dual_pane:)) {
+        item.image = [NSImage imageWithSystemSymbolName:self.secondary_pane
+                                                        ? @"rectangle.split.2x1.fill"
+                                                        : @"rectangle.split.2x1"
+                               accessibilityDescription:item.label];
+    }
+    return YES;
+}
+
+/* ── Navigation actions (toolbar and Go menu) ────────────────────────────── */
+
+/*
+ * go_back_action: — Back in the active pane.
+ *
+ * Inputs:
+ *   sender — toolbar item or menu item (unused)
+ */
+- (IBAction)
+go_back_action:(id)sender
 {
     [[self active_browser] go_back];
-    self.back_button.enabled     = [[self active_browser] can_go_back];
-    self.forward_button.enabled  = [[self active_browser] can_go_forward];
-    self.address_bar.stringValue = [self active_browser].current_url.path ?: @"";
 }
 
 /*
- * forward_clicked: — navigates the active pane forward.
+ * go_forward_action: — Forward in the active pane.
  *
  * Inputs:
- *   sender — forward toolbar button
+ *   sender — toolbar item or menu item (unused)
  */
-- (void)
-forward_clicked:(id)sender
+- (IBAction)
+go_forward_action:(id)sender
 {
     [[self active_browser] go_forward];
-    self.back_button.enabled     = [[self active_browser] can_go_back];
-    self.forward_button.enabled  = [[self active_browser] can_go_forward];
-    self.address_bar.stringValue = [self active_browser].current_url.path ?: @"";
 }
 
 /*
- * address_bar_action: — navigates to the path the user typed and pressed Enter.
- * Expands ~ and resolves relative paths against the current directory.
- * Reverts the field to the current path on failure.
+ * go_up_action: — shows the parent of the active pane's folder.
+ *
+ * Inputs:
+ *   sender — toolbar item (unused)
+ */
+- (IBAction)
+go_up_action:(id)sender
+{
+    NSURL *cur = [self active_browser].current_url;
+    if (cur && ![cur.path isEqualToString:@"/"]) {
+        [[self active_browser] navigate_to:cur.URLByDeletingLastPathComponent];
+    }
+}
+
+/*
+ * go_home_action: — Go ▸ Home.
+ *
+ * Inputs:
+ *   sender — menu item (unused)
+ */
+- (IBAction)
+go_home_action:(id)sender
+{
+    [[self active_browser] navigate_to:files_home_url()];
+}
+
+/*
+ * go_desktop_action: — Go ▸ Desktop.
+ *
+ * Inputs:
+ *   sender — menu item (unused)
+ */
+- (IBAction)
+go_desktop_action:(id)sender
+{
+    [[self active_browser] navigate_to:files_directory_url(NSDesktopDirectory)];
+}
+
+/*
+ * go_downloads_action: — Go ▸ Downloads.
+ *
+ * Inputs:
+ *   sender — menu item (unused)
+ */
+- (IBAction)
+go_downloads_action:(id)sender
+{
+    [[self active_browser] navigate_to:files_directory_url(NSDownloadsDirectory)];
+}
+
+/*
+ * go_documents_action: — Go ▸ Documents.
+ *
+ * Inputs:
+ *   sender — menu item (unused)
+ */
+- (IBAction)
+go_documents_action:(id)sender
+{
+    [[self active_browser] navigate_to:files_directory_url(NSDocumentDirectory)];
+}
+
+/*
+ * reload_action: — re-reads the active pane's folder.
+ *
+ * Inputs:
+ *   sender — toolbar item (unused)
+ */
+- (IBAction)
+reload_action:(id)sender
+{
+    [[self active_browser] reload_directory];
+}
+
+/*
+ * address_bar_action: — navigates to the path typed into the address bar.
+ * Expands ~; resolves a relative path against the active pane's folder; for
+ * a file, shows its parent folder. An unknown path reverts the field.
  *
  * Inputs:
  *   sender — address bar NSTextField
@@ -709,74 +724,29 @@ forward_clicked:(id)sender
 - (void)
 address_bar_action:(NSTextField *)sender
 {
+    FilesBrowserView *b = [self active_browser];
     NSString *raw  = [sender.stringValue stringByTrimmingCharactersInSet:
                           NSCharacterSet.whitespaceAndNewlineCharacterSet];
     NSString *path = raw.stringByExpandingTildeInPath;
-    BOOL is_dir    = NO;
+    if (!path.isAbsolutePath && b.current_url) {
+        path = [b.current_url.path stringByAppendingPathComponent:path];
+    }
 
+    BOOL is_dir = NO;
     if (![NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&is_dir]) {
-        /* Path does not exist — revert and shake the field. */
-        sender.stringValue = [self active_browser].current_url.path ?: @"";
-        [sender.window makeFirstResponder:nil];
-        return;
+        sender.stringValue = b.current_url.path ?: @"";
+    } else {
+        if (!is_dir) path = path.stringByDeletingLastPathComponent;
+        [b navigate_to:[NSURL fileURLWithPath:path].URLByStandardizingPath];
     }
-    if (!is_dir) {
-        /* It's a file — navigate to its parent directory. */
-        path = path.stringByDeletingLastPathComponent;
-    }
-    [[self active_pane] navigate_to:[NSURL fileURLWithPath:path]];
     [sender.window makeFirstResponder:nil];
 }
 
 /*
- * go_up_clicked: — navigates the active pane to the parent directory.
+ * search_changed: — runs (or clears) a Spotlight search in the active pane.
  *
  * Inputs:
- *   sender — up toolbar button
- */
-- (IBAction)
-go_up_clicked:(id)sender
-{
-    NSURL *cur = [self active_pane].current_url;
-    if (!cur) return;
-    NSURL *parent = cur.URLByDeletingLastPathComponent;
-    if (!parent || [parent.path isEqualToString:cur.path]) return;
-    [[self active_pane] navigate_to:parent];
-}
-
-/*
- * reload_clicked: — reloads the active browser pane's directory listing.
- *
- * Inputs:
- *   sender — reload toolbar button
- */
-- (IBAction)
-reload_clicked:(id)sender
-{
-    [[self active_browser] reload_directory];
-}
-
-/*
- * add_bookmark_action: — adds the active pane's current directory to the
- * bookmarks bar.
- *
- * Inputs:
- *   sender — menu item or toolbar button
- */
-- (IBAction)
-add_bookmark_action:(id)sender
-{
-    NSURL *cur = [self active_pane].current_url;
-    if (cur) {
-        [self.bookmarks_bar add_bookmark:cur];
-    }
-}
-
-/*
- * search_changed: — delegates to Spotlight search in the active browser.
- *
- * Inputs:
- *   sender — NSSearchField
+ *   sender — the toolbar NSSearchField
  */
 - (void)
 search_changed:(NSSearchField *)sender
@@ -784,290 +754,158 @@ search_changed:(NSSearchField *)sender
     [[self active_browser] set_search_filter:sender.stringValue];
 }
 
-/* ── First-responder observation (dual-pane active tracking) ─────────────── */
-
 /*
- * observeValueForKeyPath:ofObject:change:context: — detects which pane a click
- * lands in by watching window.firstResponder; updates active_pane_index so every
- * toolbar action operates on the pane the user last touched.
- */
-- (void)
-observeValueForKeyPath:(NSString *)keyPath
-              ofObject:(id)object
-                change:(NSDictionary *)change
-               context:(void *)context
-{
-    if (![keyPath isEqualToString:@"firstResponder"] || !self.secondary_pane) {
-        [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
-        return;
-    }
-    NSResponder *r = self.window.firstResponder;
-    NSView *v = [r isKindOfClass:NSView.class] ? (NSView *)r : nil;
-    while (v) {
-        if (v == (NSView *)self.primary_pane) {
-            if (self.active_pane_index != 0) {
-                self.active_pane_index        = 0;
-                self.primary_pane.is_active   = YES;
-                self.secondary_pane.is_active = NO;
-                [self update_toolbar_for_url:self.primary_pane.current_url];
-            }
-            return;
-        }
-        if (v == (NSView *)self.secondary_pane) {
-            if (self.active_pane_index != 1) {
-                self.active_pane_index        = 1;
-                self.primary_pane.is_active   = NO;
-                self.secondary_pane.is_active = YES;
-                [self update_toolbar_for_url:self.secondary_pane.current_url];
-            }
-            return;
-        }
-        v = v.superview;
-    }
-}
-
-/* ── Info sidebar ────────────────────────────────────────────────────────── */
-
-/*
- * toggle_sidebar_action: — shows or hides the info sidebar by collapsing or
- * expanding the NSSplitView's right subview.
+ * add_bookmark_action: — adds the active pane's folder to the bookmarks bar.
  *
  * Inputs:
- *   sender — sidebar toolbar button (unused beyond triggering)
+ *   sender — menu item or the bookmarks bar's star button (unused)
  */
 - (IBAction)
-toggle_sidebar_action:(id)sender
+add_bookmark_action:(id)sender
 {
-    if (self.info_sidebar.hidden) {
-        /* Expand to kSidebarW (less if the browser would drop below 400pt).
-         * Move the divider with setPosition: rather than setting subview
-         * frames directly, so NSSplitView updates its own layout state, then
-         * rebuild the window's cursor rects: without that the divider gets no
-         * resize-cursor rect until the next window resize, so it can't be
-         * found or grabbed. */
-        CGFloat sv_w = self.content_split.bounds.size.width;
-        CGFloat div  = self.content_split.dividerThickness;
-        CGFloat sidebar_w = MIN(kSidebarW, sv_w - div - 400.0);
-        self.info_sidebar.hidden = NO;
-        [self.content_split setPosition:sv_w - div - sidebar_w ofDividerAtIndex:0];
-        [self.window invalidateCursorRectsForView:self.content_split];
-        [self refresh_sidebar_for_active_pane];
-    } else {
-        /* Collapse: keep divider alive during setPosition: so it is not a no-op. */
-        _collapsing_sidebar = YES;
-        [self.content_split setPosition:self.content_split.bounds.size.width
-                       ofDividerAtIndex:0];
-        self.info_sidebar.hidden = YES;
-        _collapsing_sidebar = NO;
-    }
-}
-
-/* ── NSSplitViewDelegate ─────────────────────────────────────────────────── */
-
-/*
- * splitView:canCollapseSubview: — allows the sidebar to collapse to zero
- * width when hidden; the browser pane may not collapse.
- */
-- (BOOL)
-splitView:(NSSplitView *)sv canCollapseSubview:(NSView *)subview
-{
-    (void)sv;
-    return subview == self.info_sidebar;
+    NSURL *cur = [self active_browser].current_url;
+    if (cur) [self.bookmarks_bar add_bookmark:cur];
 }
 
 /*
- * splitView:shouldHideDividerAtIndex: — hides the 1pt divider line when the
- * sidebar is collapsed so no ghost line remains in the file list.
- */
-- (BOOL)
-splitView:(NSSplitView *)sv shouldHideDividerAtIndex:(NSInteger)idx
-{
-    (void)sv; (void)idx;
-    /* Keep the divider "live" during the collapse setPosition: call so that
-     * NSSplitView does not treat it as a no-op. */
-    return self.info_sidebar.hidden && !_collapsing_sidebar;
-}
-
-/*
- * splitView:shouldAdjustSizeOfSubview: — only the browser pane grows with
- * the window; the sidebar stays at its current dragged width.
- */
-- (BOOL)
-splitView:(NSSplitView *)sv shouldAdjustSizeOfSubview:(NSView *)subview
-{
-    (void)sv;
-    /* Sidebar resizes during collapse (so setPosition can move it to 0) and
-     * when already hidden (so window resize keeps it at 0). When visible and
-     * not in mid-collapse, it holds its dragged width. */
-    if (subview == self.info_sidebar)
-        return _collapsing_sidebar || self.info_sidebar.hidden;
-    return YES;
-}
-
-/*
- * splitView:constrainMinCoordinate:ofSubviewAt: — keeps the browser at least
- * 400pt wide so the divider cannot be dragged too far right.
- */
-- (CGFloat)
-splitView:(NSSplitView *)sv
-constrainMinCoordinate:(CGFloat)proposed
-     ofSubviewAt:(NSInteger)idx
-{
-    (void)sv; (void)idx;
-    return MAX(proposed, 400.0);
-}
-
-/*
- * splitView:constrainMaxCoordinate:ofSubviewAt: — keeps the sidebar at least
- * 140pt wide so the divider cannot be dragged too far left.
- */
-- (CGFloat)
-splitView:(NSSplitView *)sv
-constrainMaxCoordinate:(CGFloat)proposed
-      ofSubviewAt:(NSInteger)idx
-{
-    (void)idx;
-    /* During collapse, allow the divider to reach the far right edge. */
-    if (_collapsing_sidebar || self.info_sidebar.hidden) return proposed;
-    return MIN(proposed, sv.bounds.size.width - 140.0);
-}
-
-/*
- * refresh_sidebar_for_active_pane — pushes the active pane's current
- * selection (or the directory itself when nothing is selected) to the sidebar.
- */
-- (void)
-refresh_sidebar_for_active_pane
-{
-    if (self.info_sidebar.hidden) return;
-    NSArray<NSURL *> *sel = [self active_pane].selected_urls;
-    if (sel.count == 0) {
-        NSURL *cur = [self active_pane].current_url;
-        if (cur) [self.info_sidebar show_url:cur];
-        else     [self.info_sidebar clear];
-    } else if (sel.count == 1) {
-        [self.info_sidebar show_url:sel.firstObject];
-    } else {
-        [self.info_sidebar show_urls:sel];
-    }
-}
-
-/*
- * wire_status_for_pane: — attaches status_text_handler and trash_visible_handler
- * on the given pane's browser so they route to the full-width status bar.
+ * open_terminal_action: — opens Terminal at the active pane's folder.
  *
  * Inputs:
- *   pane — pane to wire
+ *   sender — toolbar item or menu item (unused)
  */
-- (void)
-wire_status_for_pane:(FilesBrowserPane *)pane
+- (IBAction)
+open_terminal_action:(id)sender
 {
-    __weak FilesMainWindow *ws = self;
-    pane.browser.status_text_handler = ^(NSString *text) {
-        FilesMainWindow *s = ws;
-        if (s) s.status_label.stringValue = text ?: @"";
-    };
-    pane.browser.trash_visible_handler = ^(BOOL show) {
-        FilesMainWindow *s = ws;
-        if (s) s.status_trash_btn.hidden = !show;
-    };
+    NSWorkspace *ws = NSWorkspace.sharedWorkspace;
+    NSURL *dir      = [self active_browser].current_url ?: files_home_url();
+    NSURL *terminal = [ws URLForApplicationWithBundleIdentifier:@"com.apple.Terminal"];
+    __weak NSWindow *win = self.window;
+    [ws openURLs:@[dir]
+        withApplicationAtURL:terminal
+               configuration:[NSWorkspaceOpenConfiguration configuration]
+           completionHandler:^(NSRunningApplication *app, NSError *err) {
+        if (!err) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            files_show_error(@"Could not open Terminal", err, win);
+        });
+    }];
 }
 
 /*
- * empty_trash_action: — forwards to the active browser's empty_trash_action:.
+ * empty_trash_action: — forwards to the active browser (the floating button
+ * is only visible while that browser shows the Trash).
  *
  * Inputs:
- *   sender — toolbar button or menu item
+ *   sender — the floating Empty Trash button
  */
 - (IBAction)
 empty_trash_action:(id)sender
 {
     [[self active_browser] empty_trash_action:sender];
-    /* Delay slightly so the filesystem change completes before we re-check. */
-    __weak FilesMainWindow *ws = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        [ws.bookmarks_bar update_trash_icon];
-    });
 }
 
+/* ── View preferences (apply to every pane) ──────────────────────────────── */
+
 /*
- * wire_sidebar_for_pane: — attaches a sidebar_handler to the given pane's
- * browser so that selection changes update the sidebar.
+ * toggle_hidden_files_action: — flips files_pref_show_hidden and reloads
+ * every pane.
  *
  * Inputs:
- *   pane — pane to wire
+ *   sender — toolbar item (unused)
  */
-- (void)
-wire_sidebar_for_pane:(FilesBrowserPane *)pane
+- (IBAction)
+toggle_hidden_files_action:(id)sender
 {
-    __weak FilesMainWindow  *ws = self;
-    __weak FilesBrowserPane *wp = pane;
-    pane.browser.sidebar_handler = ^(NSArray<NSURL *> *urls) {
-        FilesMainWindow  *s = ws;
-        FilesBrowserPane *p = wp;
-        if (!s || !p || s.info_sidebar.hidden) return;
-        /* Only the active pane drives the sidebar. */
-        if ([s active_pane] != p) return;
-        if (urls.count == 0) {
-            NSURL *cur = p.current_url;
-            if (cur) [s.info_sidebar show_url:cur];
-            else     [s.info_sidebar clear];
-        } else if (urls.count == 1) {
-            [s.info_sidebar show_url:urls.firstObject];
-        } else {
-            [s.info_sidebar show_urls:urls];
-        }
-    };
+    NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
+    [ud setBool:![ud boolForKey:files_pref_show_hidden] forKey:files_pref_show_hidden];
+    for (FilesBrowserView *b in [self all_browsers]) [b reload_directory];
+    [self.window.toolbar validateVisibleItems];
 }
 
-/* ── View menu actions ───────────────────────────────────────────────────── */
-
 /*
- * auto_fit_columns_action: — toggles persistent column auto-fit.
- * Lives here rather than in FilesBrowserView so it is always reachable in the
- * responder chain regardless of which control has keyboard focus.
+ * auto_fit_columns_action: — toggles files_pref_auto_fit; when turned on,
+ * fits the columns of every pane immediately.
  *
  * Inputs:
- *   sender — View menu item (unused beyond triggering)
+ *   sender — View menu item (unused)
  */
 - (IBAction)
 auto_fit_columns_action:(id)sender
 {
     NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
-    BOOL now_on = ![ud boolForKey:@"files.auto_fit_columns"];
-    [ud setBool:now_on forKey:@"files.auto_fit_columns"];
+    BOOL now_on = ![ud boolForKey:files_pref_auto_fit];
+    [ud setBool:now_on forKey:files_pref_auto_fit];
     if (now_on) {
-        [[self active_browser] apply_auto_fit];
+        for (FilesBrowserView *b in [self all_browsers]) [b apply_auto_fit];
     }
 }
 
 /*
- * validateMenuItem: — sets the Auto-Fit Columns checkmark.
+ * validateMenuItem: — sets the Auto-Fit Columns and Dual Pane checkmarks and
+ * enables Back/Forward only when possible.
  *
  * Inputs:
  *   item — the menu item being validated
  *
- * Output: YES (always enabled).
+ * Output: YES if the item should be enabled.
  */
 - (BOOL)
 validateMenuItem:(NSMenuItem *)item
 {
-    if (item.action == @selector(auto_fit_columns_action:)) {
-        item.state = [NSUserDefaults.standardUserDefaults boolForKey:@"files.auto_fit_columns"]
+    SEL action = item.action;
+    if (action == @selector(auto_fit_columns_action:)) {
+        item.state = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_auto_fit]
             ? NSControlStateValueOn : NSControlStateValueOff;
-    } else if (item.action == @selector(toggle_dual_pane:)) {
-        item.state = self.secondary_pane
-            ? NSControlStateValueOn : NSControlStateValueOff;
+    } else if (action == @selector(toggle_dual_pane:)) {
+        item.state = self.secondary_pane ? NSControlStateValueOn : NSControlStateValueOff;
+    } else if (action == @selector(go_back_action:)) {
+        return [[self active_browser] can_go_back];
+    } else if (action == @selector(go_forward_action:)) {
+        return [[self active_browser] can_go_forward];
     }
     return YES;
 }
 
-- (void)
-dealloc
+/* ── Info sidebar ────────────────────────────────────────────────────────── */
+
+/*
+ * toggle_sidebar_action: — shows or hides the info sidebar (animated). On
+ * show it displays the active selection; on hide it releases the thumbnail
+ * and cancels any pending Quick Look request.
+ *
+ * Inputs:
+ *   sender — toolbar item (unused)
+ */
+- (IBAction)
+toggle_sidebar_action:(id)sender
 {
-    if (self.observing_responder) {
-        [self.window removeObserver:self forKeyPath:@"firstResponder"];
+    BOOL show = self.sidebar_item.isCollapsed;
+    self.sidebar_item.animator.collapsed = !show;
+    if (show) {
+        [self refresh_sidebar_for_active_pane];
+    } else {
+        [self.info_sidebar clear];
+    }
+}
+
+/*
+ * refresh_sidebar_for_active_pane — shows the active pane's selection in the
+ * info sidebar (its folder when nothing is selected). No-op while collapsed.
+ */
+- (void)
+refresh_sidebar_for_active_pane
+{
+    if (self.sidebar_item.isCollapsed) return;
+    FilesBrowserView *b = [self active_browser];
+    NSArray<NSURL *> *sel = b.selected_urls;
+    if (sel.count > 1) {
+        [self.info_sidebar show_urls:sel];
+    } else if (sel.count == 1) {
+        [self.info_sidebar show_url:sel.firstObject];
+    } else if (b.current_url) {
+        [self.info_sidebar show_url:b.current_url];
+    } else {
+        [self.info_sidebar clear];
     }
 }
 

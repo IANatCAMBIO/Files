@@ -1,4 +1,5 @@
 #import <Cocoa/Cocoa.h>
+#include <stdatomic.h>
 #include <stdint.h>
 
 /*
@@ -22,21 +23,9 @@
 + (BOOL)pasteboard_has_files;
 
 /*
- * pasteboard_is_cut — returns YES if the pasteboard contents are from a cut.
- */
-+ (BOOL)pasteboard_is_cut;
-
-/*
- * urls_from_pasteboard — reads file URLs from the general pasteboard.
- *
- * Output: array of NSURL, or empty array if none.
- */
-+ (NSArray<NSURL *> *)urls_from_pasteboard;
-
-/*
  * transfer_urls:to:is_cut:completion: — copies or moves srcs into dest,
  * showing the progress panel (conflict prompts, cancel, speed graph).
- * Reads NSUserDefaults key "files.copy.hash_validation" for hash behaviour.
+ * Reads NSUserDefaults key files_pref_hash_validation (util.h) for hash behaviour.
  *
  * Inputs:
  *   srcs       — source file/directory URLs
@@ -71,32 +60,11 @@
  *   file_done    — bytes copied so far for the current file
  *   file_total   — total bytes in the current file
  *   total_done   — bytes copied across all files in this operation
- *   total_total  — always 0 (no pre-scan is performed)
- *   bps          — always 0 (the caller computes speed)
  */
 typedef void (^FileCopyProgressBlock)(NSString *current_file,
                                        int64_t   file_done,
                                        int64_t   file_total,
-                                       int64_t   total_done,
-                                       int64_t   total_total,
-                                       double    bps);
-
-/*
- * paste_to_directory:progress:hash_validate:completion: — chunked copy with
- * byte-level progress reporting and optional SHA-256 validation.
- *
- * Inputs:
- *   dest          — destination directory URL
- *   progress      — called after each chunk on the copy queue; nil = disabled
- *   hash_validate — YES = SHA-256 compare src vs dst for each file
- *   completion    — called on main queue; hash_results maps dst URL -> @YES/@NO
- *                   (nil dict when hash_validate is NO)
- */
-+ (void)paste_to_directory:(NSURL *)dest
-                  progress:(FileCopyProgressBlock)progress
-             hash_validate:(BOOL)hash_validate
-                completion:(void (^)(NSError *err,
-                                     NSDictionary<NSURL *, NSNumber *> *hash_results))completion;
+                                       int64_t   total_done);
 
 /*
  * FilesConflictResolution — outcome of a per-item conflict prompt.
@@ -138,7 +106,7 @@ typedef FilesConflictResolution (^FilesConflictBlock)(NSURL *src, NSURL *dst);
  *   is_cut        — YES = move sources (deleted only after a successful commit)
  *   hash_validate — YES = SHA-256 verify each file before committing
  *   conflict      — called when a destination item already exists; nil = keep both
- *   cancel_flag   — pointer to an int32_t; set to non-zero to abort; may be NULL
+ *   cancel_flag   — set to non-zero (atomic_store) to abort; may be NULL
  *   progress      — progress callback; may be nil
  *   completion    — called on main queue with error and hash_results dict
  */
@@ -147,7 +115,7 @@ typedef FilesConflictResolution (^FilesConflictBlock)(NSURL *src, NSURL *dst);
                is_cut:(BOOL)is_cut
         hash_validate:(BOOL)hash_validate
              conflict:(FilesConflictBlock)conflict
-          cancel_flag:(volatile int32_t *)cancel_flag
+          cancel_flag:(atomic_int *)cancel_flag
              progress:(FileCopyProgressBlock)progress
            completion:(void (^)(NSError *err,
                                 NSDictionary<NSURL *, NSNumber *> *hash_results))completion;

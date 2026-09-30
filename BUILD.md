@@ -19,7 +19,12 @@ No third-party libraries. All dependencies are Apple system frameworks:
 | Framework       | Purpose                                      |
 |-----------------|----------------------------------------------|
 | Cocoa           | AppKit (UI), Foundation (collections, URLs)  |
-| CoreServices    | FSEventStream for directory watching         |
+| CoreServices    | FSEventStream for folder watching            |
+| QuickLookThumbnailing | Thumbnails in the info sidebar         |
+| UniformTypeIdentifiers | Per-file-type icon lookup (icon cache) |
+
+The C library's `copyfile(3)`, `renamex_np(2)` and CommonCrypto (SHA-256 / MD5)
+are part of libSystem and need no extra linking.
 
 ## Build targets
 
@@ -58,14 +63,25 @@ files.app/
 
 ```
 src/
-├── main.m               — entry point
-├── app_delegate.h/.m    — app lifecycle, menu bar
-├── main_window.h/.m     — NSSplitView + toolbar
-├── browser_view.h/.m    — file list (NSTableView + FSEvents)
-├── sidebar.h/.m         — places/devices NSOutlineView
-├── file_ops.h/.m        — clipboard, trash, rename, new folder
-├── info_panel.h/.m      — Get Info panel
-└── volume_manager.h/.m  — volume enumeration and eject
+├── main.m                  — entry point
+├── app_delegate.h/.m       — app lifecycle, menu bar, Devices menu
+├── main_window.h/.m        — window controller: toolbar, split views, pane
+│                             switching, Go-menu and view-preference actions
+├── browser_pane.h/.m       — one pane: browser view + per-pane state
+├── browser_view.h/.m       — file list (NSTableView), background listing,
+│                             FSEvents watcher, Spotlight search, history
+├── bookmarks_bar.h/.m      — bookmarks strip above the browser
+├── info_sidebar.h/.m       — collapsible Quick Look / details sidebar
+├── info_panel.h/.m         — Get Info panel (permissions, lock, hashes)
+├── file_ops.h/.m           — pasteboard, copy/move engine (copyfile +
+│                             rename, staged commits), trash, rename, mkdir
+├── copy_progress.h/.m      — copy progress panel and conflict prompts
+├── speed_graph.h/.m        — bounded transfer-speed graph
+├── file_hash.h/.m          — single-pass, cancellable SHA-256 / MD5
+├── mounts_panel.h/.m       — All Mounts panel (per-volume unmount)
+├── volume_manager.h/.m     — mounted-volume list and unmount
+└── util.h/.m               — shared helpers: preference keys, standard
+                              folder URLs, size/date formatting, error alerts
 ```
 
 ## Platform notes

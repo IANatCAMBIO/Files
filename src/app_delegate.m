@@ -3,10 +3,10 @@
 #import "browser_pane.h"
 #import "volume_manager.h"
 #import "mounts_panel.h"
+#import "util.h"
 
-@interface FilesAppDelegate ()
+@interface FilesAppDelegate () <NSMenuDelegate>
 @property (nonatomic, strong) FilesMainWindow *main_window;
-@property (nonatomic, strong) NSMenu          *devices_menu;
 @end
 
 @implementation FilesAppDelegate
@@ -24,13 +24,6 @@ applicationDidFinishLaunching:(NSNotification *)n
     self.main_window = [[FilesMainWindow alloc] init];
     [self.main_window showWindow:nil];
     [NSApp activate];
-
-    [NSNotificationCenter.defaultCenter
-        addObserver:self
-           selector:@selector(volumes_changed:)
-               name:FilesVolumesChangedNotification
-             object:nil];
-    [self rebuild_devices_menu];
 }
 
 /*
@@ -80,25 +73,28 @@ make_item(NSString *title, SEL action, NSString *key, NSEventModifierFlags mod)
 - (void)
 toggle_hash_validation:(NSMenuItem *)sender
 {
-    BOOL current = [NSUserDefaults.standardUserDefaults
-                        boolForKey:@"files.copy.hash_validation"];
-    BOOL next = !current;
+    BOOL next = ![NSUserDefaults.standardUserDefaults
+                      boolForKey:files_pref_hash_validation];
     [NSUserDefaults.standardUserDefaults setBool:next
-                                          forKey:@"files.copy.hash_validation"];
+                                          forKey:files_pref_hash_validation];
     sender.state = next ? NSControlStateValueOn : NSControlStateValueOff;
 }
 
 /* ── Devices menu ────────────────────────────────────────────────────────── */
 
 /*
- * rebuild_devices_menu — repopulates the Devices menu from mounted volumes.
- * Each volume gets a menu item that navigates the key window's active pane.
- * A separator and "All Mounts…" follow.
+ * menuNeedsUpdate: — NSMenuDelegate; repopulates the Devices menu from the
+ * mounted volumes each time it opens, so it never needs mount observers.
+ * Each volume item navigates the main window's active pane; a separator
+ * and "All Mounts…" follow.
+ *
+ * Inputs:
+ *   menu — the Devices menu
  */
 - (void)
-rebuild_devices_menu
+menuNeedsUpdate:(NSMenu *)menu
 {
-    [self.devices_menu removeAllItems];
+    [menu removeAllItems];
 
     FilesVolumeManager *vm = FilesVolumeManager.shared;
     for (NSURL *vol in vm.mounted_volumes) {
@@ -113,21 +109,21 @@ rebuild_devices_menu
         icon.size     = NSMakeSize(16, 16);
         item.image    = icon;
 
-        [self.devices_menu addItem:item];
+        [menu addItem:item];
     }
 
-    [self.devices_menu addItem:NSMenuItem.separatorItem];
+    [menu addItem:NSMenuItem.separatorItem];
 
     NSMenuItem *all = [[NSMenuItem alloc] initWithTitle:@"All Mounts…"
                                                  action:@selector(show_all_mounts:)
                                           keyEquivalent:@""];
     all.target = self;
-    [self.devices_menu addItem:all];
+    [menu addItem:all];
 }
 
 /*
- * device_menu_item_clicked: — navigates the active pane of the key window to
- * the volume URL stored in the menu item's representedObject.
+ * device_menu_item_clicked: — navigates the main window's active pane to the
+ * volume URL stored in the menu item's representedObject.
  *
  * Inputs:
  *   sender — NSMenuItem with representedObject = volume NSURL
@@ -137,9 +133,7 @@ device_menu_item_clicked:(NSMenuItem *)sender
 {
     NSURL *vol = sender.representedObject;
     if (!vol) return;
-    FilesMainWindow *mw = (FilesMainWindow *)[NSApp.keyWindow windowController];
-    if (![mw isKindOfClass:FilesMainWindow.class]) return;
-    [[mw active_pane] navigate_to:vol];
+    [[self.main_window active_pane].browser navigate_to:vol];
 }
 
 /*
@@ -152,18 +146,6 @@ device_menu_item_clicked:(NSMenuItem *)sender
 show_all_mounts:(id)sender
 {
     [FilesMountsPanel.shared show_panel];
-}
-
-/*
- * volumes_changed: — reloads the Devices menu when volumes mount or unmount.
- *
- * Inputs:
- *   note — FilesVolumesChangedNotification
- */
-- (void)
-volumes_changed:(NSNotification *)note
-{
-    [self rebuild_devices_menu];
 }
 
 /*
@@ -198,7 +180,7 @@ build_menu_bar
                                  @selector(add_bookmark_action:),
                                  @"d", 0)];
     [file_menu addItem:make_item(@"Open in Terminal",
-                                 @selector(open_terminal_clicked:),
+                                 @selector(open_terminal_action:),
                                  @"t", NSEventModifierFlagShift)];
     [file_menu addItem:NSMenuItem.separatorItem];
     [file_menu addItem:make_item(@"Close Window",
@@ -219,13 +201,8 @@ build_menu_bar
     [edit_menu addItem:make_item(@"Paste",      @selector(paste:),  @"v", 0)];
     [edit_menu addItem:make_item(@"Select All", @selector(selectAll:), @"a", 0)];
     [edit_menu addItem:NSMenuItem.separatorItem];
-    {
-        NSMenuItem *trash = make_item(@"Move to Trash",
-                                       @selector(move_to_trash_action:),
-                                       @"\x08", 0);
-        trash.keyEquivalentModifierMask = NSEventModifierFlagCommand;
-        [edit_menu addItem:trash];
-    }
+    [edit_menu addItem:make_item(@"Move to Trash",
+                                 @selector(move_to_trash_action:), @"\x08", 0)];
     edit_mi.submenu = edit_menu;
     [bar addItem:edit_mi];
 
@@ -245,7 +222,7 @@ build_menu_bar
     [view_menu addItem:NSMenuItem.separatorItem];
     {
         BOOL hash_on = [NSUserDefaults.standardUserDefaults
-                            boolForKey:@"files.copy.hash_validation"];
+                            boolForKey:files_pref_hash_validation];
         NSMenuItem *hash_item = [[NSMenuItem alloc]
             initWithTitle:@"Validate Copies with SHA-256"
                    action:@selector(toggle_hash_validation:)
@@ -278,8 +255,9 @@ build_menu_bar
 
     /* ── Devices menu ── */
     NSMenuItem *dev_mi = [[NSMenuItem alloc] init];
-    self.devices_menu  = [[NSMenu alloc] initWithTitle:@"Devices"];
-    dev_mi.submenu     = self.devices_menu;
+    NSMenu *devices_menu  = [[NSMenu alloc] initWithTitle:@"Devices"];
+    devices_menu.delegate = self;  /* rebuilt on open: menuNeedsUpdate: */
+    dev_mi.submenu        = devices_menu;
     [bar addItem:dev_mi];
 
     NSApp.mainMenu = bar;

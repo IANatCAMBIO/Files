@@ -1,6 +1,7 @@
 #import "file_ops.h"
 #import "copy_progress.h"
 #import "file_hash.h"
+#import "util.h"
 #include <copyfile.h>
 #include <errno.h>
 #include <stdio.h>
@@ -8,7 +9,7 @@
 #include <sys/stat.h>
 
 /* Custom pasteboard type used to record whether the copy was a cut. */
-static NSString * const kCutFlagType = @"com.salt.files.cut-flag";
+static NSString * const cut_flag_type = @"com.salt.files.cut-flag";
 
 /* ── C helpers ──────────────────────────────────────────────────────────── */
 
@@ -113,7 +114,7 @@ sibling_temp_url(NSURL *dst, NSString *tag)
  */
 typedef struct {
     FileCopyProgressBlock  progress;    /* may be nil */
-    volatile int32_t      *cancel;      /* may be NULL */
+    atomic_int            *cancel;      /* may be NULL */
     int64_t                total_done;  /* bytes across the whole operation */
     NSString              *file_name;   /* file currently being copied */
     int64_t                file_total;  /* its size */
@@ -137,8 +138,7 @@ report_progress(copy_ctx_t *c, int64_t copied)
         c->file_done   = copied;
     }
     if (c->progress) {
-        c->progress(c->file_name, c->file_done, c->file_total,
-                    c->total_done, 0, 0);
+        c->progress(c->file_name, c->file_done, c->file_total, c->total_done);
     }
 }
 
@@ -163,7 +163,7 @@ copy_status_cb(int what, int stage, copyfile_state_t state,
     (void)dst;
     copy_ctx_t *c = (copy_ctx_t *)ctx;
 
-    if (c->cancel && *c->cancel) return COPYFILE_QUIT;
+    if (c->cancel && atomic_load(c->cancel)) return COPYFILE_QUIT;
     if (stage == COPYFILE_ERR) {
         if (c->err == 0) c->err = errno ? errno : EIO;
         return COPYFILE_QUIT;
@@ -217,7 +217,7 @@ copy_tree(NSURL *src, NSURL *dst, copy_ctx_t *c)
     if (rc == 0) return nil;
 
     [NSFileManager.defaultManager removeItemAtURL:dst error:nil];
-    if (c->cancel && *c->cancel) {
+    if (c->cancel && atomic_load(c->cancel)) {
         return [NSError errorWithDomain:NSCocoaErrorDomain
                                    code:NSUserCancelledError userInfo:nil];
     }
@@ -235,9 +235,9 @@ copy_tree(NSURL *src, NSURL *dst, copy_ctx_t *c)
 static BOOL
 same_contents(NSURL *a, NSURL *b)
 {
-    uint8_t da[32], db[32];
-    return file_sha256(a.fileSystemRepresentation, da) == 0
-        && file_sha256(b.fileSystemRepresentation, db) == 0
+    uint8_t da[FILE_SHA256_LEN], db[FILE_SHA256_LEN];
+    return file_digests(a.fileSystemRepresentation, da, NULL, NULL) == 0
+        && file_digests(b.fileSystemRepresentation, db, NULL, NULL) == 0
         && memcmp(da, db, sizeof da) == 0;
 }
 
@@ -385,6 +385,33 @@ transfer_item(NSURL *src, NSURL *dst, BOOL replace, BOOL is_cut,
     return nil;
 }
 
+/*
+ * pasteboard_is_cut — reads the cut flag written by copy_urls:is_cut:.
+ *
+ * Output: YES if the general pasteboard's files were cut (to be moved).
+ */
+static BOOL
+pasteboard_is_cut(void)
+{
+    NSString *flag = [NSPasteboard.generalPasteboard stringForType:cut_flag_type];
+    return [flag isEqualToString:@"YES"];
+}
+
+/*
+ * urls_from_pasteboard — reads file URLs from the general pasteboard.
+ *
+ * Output: array of file URLs, empty if none.
+ */
+static NSArray<NSURL *> *
+urls_from_pasteboard(void)
+{
+    NSArray *items =
+        [NSPasteboard.generalPasteboard
+             readObjectsForClasses:@[NSURL.class]
+                           options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
+    return items ?: @[];
+}
+
 /* ── FilesFileOps implementation ────────────────────────────────────────── */
 
 @implementation FilesFileOps
@@ -402,7 +429,7 @@ copy_urls:(NSArray<NSURL *> *)urls is_cut:(BOOL)is_cut
     NSPasteboard *pb = NSPasteboard.generalPasteboard;
     [pb clearContents];
     [pb writeObjects:urls];
-    [pb setString:is_cut ? @"YES" : @"NO" forType:kCutFlagType];
+    [pb setString:is_cut ? @"YES" : @"NO" forType:cut_flag_type];
 }
 
 /*
@@ -414,31 +441,6 @@ pasteboard_has_files
     return [NSPasteboard.generalPasteboard
                 canReadObjectForClasses:@[NSURL.class]
                                 options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
-}
-
-/*
- * pasteboard_is_cut — returns YES if the pasteboard cut flag is set.
- */
-+ (BOOL)
-pasteboard_is_cut
-{
-    NSString *flag = [NSPasteboard.generalPasteboard stringForType:kCutFlagType];
-    return [flag isEqualToString:@"YES"];
-}
-
-/*
- * urls_from_pasteboard — reads file URLs from the general pasteboard.
- *
- * Output: array of NSURL, empty if none found.
- */
-+ (NSArray<NSURL *> *)
-urls_from_pasteboard
-{
-    NSArray *items =
-        [NSPasteboard.generalPasteboard
-             readObjectsForClasses:@[NSURL.class]
-                           options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
-    return items ?: @[];
 }
 
 /*
@@ -458,7 +460,7 @@ urls_from_pasteboard
  *   is_cut        — YES = move sources
  *   hash_validate — YES = SHA-256 verify each copied file before committing
  *   conflict      — called when the destination item exists; nil = keep both
- *   cancel_flag   — pointer to int32_t cancel flag; may be NULL
+ *   cancel_flag   — non-zero (atomic) aborts the operation; may be NULL
  *   progress      — progress callback; may be nil
  *   completion    — called on main queue with the first error (nil on
  *                   success) and per-file hash results (nil unless hash_validate)
@@ -469,7 +471,7 @@ run_copy_srcs:(NSArray<NSURL *> *)srcs
        is_cut:(BOOL)is_cut
 hash_validate:(BOOL)hash_validate
      conflict:(FilesConflictBlock)conflict
-  cancel_flag:(volatile int32_t *)cancel_flag
+  cancel_flag:(atomic_int *)cancel_flag
      progress:(FileCopyProgressBlock)progress
    completion:(void (^)(NSError *, NSDictionary<NSURL *, NSNumber *> *))completion
 {
@@ -481,7 +483,7 @@ hash_validate:(BOOL)hash_validate
         NSError *first_err  = nil;
 
         for (NSURL *src in srcs) {
-            if (cancel_flag && *cancel_flag) {
+            if (cancel_flag && atomic_load(cancel_flag)) {
                 first_err = [NSError errorWithDomain:NSCocoaErrorDomain
                                                code:NSUserCancelledError userInfo:nil];
                 break;
@@ -530,36 +532,8 @@ hash_validate:(BOOL)hash_validate
 }
 
 /*
- * paste_to_directory:progress:hash_validate:completion: — reads pasteboard
- * URLs then delegates to run_copy_srcs:.
- *
- * Inputs:
- *   dest          — destination directory URL
- *   progress      — chunk progress callback; may be nil
- *   hash_validate — YES = SHA-256 verify
- *   completion    — called on main queue
- */
-+ (void)
-paste_to_directory:(NSURL *)dest
-          progress:(FileCopyProgressBlock)progress
-     hash_validate:(BOOL)hash_validate
-        completion:(void (^)(NSError *, NSDictionary<NSURL *, NSNumber *> *))completion
-{
-    NSArray<NSURL *> *srcs = [self urls_from_pasteboard];
-    if (srcs.count == 0) {
-        dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, nil); });
-        return;
-    }
-    BOOL is_cut = [self pasteboard_is_cut];
-    if (is_cut) [NSPasteboard.generalPasteboard clearContents];
-
-    [self run_copy_srcs:srcs to:dest is_cut:is_cut hash_validate:hash_validate
-             conflict:nil cancel_flag:NULL progress:progress completion:completion];
-}
-
-/*
  * transfer_urls:to:is_cut:completion: — copies or moves srcs into dest with
- * the progress panel, honouring the "files.copy.hash_validation" preference.
+ * the progress panel, honouring the files_pref_hash_validation preference.
  *
  * Inputs:
  *   srcs       — source file/directory URLs
@@ -574,7 +548,7 @@ transfer_urls:(NSArray<NSURL *> *)srcs
    completion:(void (^)(NSError *))completion
 {
     BOOL hash = [NSUserDefaults.standardUserDefaults
-                     boolForKey:@"files.copy.hash_validation"];
+                     boolForKey:files_pref_hash_validation];
     [FilesCopyProgress begin_copy:srcs to:dest is_cut:is_cut
                     hash_validate:hash
                        completion:completion];
@@ -591,12 +565,12 @@ transfer_urls:(NSArray<NSURL *> *)srcs
 + (void)
 paste_to_directory:(NSURL *)dest completion:(void (^)(NSError *))completion
 {
-    NSArray<NSURL *> *srcs = [self urls_from_pasteboard];
+    NSArray<NSURL *> *srcs = urls_from_pasteboard();
     if (srcs.count == 0) {
         dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil); });
         return;
     }
-    BOOL is_cut = [self pasteboard_is_cut];
+    BOOL is_cut = pasteboard_is_cut();
     if (is_cut) [NSPasteboard.generalPasteboard clearContents];
 
     [self transfer_urls:srcs to:dest is_cut:is_cut completion:completion];

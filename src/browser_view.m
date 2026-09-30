@@ -1,58 +1,200 @@
 #import "browser_view.h"
 #import "file_ops.h"
 #import "info_panel.h"
+#import "util.h"
 #import <CoreServices/CoreServices.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <sys/stat.h>
 
-
 /* Column identifiers */
-static NSString * const kColName     = @"name";
-static NSString * const kColSize     = @"size";
-static NSString * const kColKind     = @"kind";
-static NSString * const kColPerms    = @"perms";
-static NSString * const kColModified = @"modified";
+static NSString * const col_name     = @"name";
+static NSString * const col_size     = @"size";
+static NSString * const col_kind     = @"kind";
+static NSString * const col_perms    = @"perms";
+static NSString * const col_modified = @"modified";
 
-/* Resource keys fetched for every directory listing. */
-static NSArray<NSURLResourceKey> *listing_keys(void)
+/*
+ * column_spec_t — static description of one table column.
+ */
+typedef struct {
+    NSString * __unsafe_unretained id;
+    NSString * __unsafe_unretained title;   /* header title without sort arrow */
+    CGFloat width;
+    CGFloat min_width;
+} column_spec_t;
+
+static const column_spec_t column_specs[] = {
+    { @"name",     @"Name",          260, 120 },
+    { @"size",     @"Size",           80,  50 },
+    { @"kind",     @"Kind",          120,  80 },
+    { @"perms",    @"Permissions",    90,  70 },
+    { @"modified", @"Date Modified", 160, 120 },
+};
+#define COLUMN_COUNT (sizeof(column_specs) / sizeof(column_specs[0]))
+
+/* Most back/forward entries kept; older ones are dropped. */
+#define HISTORY_LIMIT 100
+
+/* Rows measured by auto-fit; beyond this the widest name is almost surely seen. */
+#define AUTO_FIT_ROW_LIMIT 2000
+
+/* Delay used to coalesce bursts of file-system events into one reload. */
+#define WATCH_COALESCE_SEC 0.25
+
+/*
+ * listing_keys — resource keys prefetched for every listed item, so table
+ * cells, sorting and filtering never touch the file system again.
+ *
+ * Output: array of NSURLResourceKey.
+ */
+static NSArray<NSURLResourceKey> *
+listing_keys(void)
 {
     return @[
         NSURLNameKey,
         NSURLFileSizeKey,
-        NSURLFileAllocatedSizeKey,
         NSURLIsDirectoryKey,
-        NSURLIsSymbolicLinkKey,
+        NSURLIsPackageKey,
+        NSURLTypeIdentifierKey,
         NSURLLocalizedTypeDescriptionKey,
         NSURLContentModificationDateKey,
-        NSURLCreationDateKey,
+        NSURLFileSecurityKey,
         NSURLIsHiddenKey,
     ];
 }
 
-/* ── FSEvents C callback ─────────────────────────────────────────────── */
+/*
+ * column_title — header title (without sort arrow) for a column identifier.
+ *
+ * Inputs:
+ *   col_id — column identifier
+ *
+ * Output: title string, or @"" for an unknown identifier.
+ */
+static NSString *
+column_title(NSString *col_id)
+{
+    for (size_t i = 0; i < COLUMN_COUNT; i++) {
+        if ([column_specs[i].id isEqualToString:col_id]) return column_specs[i].title;
+    }
+    return @"";
+}
 
 /*
- * fs_event_callback — FSEventStream callback; schedules a debounced reload.
+ * sort_resource_key — the prefetched resource key a column sorts by.
  *
- * The client info pointer is a retained reference to the FilesBrowserView;
- * the bridge cast is safe because the view stops and destroys the stream
- * before dealloc.
+ * Inputs:
+ *   col_id — column identifier
+ *
+ * Output: NSURLResourceKey (name for unknown columns).
  */
-static void
-fs_event_callback(ConstFSEventStreamRef stream,
-                  void *client_info,
-                  size_t num_events,
-                  void *event_paths,
-                  const FSEventStreamEventFlags *event_flags,
-                  const FSEventStreamEventId *event_ids)
+static NSURLResourceKey
+sort_resource_key(NSString *col_id)
 {
-    (void)stream; (void)num_events; (void)event_paths;
-    (void)event_flags; (void)event_ids;
+    if ([col_id isEqualToString:col_size])     return NSURLFileSizeKey;
+    if ([col_id isEqualToString:col_kind])     return NSURLLocalizedTypeDescriptionKey;
+    if ([col_id isEqualToString:col_modified]) return NSURLContentModificationDateKey;
+    return NSURLNameKey;
+}
 
-    FilesBrowserView *self_ref = (__bridge FilesBrowserView *)client_info;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        [self_ref reload_directory];
+/*
+ * file_mode — POSIX mode (type + permission bits) from the prefetched
+ * NSURLFileSecurityKey; equals lstat(2)'s st_mode without a system call.
+ *
+ * Inputs:
+ *   url — file URL from a listing
+ *
+ * Output: mode, or 0 if unavailable.
+ */
+static mode_t
+file_mode(NSURL *url)
+{
+    NSFileSecurity *sec = nil;
+    [url getResourceValue:&sec forKey:NSURLFileSecurityKey error:nil];
+    mode_t mode = 0;
+    if (!sec || !CFFileSecurityGetMode((__bridge CFFileSecurityRef)sec, &mode)) return 0;
+    return mode;
+}
+
+/*
+ * perms_string_for_mode — formats a POSIX mode_t as the 10-char ls -l string.
+ *
+ * Inputs:
+ *   mode — st_mode (type and permission bits)
+ *
+ * Output: e.g. "drwxr-xr-x".
+ */
+static NSString *
+perms_string_for_mode(mode_t mode)
+{
+    char b[11];
+
+    switch (mode & S_IFMT) {
+    case S_IFDIR:  b[0] = 'd'; break;
+    case S_IFLNK:  b[0] = 'l'; break;
+    case S_IFCHR:  b[0] = 'c'; break;
+    case S_IFBLK:  b[0] = 'b'; break;
+    case S_IFIFO:  b[0] = 'p'; break;
+    case S_IFSOCK: b[0] = 's'; break;
+    default:       b[0] = '-'; break;
+    }
+
+    b[1] = (mode & S_IRUSR) ? 'r' : '-';
+    b[2] = (mode & S_IWUSR) ? 'w' : '-';
+    b[3] = (mode & S_ISUID) ? ((mode & S_IXUSR) ? 's' : 'S')
+                             : ((mode & S_IXUSR) ? 'x' : '-');
+
+    b[4] = (mode & S_IRGRP) ? 'r' : '-';
+    b[5] = (mode & S_IWGRP) ? 'w' : '-';
+    b[6] = (mode & S_ISGID) ? ((mode & S_IXGRP) ? 's' : 'S')
+                             : ((mode & S_IXGRP) ? 'x' : '-');
+
+    b[7] = (mode & S_IROTH) ? 'r' : '-';
+    b[8] = (mode & S_IWOTH) ? 'w' : '-';
+    b[9] = (mode & S_ISVTX) ? ((mode & S_IXOTH) ? 't' : 'T')
+                             : ((mode & S_IXOTH) ? 'x' : '-');
+    b[10] = '\0';
+    return @(b);
+}
+
+/*
+ * icon_for_url — 16pt icon for a listed item, cached. Plain files share one
+ * icon per type (keyed by UTI) so a folder of 10,000 JPEGs costs one image;
+ * folders, packages and apps can carry custom icons, so they are cached per
+ * path. The cache is bounded and evictable under memory pressure.
+ *
+ * Inputs:
+ *   url — file URL from a listing (resource values prefetched)
+ *
+ * Output: NSImage sized 16×16.
+ */
+static NSImage *
+icon_for_url(NSURL *url)
+{
+    static NSCache<NSString *, NSImage *> *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        cache = [[NSCache alloc] init];
+        cache.countLimit = 512;
     });
+
+    NSNumber *is_dir = nil;
+    NSString *uti    = nil;
+    [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
+    [url getResourceValue:&uti forKey:NSURLTypeIdentifierKey error:nil];
+    BOOL by_type = !is_dir.boolValue && uti.length > 0;
+    NSString *key = by_type ? uti : url.path;
+
+    NSImage *icon = [cache objectForKey:key];
+    if (!icon) {
+        UTType *type = by_type ? [UTType typeWithIdentifier:uti] : nil;
+        icon = type ? [NSWorkspace.sharedWorkspace iconForContentType:type]
+                    : [NSWorkspace.sharedWorkspace iconForFile:url.path];
+        icon = [icon copy];
+        icon.size = NSMakeSize(16, 16);
+        [cache setObject:icon forKey:key];
+    }
+    return icon;
 }
 
 /* ── FilesBrowserView ────────────────────────────────────────────────── */
@@ -61,37 +203,79 @@ fs_event_callback(ConstFSEventStreamRef stream,
                                 NSTableViewDelegate,
                                 NSTextFieldDelegate>
 
-@property (nonatomic, strong) NSTableView          *table;
-@property (nonatomic, strong) NSScrollView         *scroll;
+@property (nonatomic, strong) NSTableView             *table;
+@property (nonatomic, strong) NSScrollView            *scroll;
 @property (nonatomic, strong) NSMutableArray<NSURL *> *back_stack;
 @property (nonatomic, strong) NSMutableArray<NSURL *> *forward_stack;
-@property (nonatomic, strong) NSURL                *current_dir;
+@property (nonatomic, strong) NSURL                   *current_dir;
 @property (nonatomic, strong) NSMutableArray<NSURL *> *all_items;
 @property (nonatomic, strong) NSMutableArray<NSURL *> *filtered_items;
-@property (nonatomic, copy)   NSString             *search_text;
-@property (nonatomic, assign) FSEventStreamRef      fs_stream;
+
+/* Folder watcher: stream plus the resolved path events are compared with. */
+@property (nonatomic, assign) FSEventStreamRef         fs_stream;
+@property (nonatomic, copy)   NSString                *watched_path;
+@property (nonatomic, assign) BOOL                     reload_scheduled;
+
+/* Background listing: serial queue and a counter that discards stale results. */
+@property (nonatomic, strong) dispatch_queue_t         list_queue;
+@property (nonatomic, assign) NSUInteger               list_generation;
+@property (nonatomic, assign) BOOL                     auto_fit_pending;
 
 /* Inline rename state */
-@property (nonatomic, strong) NSTextField          *rename_field;
-@property (nonatomic, strong) NSURL                *rename_url;
+@property (nonatomic, strong) NSTextField             *rename_field;
+@property (nonatomic, strong) NSURL                   *rename_url;
 
 /* Sort key and ascending flag */
-@property (nonatomic, strong) NSString             *sort_key;
-@property (nonatomic, assign) BOOL                  sort_ascending;
+@property (nonatomic, copy)   NSString                *sort_key;
+@property (nonatomic, assign) BOOL                     sort_ascending;
 
 /* Spotlight search state */
-@property (nonatomic, strong) NSMetadataQuery      *search_query;
-@property (nonatomic, assign) BOOL                  search_active;
+@property (nonatomic, strong) NSMetadataQuery         *search_query;
+@property (nonatomic, assign) BOOL                     search_active;
+
+- (void)schedule_reload;
 
 @end
 
-@implementation FilesBrowserView
-
-- (instancetype)initWithCoder:(NSCoder *)coder
+/*
+ * fs_event_callback — FSEventStream callback (main queue). Schedules one
+ * coalesced reload if any event concerns a direct child of the watched
+ * folder (or the folder itself); events deeper in the tree are ignored.
+ *
+ * Inputs:
+ *   client_info — the FilesBrowserView (unretained; the view stops the
+ *                 stream before it is deallocated)
+ *   num_events  — number of entries in event_paths / event_flags
+ *   event_paths — CFArray of CFString paths (kFSEventStreamCreateFlagUseCFTypes)
+ *   event_flags — per-event flags
+ */
+static void
+fs_event_callback(ConstFSEventStreamRef stream, void *client_info,
+                  size_t num_events, void *event_paths,
+                  const FSEventStreamEventFlags *event_flags,
+                  const FSEventStreamEventId *event_ids)
 {
-    (void)coder;
-    return [self init_with_frame:NSZeroRect];
+    FilesBrowserView *view = (__bridge FilesBrowserView *)client_info;
+    NSArray<NSString *> *paths = (__bridge NSArray<NSString *> *)event_paths;
+    NSString *watched = view.watched_path;
+
+    for (size_t i = 0; i < num_events; i++) {
+        NSString *path = paths[i];
+        BOOL relevant =
+            (event_flags[i] & (kFSEventStreamEventFlagMustScanSubDirs |
+                               kFSEventStreamEventFlagRootChanged)) ||
+            [path isEqualToString:watched] ||
+            [path.stringByDeletingLastPathComponent isEqualToString:watched];
+        if (relevant) {
+            [view schedule_reload];
+            return;
+        }
+    }
 }
+
+/* ── FilesBrowserView ────────────────────────────────────────────────── */
+
+@implementation FilesBrowserView
 
 /*
  * init_with_frame: — builds all subviews.
@@ -107,14 +291,17 @@ init_with_frame:(NSRect)frame
     self = [super initWithFrame:frame];
     if (!self) return nil;
 
-    self.back_stack    = [NSMutableArray array];
-    self.forward_stack = [NSMutableArray array];
-    self.all_items     = [NSMutableArray array];
+    self.back_stack     = [NSMutableArray array];
+    self.forward_stack  = [NSMutableArray array];
+    self.all_items      = [NSMutableArray array];
     self.filtered_items = [NSMutableArray array];
-    self.sort_key      = kColName;
+    self.sort_key       = col_name;
     self.sort_ascending = YES;
+    self.list_queue     = dispatch_queue_create("files.browser.listing",
+                                                DISPATCH_QUEUE_SERIAL);
 
     [self build_table];
+    [self update_sort_indicators];
 
     return self;
 }
@@ -125,11 +312,8 @@ init_with_frame:(NSRect)frame
 - (void)
 build_table
 {
-    /* Table */
     self.table = [[NSTableView alloc] initWithFrame:self.bounds];
-    if (@available(macOS 11.0, *)) {
-        self.table.style = NSTableViewStylePlain;
-    }
+    self.table.style                              = NSTableViewStylePlain;
     self.table.usesAlternatingRowBackgroundColors = YES;
     self.table.rowHeight                          = 20.0;
     self.table.allowsMultipleSelection            = YES;
@@ -140,25 +324,18 @@ build_table
     self.table.columnAutoresizingStyle            = NSTableViewFirstColumnOnlyAutoresizingStyle;
 
     /* Columns — no sortDescriptorPrototype; clicks handled by didClickTableColumn: */
-    struct { NSString *id; NSString *title; CGFloat width; CGFloat min; } cols[] = {
-        { kColName,     @"Name",          260, 120 },
-        { kColSize,     @"Size",           80,  50 },
-        { kColKind,     @"Kind",          120,  80 },
-        { kColPerms,    @"Permissions",    90,  70 },
-        { kColModified, @"Date Modified", 160, 120 },
-    };
-    for (size_t i = 0; i < sizeof(cols)/sizeof(cols[0]); i++) {
-        NSTableColumn *tc = [[NSTableColumn alloc] initWithIdentifier:cols[i].id];
-        tc.title          = cols[i].title;
-        tc.width          = cols[i].width;
-        tc.minWidth       = cols[i].min;
+    for (size_t i = 0; i < COLUMN_COUNT; i++) {
+        NSTableColumn *tc = [[NSTableColumn alloc] initWithIdentifier:column_specs[i].id];
+        tc.title          = column_specs[i].title;
+        tc.width          = column_specs[i].width;
+        tc.minWidth       = column_specs[i].min_width;
         tc.resizingMask   = NSTableColumnUserResizingMask | NSTableColumnAutoresizingMask;
         [self.table addTableColumn:tc];
     }
 
-    self.table.dataSource = self;
-    self.table.delegate   = self;
-    self.table.target     = self;
+    self.table.dataSource   = self;
+    self.table.delegate     = self;
+    self.table.target       = self;
     self.table.doubleAction = @selector(row_double_clicked:);
 
     /* Drag source: allow copying rows out to any destination. */
@@ -168,11 +345,8 @@ build_table
     /* Drag destination: accept file URL drops from any source. */
     [self.table registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
 
-    /* Row context menu */
-    NSMenu *menu = [self build_context_menu];
-    self.table.menu = menu;
+    self.table.menu = [self build_context_menu];
 
-    /* Scroll view */
     self.scroll = [[NSScrollView alloc] initWithFrame:self.bounds];
     self.scroll.documentView          = self.table;
     self.scroll.hasVerticalScroller   = YES;
@@ -181,7 +355,6 @@ build_table
     self.scroll.autoresizingMask      = NSViewWidthSizable | NSViewHeightSizable;
     [self addSubview:self.scroll];
 }
-
 
 /*
  * build_context_menu — builds the right-click menu for the table.
@@ -216,10 +389,12 @@ build_context_menu
     return menu;
 }
 
-/* ── FSEvents ────────────────────────────────────────────────────────── */
+/* ── Folder watcher ──────────────────────────────────────────────────── */
 
 /*
- * start_watching: — creates and starts an FSEventStream for dir.
+ * start_watching: — watches dir with an FSEventStream (file-level events,
+ * 0.3 s latency). fs_event_callback filters to direct children, so activity
+ * deeper in the tree (e.g. ~/Library caches while viewing ~) is ignored.
  *
  * Inputs:
  *   dir — directory URL to watch
@@ -229,21 +404,17 @@ start_watching:(NSURL *)dir
 {
     [self stop_watching];
 
-    FSEventStreamContext ctx = {
-        .version         = 0,
-        .info            = (__bridge void *)self,
-        .retain          = NULL,
-        .release         = NULL,
-        .copyDescription = NULL,
-    };
-    CFArrayRef paths = (__bridge CFArrayRef)@[dir.path];
-    self.fs_stream   = FSEventStreamCreate(
+    /* FSEvents reports resolved paths (/private/var, not /var). */
+    self.watched_path = dir.URLByResolvingSymlinksInPath.path;
+
+    FSEventStreamContext ctx = { .info = (__bridge void *)self };
+    self.fs_stream = FSEventStreamCreate(
         kCFAllocatorDefault,
         fs_event_callback,
         &ctx,
-        paths,
+        (__bridge CFArrayRef)@[self.watched_path],
         kFSEventStreamEventIdSinceNow,
-        0.5,
+        0.3,
         kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagFileEvents
     );
     if (self.fs_stream) {
@@ -253,7 +424,7 @@ start_watching:(NSURL *)dir
 }
 
 /*
- * stop_watching — stops and invalidates the current FSEventStream.
+ * stop_watching — stops and releases the current FSEventStream, if any.
  */
 - (void)
 stop_watching
@@ -266,197 +437,268 @@ stop_watching
     }
 }
 
-- (void)dealloc
+/*
+ * schedule_reload — coalesces watcher events: at most one reload per
+ * WATCH_COALESCE_SEC, however many events arrive in that window.
+ */
+- (void)
+schedule_reload
 {
-    [self stop_watching];
+    if (self.reload_scheduled) return;
+    self.reload_scheduled = YES;
+    __weak FilesBrowserView *ws = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(WATCH_COALESCE_SEC * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        FilesBrowserView *s = ws;
+        if (!s) return;
+        s.reload_scheduled = NO;
+        [s reload_directory];
+    });
 }
 
+/*
+ * dealloc — stops the folder watcher and any Spotlight query.
+ */
 - (void)
-viewDidMoveToWindow
+dealloc
 {
-    [super viewDidMoveToWindow];
-    if (self.window) {
-        [self update_sort_indicators];
-    }
+    [self stop_watching];
+    [self stop_search_query];
 }
 
 /* ── Navigation ──────────────────────────────────────────────────────── */
 
 /*
- * navigate_to: — loads url; manages back/forward stacks.
+ * push_history: — appends url to a back/forward stack, dropping the oldest
+ * entry beyond HISTORY_LIMIT.
  *
  * Inputs:
- *   url — directory URL to navigate to
+ *   url   — location to record; nil is ignored
+ *   stack — back_stack or forward_stack
+ */
+- (void)
+push_history:(NSURL *)url onto:(NSMutableArray<NSURL *> *)stack
+{
+    if (!url) return;
+    [stack addObject:url];
+    if (stack.count > HISTORY_LIMIT) [stack removeObjectAtIndex:0];
+}
+
+/*
+ * load_location: — makes url the displayed folder: ends any Spotlight search,
+ * re-targets the watcher, starts a listing (auto-fit runs when it lands) and
+ * notifies the navigation and Empty Trash handlers. Shared by navigate_to:,
+ * go_back and go_forward; does not touch the history stacks.
+ *
+ * Inputs:
+ *   url — directory URL
+ */
+- (void)
+load_location:(NSURL *)url
+{
+    [self stop_search_query];
+    self.current_dir      = url;
+    self.auto_fit_pending = YES;
+    [self start_watching:url];
+    [self reload_directory];
+
+    if (self.navigation_handler) self.navigation_handler(url);
+    if (self.trash_visible_handler) {
+        self.trash_visible_handler(files_same_path(url, files_directory_url(NSTrashDirectory)));
+    }
+}
+
+/*
+ * navigate_to: — shows url if it is a folder (recording history), otherwise
+ * opens it with its default application.
+ *
+ * Inputs:
+ *   url — target URL
  */
 - (void)
 navigate_to:(NSURL *)url
 {
-    /* Verify it is a directory */
     NSNumber *is_dir = nil;
     [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
     if (!is_dir.boolValue) {
         [NSWorkspace.sharedWorkspace openURL:url];
         return;
     }
+    if (files_same_path(url, self.current_dir)) return;
 
-    /* Cancel any active Spotlight search before navigating */
-    if (self.search_active) {
-        if (self.search_query) {
-            [self.search_query stopQuery];
-            [NSNotificationCenter.defaultCenter removeObserver:self
-                name:NSMetadataQueryDidUpdateNotification object:self.search_query];
-            [NSNotificationCenter.defaultCenter removeObserver:self
-                name:NSMetadataQueryDidFinishGatheringNotification object:self.search_query];
-            self.search_query = nil;
-        }
-        self.search_active = NO;
-    }
-
-    if (self.current_dir) {
-        [self.back_stack addObject:self.current_dir];
-    }
+    [self push_history:self.current_dir onto:self.back_stack];
     [self.forward_stack removeAllObjects];
-    self.current_dir = url;
-    [self start_watching:url];
-    [self reload_directory];
-    if (self.navigation_handler) {
-        self.navigation_handler(url);
-    }
-
-    /* Show the Empty Trash button only when the user is viewing ~/.Trash. */
-    NSString *trash_path = [NSHomeDirectory()
-        stringByAppendingPathComponent:@".Trash"];
-    if (self.trash_visible_handler)
-        self.trash_visible_handler([url.path isEqualToString:trash_path]);
+    [self load_location:url];
 }
 
 /*
- * go_back — navigates to the previous location.
+ * go_back — shows the previous location, if any.
  */
 - (void)
 go_back
 {
-    if (self.back_stack.count == 0) return;
     NSURL *prev = self.back_stack.lastObject;
+    if (!prev) return;
     [self.back_stack removeLastObject];
-    if (self.current_dir) {
-        [self.forward_stack addObject:self.current_dir];
-    }
-    self.current_dir = prev;
-    [self start_watching:prev];
-    [self reload_directory];
-    if (self.navigation_handler) {
-        self.navigation_handler(prev);
-    }
+    [self push_history:self.current_dir onto:self.forward_stack];
+    [self load_location:prev];
 }
 
 /*
- * go_forward — navigates to the next location in the forward stack.
+ * go_forward — shows the next location in the forward stack, if any.
  */
 - (void)
 go_forward
 {
-    if (self.forward_stack.count == 0) return;
     NSURL *next = self.forward_stack.lastObject;
+    if (!next) return;
     [self.forward_stack removeLastObject];
-    if (self.current_dir) {
-        [self.back_stack addObject:self.current_dir];
-    }
-    self.current_dir = next;
-    [self start_watching:next];
-    [self reload_directory];
-    if (self.navigation_handler) {
-        self.navigation_handler(next);
-    }
+    [self push_history:self.current_dir onto:self.back_stack];
+    [self load_location:next];
 }
 
-- (BOOL)can_go_back    { return self.back_stack.count > 0; }
-- (BOOL)can_go_forward { return self.forward_stack.count > 0; }
-- (NSURL *)current_url { return self.current_dir; }
+/*
+ * can_go_back — whether go_back has somewhere to go.
+ *
+ * Output: YES if the back stack is non-empty.
+ */
+- (BOOL)
+can_go_back
+{
+    return self.back_stack.count > 0;
+}
+
+/*
+ * can_go_forward — whether go_forward has somewhere to go.
+ *
+ * Output: YES if the forward stack is non-empty.
+ */
+- (BOOL)
+can_go_forward
+{
+    return self.forward_stack.count > 0;
+}
+
+/*
+ * current_url — the folder currently displayed.
+ *
+ * Output: directory URL, or nil before the first navigation.
+ */
+- (NSURL *)
+current_url
+{
+    return self.current_dir;
+}
 
 /*
  * selected_urls — returns the file URLs of selected table rows.
  *
- * Output: NSArray<NSURL *>.
+ * Output: NSArray<NSURL *>, empty if nothing is selected.
  */
 - (NSArray<NSURL *> *)
 selected_urls
 {
-    NSMutableArray<NSURL *> *result = [NSMutableArray array];
-    [self.table.selectedRowIndexes enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
-        if (idx < self.filtered_items.count) {
-            [result addObject:self.filtered_items[idx]];
-        }
-    }];
-    return result;
+    return [self.filtered_items objectsAtIndexes:
+        [self.table.selectedRowIndexes indexesPassingTest:^BOOL(NSUInteger idx, BOOL *stop) {
+            return idx < self.filtered_items.count;
+        }]];
 }
 
 /* ── Directory loading ───────────────────────────────────────────────── */
 
 /*
- * reload_directory — re-reads the current directory and refreshes the table.
- * Must be called on the main thread.
+ * reload_directory — re-reads the current folder and refreshes the table.
+ * See reload_directory_then:.
  */
 - (void)
 reload_directory
 {
-    if (!self.current_dir) return;
-    /* Don't overwrite live search results with a directory listing. */
-    if (self.search_active) return;
+    [self reload_directory_then:nil];
+}
 
-    NSError *err = nil;
-    NSArray<NSURL *> *items =
-        [NSFileManager.defaultManager
-            contentsOfDirectoryAtURL:self.current_dir
-          includingPropertiesForKeys:listing_keys()
-                             options:0   /* hidden-file filtering done in apply_filter */
-                               error:&err];
-    if (!items) {
-        NSLog(@"[browser] error reading %@: %@", self.current_dir.path, err);
-        items = @[];
-    }
+/*
+ * reload_directory_then: — lists the current folder on a background queue
+ * (so large or network folders never block the UI), then on the main queue
+ * sorts, filters, reloads the table and restores the selection by path.
+ * A generation counter drops results that a newer reload or navigation
+ * has superseded. No-op while Spotlight results are displayed.
+ *
+ * Inputs:
+ *   done — called on the main queue after the table shows the new
+ *          listing; not called if the result was superseded. May be nil.
+ */
+- (void)
+reload_directory_then:(void (^)(void))done
+{
+    NSURL *dir = self.current_dir;
+    if (!dir || self.search_active) return;
 
-    /* Snapshot selection by path before reloadData wipes it. */
-    NSArray<NSURL *> *prev_sel = [self selected_urls];
+    NSUInteger generation = ++self.list_generation;
+    __weak FilesBrowserView *ws = self;
+    dispatch_async(self.list_queue, ^{
+        NSError *err = nil;
+        NSArray<NSURL *> *items =
+            [NSFileManager.defaultManager contentsOfDirectoryAtURL:dir
+                                        includingPropertiesForKeys:listing_keys()
+                                                           options:0
+                                                             error:&err];
+        if (!items) NSLog(@"[browser] error reading %@: %@", dir.path, err);
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            FilesBrowserView *s = ws;
+            if (!s || generation != s.list_generation || s.search_active) return;
+            [s show_listing:items ?: @[]];
+            if (done) done();
+        });
+    });
+}
+
+/*
+ * show_listing: — installs a fresh folder listing in the table, keeping the
+ * selection (matched by path) and running a pending auto-fit.
+ *
+ * Inputs:
+ *   items — folder contents with listing_keys() prefetched
+ */
+- (void)
+show_listing:(NSArray<NSURL *> *)items
+{
+    NSSet<NSString *> *prev_sel = [NSSet setWithArray:
+        [[self selected_urls] valueForKey:@"path"]];
 
     self.all_items = [items mutableCopy];
     [self apply_sort];
     [self apply_filter];
     [self.table reloadData];
 
-    /* Restore selection: match by path since row indices may have shifted. */
     if (prev_sel.count > 0) {
-        NSMutableIndexSet *idx_set = [NSMutableIndexSet indexSet];
-        for (NSURL *sel in prev_sel) {
-            NSUInteger idx = [self.filtered_items indexOfObjectPassingTest:
-                ^BOOL(NSURL *item, NSUInteger i, BOOL *stop) {
-                    return [item.path isEqualToString:sel.path];
-                }];
-            if (idx != NSNotFound) [idx_set addIndex:idx];
-        }
-        if (idx_set.count > 0) {
-            [self.table selectRowIndexes:idx_set byExtendingSelection:NO];
-        }
+        NSIndexSet *rows = [self.filtered_items indexesOfObjectsPassingTest:
+            ^BOOL(NSURL *item, NSUInteger idx, BOOL *stop) {
+                return [prev_sel containsObject:item.path];
+            }];
+        [self.table selectRowIndexes:rows byExtendingSelection:NO];
     }
 
     [self update_status_bar];
-    [self update_sort_indicators];
-    if ([NSUserDefaults.standardUserDefaults boolForKey:@"files.auto_fit_columns"]) {
-        [self apply_auto_fit];
+    if (self.auto_fit_pending) {
+        self.auto_fit_pending = NO;
+        if ([NSUserDefaults.standardUserDefaults boolForKey:files_pref_auto_fit]) {
+            [self apply_auto_fit];
+        }
     }
 }
 
 /*
- * apply_sort — sorts all_items by the current sort descriptor.
+ * apply_sort — sorts all_items folders-first, then by the sort column using
+ * prefetched values (Finder-style natural order for names and kinds).
  */
 - (void)
 apply_sort
 {
-    NSString *key  = self.sort_key;
-    BOOL ascending = self.sort_ascending;
+    NSURLResourceKey key = sort_resource_key(self.sort_key);
+    BOOL ascending       = self.sort_ascending;
 
     [self.all_items sortUsingComparator:^NSComparisonResult(NSURL *a, NSURL *b) {
-        /* Folders first */
         NSNumber *a_dir = nil, *b_dir = nil;
         [a getResourceValue:&a_dir forKey:NSURLIsDirectoryKey error:nil];
         [b getResourceValue:&b_dir forKey:NSURLIsDirectoryKey error:nil];
@@ -465,75 +707,52 @@ apply_sort
         }
 
         id av = nil, bv = nil;
-        if ([key isEqualToString:kColSize]) {
-            [a getResourceValue:&av forKey:NSURLFileSizeKey error:nil];
-            [b getResourceValue:&bv forKey:NSURLFileSizeKey error:nil];
-        } else if ([key isEqualToString:kColKind]) {
-            [a getResourceValue:&av forKey:NSURLLocalizedTypeDescriptionKey error:nil];
-            [b getResourceValue:&bv forKey:NSURLLocalizedTypeDescriptionKey error:nil];
-        } else if ([key isEqualToString:kColModified]) {
-            [a getResourceValue:&av forKey:NSURLContentModificationDateKey error:nil];
-            [b getResourceValue:&bv forKey:NSURLContentModificationDateKey error:nil];
-        } else {
-            [a getResourceValue:&av forKey:NSURLNameKey error:nil];
-            [b getResourceValue:&bv forKey:NSURLNameKey error:nil];
-        }
+        [a getResourceValue:&av forKey:key error:nil];
+        [b getResourceValue:&bv forKey:key error:nil];
 
-        NSComparisonResult cmp = NSOrderedSame;
-        if ([av respondsToSelector:@selector(localizedCaseInsensitiveCompare:)]) {
-            cmp = [(NSString *)av localizedCaseInsensitiveCompare:(NSString *)bv];
-        } else if ([av respondsToSelector:@selector(compare:)]) {
-            cmp = [(NSDate *)av compare:(NSDate *)bv];
+        NSComparisonResult cmp;
+        if (!av || !bv) {
+            cmp = (av == bv) ? NSOrderedSame : (av ? NSOrderedDescending : NSOrderedAscending);
+        } else if ([av isKindOfClass:NSString.class]) {
+            cmp = [(NSString *)av localizedStandardCompare:bv];
+        } else {
+            cmp = [av compare:bv];
         }
         return ascending ? cmp : (NSComparisonResult)(-cmp);
     }];
 }
 
 /*
- * apply_filter — populates filtered_items from all_items.
- * Hides items whose NSURLIsHiddenKey is YES unless the user preference
- * "files.show_hidden_files" is set. When search_text is set the text is also
- * matched against the filename (case-insensitive substring).
+ * apply_filter — populates filtered_items from all_items, hiding items whose
+ * NSURLIsHiddenKey is set unless files_pref_show_hidden is on. Everything in
+ * the Trash is shown, since the OS marks Trash items hidden.
  */
 - (void)
 apply_filter
 {
     BOOL show_hidden =
-        [NSUserDefaults.standardUserDefaults boolForKey:@"files.show_hidden_files"];
+        [NSUserDefaults.standardUserDefaults boolForKey:files_pref_show_hidden] ||
+        files_same_path(self.current_dir, files_directory_url(NSTrashDirectory));
 
-    /* Items inside ~/.Trash are all tagged UF_HIDDEN by the OS; always show them
-     * regardless of the show-hidden-files preference. */
-    NSString *trash_path = [NSHomeDirectory() stringByAppendingPathComponent:@".Trash"];
-    if ([self.current_dir.path isEqualToString:trash_path]) show_hidden = YES;
-
-    NSString *q = self.search_text;
-
-    self.filtered_items = [NSMutableArray array];
+    self.filtered_items = [NSMutableArray arrayWithCapacity:self.all_items.count];
     for (NSURL *url in self.all_items) {
-        /* Hidden-file gate */
         if (!show_hidden) {
             NSNumber *hidden = nil;
             [url getResourceValue:&hidden forKey:NSURLIsHiddenKey error:nil];
             if (hidden.boolValue) continue;
         }
-        /* Text filter (only active when search is not delegated to Spotlight) */
-        if (!self.search_active && q.length > 0) {
-            NSString *name = nil;
-            [url getResourceValue:&name forKey:NSURLNameKey error:nil];
-            if ([name rangeOfString:q options:NSCaseInsensitiveSearch].location == NSNotFound) {
-                continue;
-            }
-        }
         [self.filtered_items addObject:url];
     }
 }
 
+/* ── Spotlight search ────────────────────────────────────────────────── */
+
 /*
- * set_search_filter: — starts a Spotlight search for text, or ends it when
- * text is nil or empty.
+ * set_search_filter: — starts a Spotlight search for text within the current
+ * folder, or ends it when text is nil or empty.
  *
  * Inputs:
- *   text — search string; nil/empty restores the directory listing
+ *   text — search string; nil/empty restores the folder listing
  */
 - (void)
 set_search_filter:(NSString *)text
@@ -541,22 +760,17 @@ set_search_filter:(NSString *)text
     if (text.length == 0) {
         [self end_spotlight_search];
     } else {
-        [self begin_spotlight_search:text scope:self.current_dir];
+        [self begin_spotlight_search:text];
     }
 }
 
 /*
- * begin_spotlight_search:scope: — starts an NSMetadataQuery search for
- * filenames containing query within scope and its subdirectories.
- *
- * Inputs:
- *   query — search term matched against kMDItemDisplayName (case-insensitive)
- *   scope — directory URL to scope the search to
+ * stop_search_query — stops the running NSMetadataQuery (if any), removes its
+ * observers and leaves search mode. Does not reload the listing.
  */
 - (void)
-begin_spotlight_search:(NSString *)query scope:(NSURL *)scope
+stop_search_query
 {
-    /* Stop any previous query */
     if (self.search_query) {
         [self.search_query stopQuery];
         [NSNotificationCenter.defaultCenter removeObserver:self
@@ -565,16 +779,32 @@ begin_spotlight_search:(NSString *)query scope:(NSURL *)scope
             name:NSMetadataQueryDidFinishGatheringNotification object:self.search_query];
         self.search_query = nil;
     }
+    self.search_active = NO;
+}
 
-    self.search_active  = YES;
-    self.filtered_items = [NSMutableArray array];
+/*
+ * begin_spotlight_search: — starts an NSMetadataQuery for items whose display
+ * name contains query, anywhere under the current folder.
+ *
+ * Inputs:
+ *   query — search term (case- and diacritic-insensitive)
+ */
+- (void)
+begin_spotlight_search:(NSString *)query
+{
+    [self stop_search_query];
+    if (!self.current_dir) return;
+
+    self.search_active    = YES;
+    self.auto_fit_pending = YES;
+    self.filtered_items   = [NSMutableArray array];
     [self.table reloadData];
     [self update_status_bar];
 
     self.search_query = [[NSMetadataQuery alloc] init];
     self.search_query.predicate =
         [NSPredicate predicateWithFormat:@"kMDItemDisplayName CONTAINS[cd] %@", query];
-    self.search_query.searchScopes = @[scope ?: self.current_dir];
+    self.search_query.searchScopes = @[self.current_dir];
 
     [NSNotificationCenter.defaultCenter addObserver:self
         selector:@selector(search_results_updated:)
@@ -589,29 +819,20 @@ begin_spotlight_search:(NSString *)query scope:(NSURL *)scope
 }
 
 /*
- * end_spotlight_search — stops any running search and restores the directory
- * listing for the current directory.
+ * end_spotlight_search — stops any running search and restores the listing
+ * of the current folder.
  */
 - (void)
 end_spotlight_search
 {
-    if (!self.search_query) {
-        self.search_active = NO;
-        return;
-    }
-    [self.search_query stopQuery];
-    [NSNotificationCenter.defaultCenter removeObserver:self
-        name:NSMetadataQueryDidUpdateNotification object:self.search_query];
-    [NSNotificationCenter.defaultCenter removeObserver:self
-        name:NSMetadataQueryDidFinishGatheringNotification object:self.search_query];
-    self.search_query  = nil;
-    self.search_active = NO;
-    [self reload_directory];
+    BOOL was_active = self.search_active;
+    [self stop_search_query];
+    if (was_active) [self reload_directory];
 }
 
 /*
- * search_results_updated: — NSMetadataQuery notification handler; converts
- * result items to file URLs and refreshes the table.
+ * search_results_updated: — NSMetadataQuery notification handler; shows the
+ * results (sorted and hidden-filtered like a listing) in the table.
  *
  * Inputs:
  *   note — NSMetadataQueryDidUpdateNotification or DidFinishGatheringNotification
@@ -621,20 +842,23 @@ search_results_updated:(NSNotification *)note
 {
     [self.search_query disableUpdates];
 
-    NSMutableArray<NSURL *> *results = [NSMutableArray array];
+    NSMutableArray<NSURL *> *results = [NSMutableArray arrayWithCapacity:self.search_query.resultCount];
     for (NSUInteger i = 0; i < self.search_query.resultCount; i++) {
         NSMetadataItem *item = [self.search_query resultAtIndex:i];
         NSString *path = [item valueForAttribute:NSMetadataItemPathKey];
-        if (path) {
-            [results addObject:[NSURL fileURLWithPath:path]];
-        }
+        if (path) [results addObject:[NSURL fileURLWithPath:path]];
     }
 
-    self.filtered_items = results;
+    self.all_items = results;
+    [self apply_sort];
+    [self apply_filter];
     [self.table reloadData];
     [self update_status_bar];
-    if ([NSUserDefaults.standardUserDefaults boolForKey:@"files.auto_fit_columns"]) {
-        [self apply_auto_fit];
+    if (self.auto_fit_pending && results.count > 0) {
+        self.auto_fit_pending = NO;
+        if ([NSUserDefaults.standardUserDefaults boolForKey:files_pref_auto_fit]) {
+            [self apply_auto_fit];
+        }
     }
 
     [self.search_query enableUpdates];
@@ -643,79 +867,32 @@ search_results_updated:(NSNotification *)note
 /* ── Sort indicators ─────────────────────────────────────────────────── */
 
 /*
- * update_sort_indicators — appends ↑ or ↓ to the sorted column's title and
- * strips any prior arrow from the others. Uses the title directly because
- * setIndicatorImage:inTableColumn: is unreliable with NSTableViewStylePlain
- * on macOS 13+.
+ * update_sort_indicators — sets every header to its base title and appends
+ * ↑ or ↓ to the sorted column. Uses the title directly because
+ * setIndicatorImage:inTableColumn: is unreliable with NSTableViewStylePlain.
  */
 - (void)
 update_sort_indicators
 {
-    /* Strip any existing arrow suffix from every column. */
     for (NSTableColumn *col in self.table.tableColumns) {
-        if ([col.title hasSuffix:@" ↑"] || [col.title hasSuffix:@" ↓"]) {
-            col.title = [col.title substringToIndex:col.title.length - 2];
+        NSString *title = column_title(col.identifier);
+        if ([col.identifier isEqualToString:self.sort_key]) {
+            title = [title stringByAppendingString:self.sort_ascending ? @" ↑" : @" ↓"];
         }
+        col.title = title;
     }
-
-    NSTableColumn *col = [self.table tableColumnWithIdentifier:self.sort_key];
-    if (!col) return;
-
-    col.title = [col.title stringByAppendingString:
-                 self.sort_ascending ? @" ↑" : @" ↓"];
     [self.table.headerView setNeedsDisplay:YES];
 }
 
-/* ── Column auto-fit ─────────────────────────────────────────────────── */
+/* ── Cells and column auto-fit ───────────────────────────────────────── */
 
 /*
-/*
- * perms_string_for_mode: — formats a POSIX mode_t as the 10-char ls -la string.
+ * cell_text_for_column:url: — returns the display string for a cell, using
+ * only prefetched resource values. Shared by the cell-view builder and the
+ * column auto-fit measurement.
  *
  * Inputs:
- *   mode — st_mode from lstat(2)
- *
- * Output: e.g. "drwxr-xr-x"
- */
-static NSString *
-perms_string_for_mode(mode_t mode)
-{
-    char b[11];
-
-    switch (mode & S_IFMT) {
-    case S_IFDIR:  b[0] = 'd'; break;
-    case S_IFLNK:  b[0] = 'l'; break;
-    case S_IFCHR:  b[0] = 'c'; break;
-    case S_IFBLK:  b[0] = 'b'; break;
-    case S_IFIFO:  b[0] = 'p'; break;
-    case S_IFSOCK: b[0] = 's'; break;
-    default:       b[0] = '-'; break;
-    }
-
-    b[1] = (mode & S_IRUSR) ? 'r' : '-';
-    b[2] = (mode & S_IWUSR) ? 'w' : '-';
-    b[3] = (mode & S_ISUID) ? ((mode & S_IXUSR) ? 's' : 'S')
-                             : ((mode & S_IXUSR) ? 'x' : '-');
-
-    b[4] = (mode & S_IRGRP) ? 'r' : '-';
-    b[5] = (mode & S_IWGRP) ? 'w' : '-';
-    b[6] = (mode & S_ISGID) ? ((mode & S_IXGRP) ? 's' : 'S')
-                             : ((mode & S_IXGRP) ? 'x' : '-');
-
-    b[7] = (mode & S_IROTH) ? 'r' : '-';
-    b[8] = (mode & S_IWOTH) ? 'w' : '-';
-    b[9] = (mode & S_ISVTX) ? ((mode & S_IXOTH) ? 't' : 'T')
-                             : ((mode & S_IXOTH) ? 'x' : '-');
-    b[10] = '\0';
-    return [NSString stringWithUTF8String:b];
-}
-
-/*
- * cell_text_for_column:url: — returns the display string for a cell.
- * Shared by the cell-view builder and the column auto-fit measurement.
- *
- * Inputs:
- *   col_id — column identifier (kColName, kColSize, …)
+ *   col_id — column identifier (col_name, col_size, …)
  *   url    — file URL for the row
  *
  * Output: NSString to display; never nil.
@@ -724,23 +901,19 @@ perms_string_for_mode(mode_t mode)
 cell_text_for_column:(NSString *)col_id
                  url:(NSURL *)url
 {
-    if ([col_id isEqualToString:kColName]) {
+    if ([col_id isEqualToString:col_name]) {
         NSString *name = nil;
         [url getResourceValue:&name forKey:NSURLNameKey error:nil];
         return name ?: url.lastPathComponent;
 
-    } else if ([col_id isEqualToString:kColSize]) {
-        NSNumber *is_dir = nil;
+    } else if ([col_id isEqualToString:col_size]) {
+        NSNumber *is_dir = nil, *sz = nil;
         [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
-        if (is_dir.boolValue) return @"—";
-        NSNumber *sz = nil;
         [url getResourceValue:&sz forKey:NSURLFileSizeKey error:nil];
-        if (!sz) return @"—";
-        NSByteCountFormatter *fmt = [[NSByteCountFormatter alloc] init];
-        fmt.countStyle = NSByteCountFormatterCountStyleFile;
-        return [fmt stringFromByteCount:sz.longLongValue];
+        if (is_dir.boolValue || !sz) return @"—";
+        return files_format_bytes(sz.longLongValue);
 
-    } else if ([col_id isEqualToString:kColKind]) {
+    } else if ([col_id isEqualToString:col_kind]) {
         NSNumber *is_dir = nil;
         [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
         if (is_dir.boolValue) return @"Folder";
@@ -748,59 +921,66 @@ cell_text_for_column:(NSString *)col_id
         [url getResourceValue:&kind forKey:NSURLLocalizedTypeDescriptionKey error:nil];
         return kind ?: @"—";
 
-    } else if ([col_id isEqualToString:kColPerms]) {
-        struct stat st;
-        if (lstat(url.fileSystemRepresentation, &st) != 0) return @"—";
-        return perms_string_for_mode(st.st_mode);
+    } else if ([col_id isEqualToString:col_perms]) {
+        mode_t mode = file_mode(url);
+        return mode ? perms_string_for_mode(mode) : @"—";
 
-    } else if ([col_id isEqualToString:kColModified]) {
+    } else if ([col_id isEqualToString:col_modified]) {
         NSDate *date = nil;
         [url getResourceValue:&date forKey:NSURLContentModificationDateKey error:nil];
-        if (!date) return @"—";
-        NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
-        fmt.dateStyle = NSDateFormatterShortStyle;
-        fmt.timeStyle = NSDateFormatterShortStyle;
-        return [fmt stringFromDate:date];
+        return files_format_date(date, NSDateFormatterShortStyle);
     }
     return @"";
 }
 
 /*
- * apply_auto_fit — resizes every column to the widest content across all
- * rows, respecting each column's minWidth, then gives the Name column
- * whatever width is left over (or takes back the overflow, down to its
- * minWidth) so the columns exactly fill the visible width. A horizontal
- * scrollbar therefore only appears when the view is narrower than the
- * minimum the columns need — the same result AppKit's first-column
- * autoresizing reaches after a manual window resize.
+ * cell_font_for_column — font a column's cells are drawn in (Permissions is
+ * monospaced). Used by the cell builder and by auto-fit measurement.
+ *
+ * Inputs:
+ *   col_id — column identifier
+ *
+ * Output: NSFont.
+ */
+static NSFont *
+cell_font_for_column(NSString *col_id)
+{
+    return [col_id isEqualToString:col_perms]
+        ? [NSFont monospacedSystemFontOfSize:11.0 weight:NSFontWeightRegular]
+        : [NSFont systemFontOfSize:12.0];
+}
+
+/*
+ * apply_auto_fit — sizes every column to its widest content (header and the
+ * first AUTO_FIT_ROW_LIMIT rows, in the column's real font), respecting each
+ * column's minWidth, then gives the Name column whatever width is left over
+ * (or takes back the overflow, down to its minWidth) so the columns exactly
+ * fill the visible width. A horizontal scrollbar therefore only appears when
+ * the view is narrower than the minimum the columns need. Runs once per
+ * navigation or search and when the Auto-Fit toggle is turned on — not on
+ * every watcher refresh.
  */
 - (void)
 apply_auto_fit
 {
-    NSDictionary *cell_attrs = @{ NSFontAttributeName: [NSFont systemFontOfSize:12.0] };
-
     /* Extra fixed pixels: icon+gap for Name col; cell left+right padding elsewhere. */
-    static const CGFloat kNameExtra = 16 + 4 + 2 + 2; /* icon + gap + l-pad + r-pad */
-    static const CGFloat kCellExtra = 2 + 2;           /* l-pad + r-pad */
-    static const CGFloat kColPad    = 10;              /* header side padding + margin */
+    static const CGFloat name_extra = 16 + 4 + 2 + 2; /* icon + gap + l-pad + r-pad */
+    static const CGFloat cell_extra = 2 + 2;           /* l-pad + r-pad */
+    static const CGFloat header_pad = 10;              /* header side padding + margin */
 
+    NSUInteger rows = MIN(self.filtered_items.count, (NSUInteger)AUTO_FIT_ROW_LIMIT);
     CGFloat total = 0;
     for (NSTableColumn *col in self.table.tableColumns) {
         NSString *col_id = col.identifier;
 
-        /* Measure header — strip any sort-indicator suffix first. */
-        NSString *hdr = col.title;
-        if ([hdr hasSuffix:@" ↑"] || [hdr hasSuffix:@" ↓"]) {
-            hdr = [hdr substringToIndex:hdr.length - 2];
-        }
-        CGFloat max_w = [hdr sizeWithAttributes:
-            @{ NSFontAttributeName: col.headerCell.font }].width + kColPad;
+        CGFloat max_w = [col.title sizeWithAttributes:
+            @{ NSFontAttributeName: col.headerCell.font }].width + header_pad;
 
-        /* Measure every row. */
-        CGFloat extra = [col_id isEqualToString:kColName] ? kNameExtra : kCellExtra;
-        for (NSURL *url in self.filtered_items) {
-            NSString *text = [self cell_text_for_column:col_id url:url];
-            CGFloat w = [text sizeWithAttributes:cell_attrs].width + extra;
+        NSDictionary *attrs = @{ NSFontAttributeName: cell_font_for_column(col_id) };
+        CGFloat extra = [col_id isEqualToString:col_name] ? name_extra : cell_extra;
+        for (NSUInteger i = 0; i < rows; i++) {
+            NSString *text = [self cell_text_for_column:col_id url:self.filtered_items[i]];
+            CGFloat w = [text sizeWithAttributes:attrs].width + extra;
             if (w > max_w) max_w = w;
         }
 
@@ -821,15 +1001,16 @@ apply_auto_fit
                                                borderType:self.scroll.borderType
                                               controlSize:NSControlSizeRegular
                                             scrollerStyle:self.scroll.scrollerStyle].width;
-    NSTableColumn *name_col = [self.table tableColumnWithIdentifier:kColName];
+    NSTableColumn *name_col = [self.table tableColumnWithIdentifier:col_name];
     name_col.width = MAX(name_col.minWidth, name_col.width + (avail - total));
 }
 
-/* ── Status bar ──────────────────────────────────────────────────────── */
+/* ── Trash and status ────────────────────────────────────────────────── */
 
 /*
- * empty_trash_action: — confirms and permanently deletes everything in
- * ~/.Trash, then reloads the directory listing.
+ * empty_trash_action: — confirms, then permanently deletes everything in the
+ * Trash (including dotfiles such as .DS_Store) on a background queue, and
+ * reports any items that could not be removed.
  *
  * Inputs:
  *   sender — the Empty Trash button (unused)
@@ -837,70 +1018,79 @@ apply_auto_fit
 - (IBAction)
 empty_trash_action:(id)sender
 {
-    NSAlert *alert       = [[NSAlert alloc] init];
-    alert.messageText    = @"Permanently delete the items in the Trash?";
+    NSAlert *alert        = [[NSAlert alloc] init];
+    alert.messageText     = @"Permanently delete the items in the Trash?";
     alert.informativeText = @"You cannot undo this action.";
+    alert.alertStyle      = NSAlertStyleWarning;
     [alert addButtonWithTitle:@"Empty Trash"];
     [alert addButtonWithTitle:@"Cancel"];
-    alert.alertStyle = NSAlertStyleWarning;
 
-    [alert beginSheetModalForWindow:self.window
-                  completionHandler:^(NSModalResponse resp) {
+    __weak FilesBrowserView *ws = self;
+    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse resp) {
         if (resp != NSAlertFirstButtonReturn) return;
-        NSString *trash_path = [NSHomeDirectory()
-            stringByAppendingPathComponent:@".Trash"];
-        NSURL *trash_url = [NSURL fileURLWithPath:trash_path];
-        NSArray<NSURL *> *items =
-            [NSFileManager.defaultManager
-                contentsOfDirectoryAtURL:trash_url
-                includingPropertiesForKeys:nil
-                options:NSDirectoryEnumerationSkipsHiddenFiles
-                error:nil];
-        for (NSURL *item in items) {
-            [NSFileManager.defaultManager removeItemAtURL:item error:nil];
-        }
-        [self reload_directory];
-        if (self.status_text_handler) self.status_text_handler(@"Trash emptied.");
-        __weak FilesBrowserView *ws = self;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            [ws update_status_bar];
+        NSURL *trash = files_directory_url(NSTrashDirectory);
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            NSError *first_err = nil;
+            NSArray<NSURL *> *items = [NSFileManager.defaultManager
+                contentsOfDirectoryAtURL:trash includingPropertiesForKeys:nil
+                                 options:0 error:&first_err];
+            for (NSURL *item in items) {
+                NSError *err = nil;
+                if (![NSFileManager.defaultManager removeItemAtURL:item error:&err] && !first_err) {
+                    first_err = err;
+                }
+            }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                FilesBrowserView *s = ws;
+                if (!s) return;
+                if (first_err) files_show_error(@"Some items could not be deleted", first_err, s.window);
+                [s reload_directory];
+            });
         });
     }];
 }
 
 /*
- * update_status_bar — updates the status label text.
+ * update_status_bar — sends the item/selection count to status_text_handler.
  */
 - (void)
 update_status_bar
 {
     NSInteger total    = (NSInteger)self.filtered_items.count;
     NSInteger selected = (NSInteger)self.table.numberOfSelectedRows;
-    NSString *msg;
+    NSString *msg = [NSString stringWithFormat:@"%ld item%@", (long)total, total == 1 ? @"" : @"s"];
     if (selected > 0) {
-        msg = [NSString stringWithFormat:@"%ld item%@ — %ld selected",
-               (long)total,   total == 1   ? @"" : @"s",
-               (long)selected];
-    } else {
-        msg = [NSString stringWithFormat:@"%ld item%@",
-               (long)total, total == 1 ? @"" : @"s"];
+        msg = [msg stringByAppendingFormat:@" — %ld selected", (long)selected];
     }
     if (self.status_text_handler) self.status_text_handler(msg);
 }
 
-/* ── NSTableViewDataSource ───────────────────────────────────────────── */
+/* ── NSTableViewDataSource / Delegate ────────────────────────────────── */
 
+/*
+ * numberOfRowsInTableView: — row count for the table.
+ *
+ * Inputs:
+ *   tv — the table view
+ *
+ * Output: number of displayed items.
+ */
 - (NSInteger)
 numberOfRowsInTableView:(NSTableView *)tv
 {
-    NSInteger n = (NSInteger)self.filtered_items.count;
-    return n;
+    return (NSInteger)self.filtered_items.count;
 }
 
 /*
- * tableView:viewForTableColumn:row: — returns the cell view for a given
- * column and row.
+ * tableView:viewForTableColumn:row: — returns a (reused) cell view for a
+ * column and row, filled from prefetched values.
+ *
+ * Inputs:
+ *   tv  — the table view
+ *   col — column being displayed
+ *   row — row index
+ *
+ * Output: NSTableCellView, or nil for an out-of-range row.
  */
 - (NSView *)
 tableView:(NSTableView *)tv
@@ -919,13 +1109,15 @@ viewForTableColumn:(NSTableColumn *)col
         tf.editable        = NO;
         tf.bordered        = NO;
         tf.drawsBackground = NO;
-        tf.font            = [NSFont systemFontOfSize:12.0];
+        tf.font            = cell_font_for_column(ident);
+        tf.alignment       = [ident isEqualToString:col_size]
+                             ? NSTextAlignmentRight : NSTextAlignmentLeft;
         tf.lineBreakMode   = NSLineBreakByTruncatingMiddle;
         tf.translatesAutoresizingMaskIntoConstraints = NO;
         cell.textField = tf;
         [cell addSubview:tf];
 
-        if ([ident isEqualToString:kColName]) {
+        if ([ident isEqualToString:col_name]) {
             NSImageView *iv = [[NSImageView alloc] init];
             iv.imageScaling = NSImageScaleProportionallyUpOrDown;
             iv.translatesAutoresizingMaskIntoConstraints = NO;
@@ -951,25 +1143,14 @@ viewForTableColumn:(NSTableColumn *)col
     }
 
     cell.textField.stringValue = [self cell_text_for_column:ident url:url];
-
-    if ([ident isEqualToString:kColName]) {
-        NSImage *icon = [NSWorkspace.sharedWorkspace iconForFile:url.path];
-        icon.size     = NSMakeSize(16, 16);
-        cell.imageView.image = icon;
-    } else if ([ident isEqualToString:kColSize]) {
-        cell.textField.alignment = NSTextAlignmentRight;
-    } else if ([ident isEqualToString:kColPerms]) {
-        cell.textField.font = [NSFont monospacedSystemFontOfSize:11.0 weight:NSFontWeightRegular];
-        cell.textField.alignment = NSTextAlignmentLeft;
-    }
-
+    if ([ident isEqualToString:col_name]) cell.imageView.image = icon_for_url(url);
     return cell;
 }
 
 /*
  * tableView:didClickTableColumn: — handles column header clicks for sorting.
  * Clicking the active sort column flips ascending/descending; clicking another
- * column sorts by it ascending.
+ * column sorts by it ascending. Works for folder listings and search results.
  *
  * Inputs:
  *   tv  — the table view
@@ -992,21 +1173,25 @@ didClickTableColumn:(NSTableColumn *)col
     [self update_sort_indicators];
 }
 
-/* ── NSTableViewDelegate ─────────────────────────────────────────────── */
-
+/*
+ * tableViewSelectionDidChange: — refreshes the status text and informs the
+ * sidebar handler of the new selection.
+ *
+ * Inputs:
+ *   note — NSTableViewSelectionDidChangeNotification (unused)
+ */
 - (void)
 tableViewSelectionDidChange:(NSNotification *)note
 {
     [self update_status_bar];
-    if (self.sidebar_handler) {
-        self.sidebar_handler([self selected_urls]);
-    }
+    if (self.sidebar_handler) self.sidebar_handler([self selected_urls]);
 }
 
-/* ── Double-click ────────────────────────────────────────────────────── */
+/* ── Opening items ───────────────────────────────────────────────────── */
 
 /*
- * row_double_clicked: — navigates into a folder or opens a file.
+ * row_double_clicked: — opens the double-clicked item (navigate_to: shows
+ * folders and opens files).
  *
  * Inputs:
  *   sender — the table view (unused)
@@ -1016,56 +1201,11 @@ row_double_clicked:(id)sender
 {
     NSInteger row = self.table.clickedRow;
     if (row < 0 || (NSUInteger)row >= self.filtered_items.count) return;
-    NSURL *url = self.filtered_items[row];
-    NSNumber *is_dir = nil;
-    [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
-    if (is_dir.boolValue) {
-        [self navigate_to:url];
-    } else {
-        [NSWorkspace.sharedWorkspace openURL:url];
-    }
-}
-
-/* ── Keyboard handling ───────────────────────────────────────────────── */
-
-- (BOOL)
-acceptsFirstResponder
-{
-    return YES;
+    [self navigate_to:self.filtered_items[row]];
 }
 
 /*
- * keyDown: — Return/Enter begins an inline rename; Escape cancels one.
- * Move to Trash is deliberately not bound to a bare Delete key: it is only
- * reachable via ⌘⌫ (Edit menu key equivalent), matching Finder.
- *
- * Inputs:
- *   event — key-down event; unhandled keys are passed to super
- */
-- (void)
-keyDown:(NSEvent *)event
-{
-    NSString *chars = event.charactersIgnoringModifiers;
-
-    /* Return/Enter: begin rename */
-    if ([chars isEqualToString:@"\r"] || [chars isEqualToString:@"\n"]) {
-        [self begin_rename:nil];
-        return;
-    }
-
-    /* Escape: cancel rename */
-    if (event.keyCode == 53) {
-        [self cancel_rename];
-        return;
-    }
-
-    [super keyDown:event];
-}
-
-/* ── Actions ─────────────────────────────────────────────────────────── */
-
-/*
- * open_selected: — opens selected files/folders.
+ * open_selected: — opens every selected item via navigate_to:.
  *
  * Inputs:
  *   sender — menu item (unused)
@@ -1074,124 +1214,169 @@ keyDown:(NSEvent *)event
 open_selected:(id)sender
 {
     for (NSURL *url in [self selected_urls]) {
-        NSNumber *is_dir = nil;
-        [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
-        if (is_dir.boolValue) {
-            [self navigate_to:url];
-        } else {
-            [NSWorkspace.sharedWorkspace openURL:url];
-        }
+        [self navigate_to:url];
     }
 }
 
+/* ── Keyboard handling ───────────────────────────────────────────────── */
+
 /*
- * copy: — copies selected URLs to the pasteboard.
+ * acceptsFirstResponder — the browser takes keyboard focus for its key
+ * handling (rename shortcuts) and editing actions.
+ *
+ * Output: YES.
+ */
+- (BOOL)
+acceptsFirstResponder
+{
+    return YES;
+}
+
+/*
+ * keyDown: — Return/Enter begins an inline rename. Move to Trash is
+ * deliberately not bound to a bare Delete key: it is only reachable via ⌘⌫
+ * (Edit menu key equivalent), matching Finder.
+ *
+ * Inputs:
+ *   event — key-down event; unhandled keys are passed to super
+ */
+- (void)
+keyDown:(NSEvent *)event
+{
+    NSString *chars = event.charactersIgnoringModifiers;
+    if ([chars isEqualToString:@"\r"] || [chars isEqualToString:@"\n"]) {
+        [self begin_rename:nil];
+        return;
+    }
+    [super keyDown:event];
+}
+
+/* ── Edit / File actions ─────────────────────────────────────────────── */
+
+/*
+ * copy: — puts the selected items on the pasteboard.
+ *
+ * Inputs:
+ *   sender — menu item (unused)
  */
 - (IBAction)
 copy:(id)sender
 {
     NSArray<NSURL *> *sel = [self selected_urls];
-    if (sel.count > 0) {
-        [FilesFileOps copy_urls:sel is_cut:NO];
-    }
+    if (sel.count > 0) [FilesFileOps copy_urls:sel is_cut:NO];
 }
 
 /*
- * cut: — copies selected URLs as a cut operation.
+ * cut: — puts the selected items on the pasteboard marked for moving.
+ *
+ * Inputs:
+ *   sender — menu item (unused)
  */
 - (IBAction)
 cut:(id)sender
 {
     NSArray<NSURL *> *sel = [self selected_urls];
-    if (sel.count > 0) {
-        [FilesFileOps copy_urls:sel is_cut:YES];
-    }
+    if (sel.count > 0) [FilesFileOps copy_urls:sel is_cut:YES];
 }
 
 /*
- * paste: — pastes from pasteboard into the current directory.
+ * paste: — copies (or moves, after a cut) the pasteboard's files into the
+ * current folder.
+ *
+ * Inputs:
+ *   sender — menu item (unused)
  */
 - (IBAction)
 paste:(id)sender
 {
-    if (!self.current_dir) return;
-    if (![FilesFileOps pasteboard_has_files]) return;
+    if (!self.current_dir || ![FilesFileOps pasteboard_has_files]) return;
+    __weak FilesBrowserView *ws = self;
     [FilesFileOps paste_to_directory:self.current_dir completion:^(NSError *err) {
-        if (err && err.code != NSUserCancelledError) {
-            NSAlert *alert = [[NSAlert alloc] init];
-            alert.messageText     = @"Paste failed";
-            alert.informativeText = err.localizedDescription ?: @"Unknown error";
-            [alert runModal];
-        }
-        [self reload_directory];
+        FilesBrowserView *s = ws;
+        if (!s) return;
+        if (err && err.code != NSUserCancelledError) files_show_error(@"Paste failed", err, s.window);
+        [s reload_directory];
     }];
 }
 
 /*
- * move_to_trash_action: — moves selected files to the trash.
+ * move_to_trash_action: — moves the selected items to the Trash.
+ *
+ * Inputs:
+ *   sender — menu item (unused)
  */
 - (IBAction)
 move_to_trash_action:(id)sender
 {
     NSArray<NSURL *> *sel = [self selected_urls];
     if (sel.count == 0) return;
+    __weak FilesBrowserView *ws = self;
     [FilesFileOps move_to_trash:sel completion:^(NSError *err) {
-        if (err) {
-            NSAlert *alert = [[NSAlert alloc] init];
-            alert.messageText     = @"Could not move to Trash";
-            alert.informativeText = err.localizedDescription ?: @"Unknown error";
-            [alert runModal];
-        }
-        [self reload_directory];
+        FilesBrowserView *s = ws;
+        if (!s) return;
+        if (err) files_show_error(@"Could not move to Trash", err, s.window);
+        [s reload_directory];
     }];
 }
 
 /*
- * new_folder_action: — creates an "untitled folder" in the current directory.
+ * new_folder_action: — creates an "untitled folder" in the current folder,
+ * then selects it and starts an inline rename once the listing shows it.
+ *
+ * Inputs:
+ *   sender — menu item (unused)
  */
 - (IBAction)
 new_folder_action:(id)sender
 {
     if (!self.current_dir) return;
+    __weak FilesBrowserView *ws = self;
     [FilesFileOps create_folder_in:self.current_dir
                               name:@"untitled folder"
                         completion:^(NSURL *new_url, NSError *err) {
+        FilesBrowserView *s = ws;
+        if (!s) return;
         if (err) {
-            NSAlert *alert = [[NSAlert alloc] init];
-            alert.messageText     = @"Could not create folder";
-            alert.informativeText = err.localizedDescription ?: @"Unknown error";
-            [alert runModal];
+            files_show_error(@"Could not create folder", err, s.window);
             return;
         }
-        [self reload_directory];
-        /* Select and begin rename of new folder */
-        NSUInteger idx = [self.filtered_items indexOfObject:new_url];
-        if (idx != NSNotFound) {
-            [self.table selectRowIndexes:[NSIndexSet indexSetWithIndex:idx]
-                    byExtendingSelection:NO];
-            [self.table scrollRowToVisible:(NSInteger)idx];
-            self.rename_url = new_url;
-            [self begin_rename:nil];
-        }
+        [s reload_directory_then:^{
+            NSUInteger idx = [s.filtered_items indexOfObjectPassingTest:
+                ^BOOL(NSURL *item, NSUInteger i, BOOL *stop) {
+                    return files_same_path(item, new_url);
+                }];
+            if (idx == NSNotFound) return;
+            [s.table selectRowIndexes:[NSIndexSet indexSetWithIndex:idx] byExtendingSelection:NO];
+            [s.table scrollRowToVisible:(NSInteger)idx];
+            [s begin_rename:nil];
+        }];
     }];
 }
 
 /*
- * get_info_action: — shows the info panel for the selected file(s).
+ * get_info_action: — shows Get Info for the selected item(s) via
+ * info_handler, or the shared panel for the first item if none is set.
+ *
+ * Inputs:
+ *   sender — menu item (unused)
  */
 - (IBAction)
 get_info_action:(id)sender
 {
     NSArray<NSURL *> *sel = [self selected_urls];
-    if (self.info_handler && sel.count > 0) {
+    if (sel.count == 0) return;
+    if (self.info_handler) {
         self.info_handler(sel);
-    } else if (sel.count > 0) {
+    } else {
         [FilesInfoPanel.shared show_for_url:sel.firstObject];
     }
 }
 
 /*
  * selectAll: — selects all rows in the table.
+ *
+ * Inputs:
+ *   sender — menu item (forwarded to the table)
  */
 - (IBAction)
 selectAll:(id)sender
@@ -1199,68 +1384,11 @@ selectAll:(id)sender
     [self.table selectAll:sender];
 }
 
-/*
- * go_back_action: / go_forward_action: — navigation from menu.
- */
-- (IBAction)go_back_action:(id)sender    { [self go_back]; }
-- (IBAction)go_forward_action:(id)sender { [self go_forward]; }
-
-/*
- * go_home_action: / go_desktop_action: / go_downloads_action: /
- * go_documents_action: — Go menu convenience actions.
- */
-- (IBAction)
-go_home_action:(id)sender
-{
-    [self navigate_to:[NSURL fileURLWithPath:NSHomeDirectory()]];
-}
-
-- (IBAction)
-go_desktop_action:(id)sender
-{
-    NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:@"Desktop"];
-    [self navigate_to:[NSURL fileURLWithPath:path]];
-}
-
-- (IBAction)
-go_downloads_action:(id)sender
-{
-    NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:@"Downloads"];
-    [self navigate_to:[NSURL fileURLWithPath:path]];
-}
-
-- (IBAction)
-go_documents_action:(id)sender
-{
-    NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
-    [self navigate_to:[NSURL fileURLWithPath:path]];
-}
-
-/*
- * toggle_hidden_files_action: — flips the show-hidden-files preference and
- * reloads the directory listing.
- *
- * Inputs:
- *   sender — toolbar toggle button or menu item
- */
-- (IBAction)
-toggle_hidden_files_action:(id)sender
-{
-    NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
-    BOOL current = [ud boolForKey:@"files.show_hidden_files"];
-    [ud setBool:!current forKey:@"files.show_hidden_files"];
-    if ([sender isKindOfClass:NSButton.class]) {
-        ((NSButton *)sender).state = !current
-            ? NSControlStateValueOn : NSControlStateValueOff;
-    }
-    [self reload_directory];
-}
-
 /* ── Inline rename ───────────────────────────────────────────────────── */
 
 /*
- * begin_rename: — shows an NSTextField overlay over the name cell of the
- * selected row.
+ * begin_rename: — shows an NSTextField over the name cell of the selected
+ * row, pre-filled with the current name.
  *
  * Inputs:
  *   sender — menu item or nil
@@ -1286,13 +1414,13 @@ begin_rename:(id)sender
     field_rect = [self convertRect:field_rect fromView:self.scroll];
 
     if (!self.rename_field) {
-        self.rename_field              = [[NSTextField alloc] init];
-        self.rename_field.delegate     = self;
-        self.rename_field.font         = [NSFont systemFontOfSize:12.0];
-        self.rename_field.bezelStyle   = NSTextFieldSquareBezel;
+        self.rename_field            = [[NSTextField alloc] init];
+        self.rename_field.delegate   = self;
+        self.rename_field.font       = [NSFont systemFontOfSize:12.0];
+        self.rename_field.bezelStyle = NSTextFieldSquareBezel;
     }
-    self.rename_field.frame          = field_rect;
-    self.rename_field.stringValue    = url.lastPathComponent;
+    self.rename_field.frame       = field_rect;
+    self.rename_field.stringValue = url.lastPathComponent;
     [self addSubview:self.rename_field];
     [self.window makeFirstResponder:self.rename_field];
     [self.rename_field selectText:nil];
@@ -1304,13 +1432,15 @@ begin_rename:(id)sender
 - (void)
 cancel_rename
 {
+    self.rename_url = nil;
+    [self.rename_field abortEditing];
     [self.rename_field removeFromSuperview];
     [self.window makeFirstResponder:self.table];
-    self.rename_url = nil;
 }
 
 /*
- * controlTextDidEndEditing: — commits or cancels rename based on return key.
+ * controlTextDidEndEditing: — commits the rename when the field ends editing
+ * (unless it was cancelled, which clears rename_url first).
  *
  * Inputs:
  *   note — NSControlTextDidEndEditingNotification
@@ -1321,38 +1451,41 @@ controlTextDidEndEditing:(NSNotification *)note
     if (note.object != self.rename_field) return;
     NSString *new_name = self.rename_field.stringValue;
     NSURL *target      = self.rename_url;
+    self.rename_url    = nil;
     [self.rename_field removeFromSuperview];
     [self.window makeFirstResponder:self.table];
-    self.rename_url = nil;
 
     if (!target || new_name.length == 0) return;
     if ([new_name isEqualToString:target.lastPathComponent]) return;
 
+    __weak FilesBrowserView *ws = self;
     [FilesFileOps rename_url:target to:new_name completion:^(NSURL *new_url, NSError *err) {
-        if (err) {
-            NSAlert *alert = [[NSAlert alloc] init];
-            alert.messageText     = @"Rename failed";
-            alert.informativeText = err.localizedDescription ?: @"Unknown error";
-            [alert runModal];
-        }
-        [self reload_directory];
+        FilesBrowserView *s = ws;
+        if (!s) return;
+        if (err) files_show_error(@"Rename failed", err, s.window);
+        [s reload_directory];
     }];
 }
 
 /*
- * control:textView:doCommandBySelector: — intercepts Escape to cancel rename.
+ * control:textView:doCommandBySelector: — intercepts Escape in the rename
+ * field to cancel the rename.
+ *
+ * Inputs:
+ *   control  — the control being edited
+ *   textView — its field editor (unused)
+ *   cmd      — the command selector
+ *
+ * Output: YES if the command was handled.
  */
 - (BOOL)
 control:(NSControl *)control
 textView:(NSTextView *)textView
 doCommandBySelector:(SEL)cmd
 {
-    if (control != self.rename_field) return NO;
-    if (cmd == @selector(cancelOperation:)) {
-        [self cancel_rename];
-        return YES;
-    }
-    return NO;
+    if (control != self.rename_field || cmd != @selector(cancelOperation:)) return NO;
+    [self cancel_rename];
+    return YES;
 }
 
 /* ── Drag source ──────────────────────────────────────────────────────── */
@@ -1371,7 +1504,6 @@ doCommandBySelector:(SEL)cmd
 tableView:(NSTableView *)tv
 pasteboardWriterForRow:(NSInteger)row
 {
-    (void)tv;
     if (row < 0 || row >= (NSInteger)self.filtered_items.count) return nil;
     return self.filtered_items[row];
 }
@@ -1379,43 +1511,53 @@ pasteboardWriterForRow:(NSInteger)row
 /* ── Drag destination ─────────────────────────────────────────────────── */
 
 /*
- * dest_url_for_row:op: — resolves the copy destination directory.
- * If the drop lands on a folder row, copies into that folder; otherwise
- * copies into the current directory.
+ * folder_at_row: — the listed folder at row, if the row is a folder.
+ *
+ * Inputs:
+ *   row — row index (any value)
+ *
+ * Output: folder URL, or nil if row is out of range or not a folder.
+ */
+- (NSURL *)
+folder_at_row:(NSInteger)row
+{
+    if (row < 0 || row >= (NSInteger)self.filtered_items.count) return nil;
+    NSURL *url = self.filtered_items[row];
+    NSNumber *is_dir = nil;
+    [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
+    return is_dir.boolValue ? url : nil;
+}
+
+/*
+ * dest_url_for_row:op: — resolves the drop destination: the folder under the
+ * pointer for an "on" drop onto a folder row, otherwise the current folder.
  *
  * Inputs:
  *   row — proposed drop row (-1 = whole table)
  *   op  — drop operation
  *
- * Output: destination directory URL, or nil if not usable.
+ * Output: destination directory URL, or nil if none is loaded.
  */
 - (NSURL *)
 dest_url_for_row:(NSInteger)row op:(NSTableViewDropOperation)op
 {
-    if (op == NSTableViewDropOn && row >= 0
-            && row < (NSInteger)self.filtered_items.count) {
-        NSURL *target = self.filtered_items[row];
-        BOOL is_dir = NO;
-        if ([NSFileManager.defaultManager fileExistsAtPath:target.path
-                                               isDirectory:&is_dir] && is_dir) {
-            return target;
-        }
-    }
-    return self.current_dir;
+    NSURL *folder = (op == NSTableViewDropOn) ? [self folder_at_row:row] : nil;
+    return folder ?: self.current_dir;
 }
 
 /*
  * tableView:validateDrop:proposedRow:proposedDropOperation: — accepts file-URL
  * drags. Highlights a folder row when the pointer is over one; otherwise
- * highlights the whole table (drop into the current directory).
+ * highlights the whole table (drop into the current folder). Refuses drops
+ * into the items' own parent folder.
  *
  * Inputs:
- *   tv  — table view
+ *   tv   — table view
  *   info — dragging session info
  *   row  — proposed row
  *   op   — proposed operation
  *
- * Output: NSDragOperationCopy, or NSDragOperationNone if not a file drag.
+ * Output: NSDragOperationCopy, or NSDragOperationNone if the drop is refused.
  */
 - (NSDragOperation)
 tableView:(NSTableView *)tv
@@ -1423,36 +1565,19 @@ validateDrop:(id<NSDraggingInfo>)info
 proposedRow:(NSInteger)row
 proposedDropOperation:(NSTableViewDropOperation)op
 {
-    if (![info.draggingPasteboard canReadObjectForClasses:@[NSURL.class]
-            options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}]) {
-        return NSDragOperationNone;
-    }
-
-    /* Highlight a folder row if the pointer is over one; else use the table. */
-    BOOL over_folder = NO;
-    if (op == NSTableViewDropOn && row >= 0
-            && row < (NSInteger)self.filtered_items.count) {
-        BOOL is_dir = NO;
-        NSString *path = self.filtered_items[row].path;
-        [NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&is_dir];
-        over_folder = is_dir;
-    }
-
-    if (!over_folder) {
-        [tv setDropRow:-1 dropOperation:NSTableViewDropOn];
-    }
-
-    /* Refuse a drop that would copy files into their own parent directory. */
-    NSURL *dest = [self dest_url_for_row:over_folder ? row : -1
-                                      op:NSTableViewDropOn];
     NSArray<NSURL *> *srcs =
         [info.draggingPasteboard readObjectsForClasses:@[NSURL.class]
              options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
-    for (NSURL *src in srcs) {
-        if ([src.URLByDeletingLastPathComponent isEqual:dest])
-            return NSDragOperationNone;
+    if (srcs.count == 0) return NSDragOperationNone;
+
+    NSURL *dest = [self dest_url_for_row:row op:op];
+    if (files_same_path(dest, self.current_dir)) {
+        [tv setDropRow:-1 dropOperation:NSTableViewDropOn];
     }
 
+    for (NSURL *src in srcs) {
+        if (files_same_path(src.URLByDeletingLastPathComponent, dest)) return NSDragOperationNone;
+    }
     return NSDragOperationCopy;
 }
 
@@ -1478,20 +1603,15 @@ dropOperation:(NSTableViewDropOperation)op
     NSArray<NSURL *> *srcs =
         [info.draggingPasteboard readObjectsForClasses:@[NSURL.class]
              options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
-    if (!srcs.count || !self.current_dir) return NO;
-
     NSURL *dest = [self dest_url_for_row:row op:op];
-    if (!dest) return NO;
+    if (srcs.count == 0 || !dest) return NO;
 
     __weak FilesBrowserView *ws = self;
     [FilesFileOps transfer_urls:srcs to:dest is_cut:NO completion:^(NSError *err) {
-        if (err && err.code != NSUserCancelledError) {
-            NSAlert *alert        = [[NSAlert alloc] init];
-            alert.messageText     = @"Copy failed";
-            alert.informativeText = err.localizedDescription ?: @"Unknown error";
-            [alert runModal];
-        }
-        [ws reload_directory];
+        FilesBrowserView *s = ws;
+        if (!s) return;
+        if (err && err.code != NSUserCancelledError) files_show_error(@"Copy failed", err, s.window);
+        [s reload_directory];
     }];
     return YES;
 }

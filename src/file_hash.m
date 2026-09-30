@@ -1,30 +1,24 @@
 #import "file_hash.h"
 #include <CommonCrypto/CommonDigest.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <string.h>
 
 #define HASH_CHUNK (1024 * 1024)  /* 1 MB read buffer */
 
 /*
- * file_sha256 — compute SHA-256 digest of a file in 1 MB chunks.
- *
- * Inputs:
- *   path   — null-terminated UTF-8 file path
- *   digest — 32-byte output buffer
- *
- * Output: 0 on success, -1 on I/O error or if path is NULL.
+ * file_digests — single-pass SHA-256 (+ optional MD5) of a file, F_NOCACHE,
+ * cancellable. Inputs/output are documented in file_hash.h.
  */
 int
-file_sha256(const char *path, uint8_t digest[32])
+file_digests(const char *path, uint8_t sha256[FILE_SHA256_LEN],
+             uint8_t md5[FILE_MD5_LEN], const atomic_int *cancel)
 {
-    if (!path || !digest) return -1;
+    if (!path || !sha256) return -1;
 
     int fd = open(path, O_RDONLY);
     if (fd < 0) return -1;
-
-    CC_SHA256_CTX ctx;
-    CC_SHA256_Init(&ctx);
+    fcntl(fd, F_NOCACHE, 1);
 
     uint8_t *buf = malloc(HASH_CHUNK);
     if (!buf) {
@@ -32,39 +26,53 @@ file_sha256(const char *path, uint8_t digest[32])
         return -1;
     }
 
-    ssize_t n;
+    CC_SHA256_CTX sha_ctx;
+    CC_SHA256_Init(&sha_ctx);
+    /* MD5 is deprecated for security use; it is shown only as a checksum. */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    CC_MD5_CTX md5_ctx;
+    if (md5) CC_MD5_Init(&md5_ctx);
+
     int ret = 0;
-    while ((n = read(fd, buf, HASH_CHUNK)) > 0) {
-        CC_SHA256_Update(&ctx, buf, (CC_LONG)n);
+    for (;;) {
+        if (cancel && atomic_load(cancel)) { ret = -2; break; }
+        ssize_t n = read(fd, buf, HASH_CHUNK);
+        if (n == 0) break;
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            ret = -1;
+            break;
+        }
+        CC_SHA256_Update(&sha_ctx, buf, (CC_LONG)n);
+        if (md5) CC_MD5_Update(&md5_ctx, buf, (CC_LONG)n);
     }
-    if (n < 0) {
-        ret = -1;
+
+    if (ret == 0) {
+        CC_SHA256_Final(sha256, &sha_ctx);
+        if (md5) CC_MD5_Final(md5, &md5_ctx);
     }
+#pragma clang diagnostic pop
 
     free(buf);
     close(fd);
-
-    if (ret == 0) {
-        CC_SHA256_Final(digest, &ctx);
-    }
     return ret;
 }
 
 /*
- * sha256_hex — format a 32-byte SHA-256 digest as a lowercase hex NSString.
- *
- * Inputs:
- *   digest — 32-byte buffer produced by file_sha256
- *
- * Output: 64-character lowercase hex NSString.
+ * digest_hex — lowercase hex string for a digest.
+ * Inputs/output are documented in file_hash.h.
  */
 NSString *
-sha256_hex(const uint8_t digest[32])
+digest_hex(const uint8_t *digest, size_t len)
 {
-    char hex[65];
-    for (int i = 0; i < 32; i++) {
-        snprintf(hex + i * 2, 3, "%02x", digest[i]);
+    static const char hex_chars[] = "0123456789abcdef";
+    char out[2 * FILE_SHA256_LEN + 1];
+    if (len > FILE_SHA256_LEN) len = FILE_SHA256_LEN;
+    for (size_t i = 0; i < len; i++) {
+        out[2 * i]     = hex_chars[digest[i] >> 4];
+        out[2 * i + 1] = hex_chars[digest[i] & 0xf];
     }
-    hex[64] = '\0';
-    return [NSString stringWithUTF8String:hex];
+    out[2 * len] = '\0';
+    return @(out);
 }

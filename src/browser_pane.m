@@ -1,12 +1,6 @@
 #import "browser_pane.h"
 
-@implementation FilesBrowserPane {
-    FilesBrowserView *_browser;
-    BOOL              _is_active;
-    BOOL              _show_accent_border;
-}
-
-@synthesize browser = _browser;
+@implementation FilesBrowserPane
 
 /*
  * init_with_frame: — fills the pane entirely with the browser view.
@@ -27,38 +21,25 @@ init_with_frame:(NSRect)frame
     _browser.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     [self addSubview:_browser];
 
-    /* Forward navigation and info events to our own handlers. */
-    __weak FilesBrowserPane *weak_self = self;
-    _browser.navigation_handler = ^(NSURL *url) {
-        FilesBrowserPane *p = weak_self;
-        if (!p) return;
-        if (p.navigation_handler) p.navigation_handler(url);
-    };
-    _browser.info_handler = ^(NSArray<NSURL *> *urls) {
-        FilesBrowserPane *p = weak_self;
-        if (!p) return;
-        if (p.info_handler) p.info_handler(urls);
-    };
-
     self.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     return self;
 }
 
 /*
- * update_dim — sets the browser view alpha: full when active or single-pane,
- * dimmed when inactive in dual-pane mode.
+ * update_dim — full opacity when active or in single-pane mode; dimmed when
+ * inactive in dual-pane mode.
  */
 - (void)
 update_dim
 {
-    _browser.alphaValue = (_show_accent_border && !_is_active) ? 0.45 : 1.0;
+    _browser.alphaValue = (_in_dual_mode && !_is_active) ? 0.45 : 1.0;
 }
 
 /*
- * is_active setter — updates dim state.
+ * setIs_active: — is_active setter; updates dimming.
  *
  * Inputs:
- *   active — YES to mark as active pane
+ *   active — YES to mark as the active pane
  */
 - (void)
 setIs_active:(BOOL)active
@@ -67,56 +48,17 @@ setIs_active:(BOOL)active
     [self update_dim];
 }
 
-- (BOOL)is_active { return _is_active; }
-
 /*
- * show_accent_border setter — called when entering/leaving dual-pane mode.
- * Updates dim state for the new mode.
+ * setIn_dual_mode: — in_dual_mode setter; updates dimming.
  *
  * Inputs:
- *   show — YES when dual-pane is active
+ *   dual — YES when two panes are shown
  */
 - (void)
-setShow_accent_border:(BOOL)show
+setIn_dual_mode:(BOOL)dual
 {
-    _show_accent_border = show;
+    _in_dual_mode = dual;
     [self update_dim];
-}
-
-- (BOOL)show_accent_border { return _show_accent_border; }
-
-/*
- * navigate_to: — forward navigation to the underlying browser.
- *
- * Inputs:
- *   url — destination directory URL
- */
-- (void)
-navigate_to:(NSURL *)url
-{
-    [_browser navigate_to:url];
-}
-
-/*
- * current_url — returns the directory the browser is currently showing.
- *
- * Output: NSURL or nil.
- */
-- (NSURL *)
-current_url
-{
-    return _browser.current_url;
-}
-
-/*
- * selected_urls — returns the file URLs selected in the browser.
- *
- * Output: NSArray<NSURL *>.
- */
-- (NSArray<NSURL *> *)
-selected_urls
-{
-    return _browser.selected_urls;
 }
 
 @end

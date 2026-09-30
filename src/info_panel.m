@@ -1,21 +1,33 @@
 #import "info_panel.h"
 #import "file_ops.h"
 #import "file_hash.h"
+#import "util.h"
 #include <sys/stat.h>
 #include <errno.h>
-#include <CommonCrypto/CommonDigest.h>
+#include <stdatomic.h>
 
 /* ── layout constants ────────────────────────────────────────────────── */
-static const CGFloat kPanelWidth    = 360.0;
-static const CGFloat kRowH          = 22.0;
-static const CGFloat kLabelW        = 110.0;
-static const CGFloat kMargin        = 16.0;
-static const CGFloat kIconSize      = 64.0;
-static const CGFloat kSmallLabelH   = 11.0; /* height of per-popup sub-labels */
-static const CGFloat kCopyW         = 30.0; /* width of "copy" link button */
-static const CGFloat kCopyGap       =  4.0; /* gap between hash field and copy btn */
-static const NSUInteger kSha256Row  =  9;   /* index of SHA-256 row in row_keys */
-static const NSUInteger kMd5Row     = 10;   /* index of MD5 row in row_keys */
+static const CGFloat panel_width    = 360.0;
+static const CGFloat row_h          = 22.0;
+static const CGFloat label_w        = 110.0;
+static const CGFloat margin         = 16.0;
+static const CGFloat icon_size      = 64.0;
+static const CGFloat small_label_h  = 11.0; /* height of per-popup sub-labels */
+static const CGFloat copy_w         = 30.0; /* width of "copy" link button */
+static const CGFloat copy_gap       =  4.0; /* gap between hash field and copy btn */
+
+/* Indices into the row_keys table built in -init. */
+enum {
+    row_kind, row_size, row_where, row_created, row_modified,
+    row_permissions, row_owner, row_group, row_sha256, row_md5,
+    row_count
+};
+
+/* Tags on the two "copy" buttons; copy_hash_action: selects the field by tag. */
+enum {
+    copy_tag_sha256 = 1,
+    copy_tag_md5    = 2,
+};
 
 /* ── row builder helpers ─────────────────────────────────────────────── */
 
@@ -65,41 +77,6 @@ make_value(NSRect frame)
     return tf;
 }
 
-/* ── hash helpers ────────────────────────────────────────────────────── */
-
-/*
- * compute_md5_hex — streams a file through the CommonCrypto MD5 engine and
- * returns the lowercase 32-character hex digest.
- *
- * Inputs:
- *   path — null-terminated UTF-8 file path
- *
- * Output: 32-char hex NSString, or nil on I/O error.
- */
-static NSString *
-compute_md5_hex(const char *path)
-{
-    FILE *f = fopen(path, "rb");
-    if (!f) return nil;
-
-    CC_MD5_CTX ctx;
-    CC_MD5_Init(&ctx);
-
-    uint8_t buf[65536];
-    size_t  n;
-    while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
-        CC_MD5_Update(&ctx, buf, (CC_LONG)n);
-    fclose(f);
-
-    uint8_t digest[CC_MD5_DIGEST_LENGTH];
-    CC_MD5_Final(digest, &ctx);
-
-    NSMutableString *hex = [NSMutableString stringWithCapacity:CC_MD5_DIGEST_LENGTH * 2];
-    for (int i = 0; i < CC_MD5_DIGEST_LENGTH; i++)
-        [hex appendFormat:@"%02x", digest[i]];
-    return hex;
-}
-
 /* ── copy-link button helper ─────────────────────────────────────────── */
 
 /*
@@ -109,11 +86,12 @@ compute_md5_hex(const char *path)
  *   frame  — button frame
  *   target — action target
  *   action — selector to call on click
+ *   tag    — button tag the action uses to tell the buttons apart
  *
  * Output: configured NSButton.
  */
 static NSButton *
-make_copy_btn(NSRect frame, id target, SEL action)
+make_copy_btn(NSRect frame, id target, SEL action, NSInteger tag)
 {
     NSButton *btn  = [[NSButton alloc] initWithFrame:frame];
     btn.buttonType = NSButtonTypeMomentaryPushIn;
@@ -127,26 +105,27 @@ make_copy_btn(NSRect frame, id target, SEL action)
     btn.attributedTitle = t;
     btn.target = target;
     btn.action = action;
+    btn.tag    = tag;
     return btn;
 }
 
 /* ── permissions helper ──────────────────────────────────────────────── */
 
 /*
- * perms_popup_items — the 8 option strings for a single rwx triplet, ordered
- * by octal value 0-7, used as NSPopUpButton titles.
+ * perm_items — the 8 option strings for a single rwx triplet, ordered by
+ * octal value 0-7, used as NSPopUpButton titles (item tag = octal value).
  */
-static NSString * const kPermItems[] = {
+static NSString * const perm_items[] = {
     @"---", @"--x", @"-w-", @"-wx",
     @"r--", @"r-x", @"rw-", @"rwx",
 };
 
-/* ── VCenterCell — NSTextFieldCell that vertically centers single-line text ── */
+/* ── FilesVCenterCell — NSTextFieldCell that vertically centers text ─── */
 
-@interface VCenterCell : NSTextFieldCell
+@interface FilesVCenterCell : NSTextFieldCell
 @end
 
-@implementation VCenterCell
+@implementation FilesVCenterCell
 
 /*
  * drawingRectForBounds: — shrinks the drawing rect to the natural text height
@@ -172,9 +151,47 @@ drawingRectForBounds:(NSRect)bounds
 
 @end
 
+/* ── FilesHashJob — cancel flag shared with one background hash pass ──── */
+
+/*
+ * FilesHashJob — owns the atomic cancel flag polled by file_digests(). The
+ * background block holds a strong reference, so the flag stays valid for the
+ * whole read even after the panel has moved on and dropped its reference.
+ */
+@interface FilesHashJob : NSObject
+- (const atomic_int *)cancel_flag;
+- (void)cancel;
+@end
+
+@implementation FilesHashJob {
+    atomic_int _cancel;
+}
+
+/*
+ * cancel_flag — exposes the flag for file_digests() to poll.
+ *
+ * Output: pointer to the job's cancel flag, valid while the job is alive.
+ */
+- (const atomic_int *)
+cancel_flag
+{
+    return &_cancel;
+}
+
+/*
+ * cancel — asks the running file_digests() pass to stop at its next read.
+ */
+- (void)
+cancel
+{
+    atomic_store(&_cancel, 1);
+}
+
+@end
+
 /* ── FilesInfoPanel ──────────────────────────────────────────────────── */
 
-@interface FilesInfoPanel () <NSTextFieldDelegate>
+@interface FilesInfoPanel () <NSTextFieldDelegate, NSWindowDelegate>
 
 @property (nonatomic, strong) NSURL       *current_url;
 @property (nonatomic, strong) NSImageView *icon_view;
@@ -187,20 +204,22 @@ drawingRectForBounds:(NSRect)bounds
 @property (nonatomic, strong) NSPopUpButton *owner_perms_popup;
 @property (nonatomic, strong) NSPopUpButton *group_perms_popup;
 @property (nonatomic, strong) NSPopUpButton *other_perms_popup;
-@property (nonatomic, strong) NSTextField   *owner_value;
+@property (nonatomic, strong) NSTextField *owner_value;
 @property (nonatomic, strong) NSTextField *group_value;
 @property (nonatomic, strong) NSTextField *sha256_value;
 @property (nonatomic, strong) NSTextField *md5_value;
 @property (nonatomic, strong) NSButton    *lock_check;
 @property (nonatomic, strong) NSButton    *hash_check;
-@property (nonatomic, strong) NSURL       *hash_url; /* URL being hashed; stale guard */
+@property (nonatomic, strong) FilesHashJob *hash_job; /* in-flight hash; stale guard */
 
 @end
 
 @implementation FilesInfoPanel
 
 /*
- * shared — returns the singleton panel instance.
+ * shared — returns the singleton panel instance, creating it on first use.
+ *
+ * Output: the process-wide FilesInfoPanel (never nil).
  */
 + (instancetype)
 shared
@@ -216,26 +235,31 @@ shared
 /*
  * init — creates the panel window and all subviews programmatically.
  *
- * Output: self
+ * Output: self, or nil if the window controller could not be initialised.
  */
 - (instancetype)
 init
 {
-    /* Build rows bottom-up; calculate total height. */
-    NSArray<NSString *> *row_keys = @[
-        @"Name:", @"Kind:", @"Size:", @"Where:",
-        @"Created:", @"Modified:", @"Permissions:", @"Owner:", @"Group:",
-        @"SHA-256:", @"MD5:",
-    ];
-    NSUInteger n_rows    = row_keys.count;
-    CGFloat content_h    = kMargin              /* top margin */
-                         + kIconSize + kMargin  /* icon row */
-                         + (n_rows * (kRowH + 4)) /* attribute rows */
-                         + kSmallLabelH + 2.0   /* extra for perm sub-labels */
-                         + (kRowH + 4) * 2      /* lock + hash checkboxes */
-                         + kMargin;             /* bottom margin */
+    NSString * const row_keys[row_count] = {
+        [row_kind]        = @"Kind:",
+        [row_size]        = @"Size:",
+        [row_where]       = @"Where:",
+        [row_created]     = @"Created:",
+        [row_modified]    = @"Modified:",
+        [row_permissions] = @"Permissions:",
+        [row_owner]       = @"Owner:",
+        [row_group]       = @"Group:",
+        [row_sha256]      = @"SHA-256:",
+        [row_md5]         = @"MD5:",
+    };
+    CGFloat content_h    = margin                  /* top margin */
+                         + icon_size + margin      /* icon row */
+                         + (row_count * (row_h + 4)) /* attribute rows */
+                         + small_label_h + 2.0     /* extra for perm sub-labels */
+                         + (row_h + 4) * 2         /* lock + hash checkboxes */
+                         + margin;                 /* bottom margin */
 
-    NSRect win_rect = NSMakeRect(0, 0, kPanelWidth, content_h);
+    NSRect win_rect = NSMakeRect(0, 0, panel_width, content_h);
     NSPanel *panel  = [[NSPanel alloc]
                            initWithContentRect:win_rect
                                      styleMask:NSWindowStyleMaskTitled
@@ -246,29 +270,30 @@ init
     panel.title            = @"Info";
     panel.releasedWhenClosed = NO;
     panel.level            = NSFloatingWindowLevel;
-    [panel setContentSize:NSMakeSize(kPanelWidth, content_h)];
+    [panel setContentSize:NSMakeSize(panel_width, content_h)];
 
     self = [super initWithWindow:panel];
     if (!self) {
         return nil;
     }
+    panel.delegate = self;
 
     NSView *cv = panel.contentView;
-    CGFloat x_label = kMargin;
-    CGFloat x_value = kMargin + kLabelW + 8.0;
-    CGFloat w_value = kPanelWidth - x_value - kMargin;
+    CGFloat x_label = margin;
+    CGFloat x_value = margin + label_w + 8.0;
+    CGFloat w_value = panel_width - x_value - margin;
 
     /* Icon + name at top. */
-    CGFloat icon_y = content_h - kMargin - kIconSize;
-    NSRect icon_rect = NSMakeRect(kMargin, icon_y, kIconSize, kIconSize);
+    CGFloat icon_y = content_h - margin - icon_size;
+    NSRect icon_rect = NSMakeRect(margin, icon_y, icon_size, icon_size);
     self.icon_view                    = [[NSImageView alloc] initWithFrame:icon_rect];
     self.icon_view.imageScaling       = NSImageScaleProportionallyUpOrDown;
     [cv addSubview:self.icon_view];
 
-    CGFloat name_x = kMargin + kIconSize + 12.0;
-    CGFloat name_w = kPanelWidth - name_x - kMargin;
-    CGFloat name_y = icon_y + (kIconSize - kRowH) / 2.0;
-    NSRect name_box_rect = NSMakeRect(name_x, name_y, name_w, kRowH);
+    CGFloat name_x = margin + icon_size + 12.0;
+    CGFloat name_w = panel_width - name_x - margin;
+    CGFloat name_y = icon_y + (icon_size - row_h) / 2.0;
+    NSRect name_box_rect = NSMakeRect(name_x, name_y, name_w, row_h);
 
     /* Rounded container — NSBoxCustom adapts its colors to dark/light mode. */
     NSBox *name_box         = [[NSBox alloc] initWithFrame:name_box_rect];
@@ -280,10 +305,10 @@ init
     name_box.contentViewMargins = NSZeroSize;
     [cv addSubview:name_box];
 
-    NSRect name_rect = NSMakeRect(5.0, 1.0, name_w - 10.0, kRowH - 2.0);
+    NSRect name_rect = NSMakeRect(5.0, 1.0, name_w - 10.0, row_h - 2.0);
     self.name_field                   = [[NSTextField alloc] initWithFrame:name_rect];
     /* Swap in the centering cell before setting any cell-derived properties. */
-    VCenterCell *name_cell            = [[VCenterCell alloc] init];
+    FilesVCenterCell *name_cell       = [[FilesVCenterCell alloc] init];
     name_cell.editable                = YES;
     name_cell.selectable              = YES;
     [self.name_field setCell:name_cell];
@@ -295,25 +320,17 @@ init
     self.name_field.lineBreakMode     = NSLineBreakByTruncatingMiddle;
     [name_box addSubview:self.name_field];
 
-    /* Attribute rows. */
-    NSTextField *value_fields[] = {
-        nil, /* name row handled above */
-    };
-    (void)value_fields;
+    /* Attribute rows; fields[i] is the value field of row i (nil for the
+     * permissions row, which uses popups instead). */
+    NSTextField *fields[row_count] = { nil };
+    CGFloat row_y = icon_y - margin;
 
-    NSMutableArray<NSTextField *> *values = [NSMutableArray array];
-    CGFloat row_y = icon_y - kMargin;
+    for (NSUInteger i = 0; i < row_count; i++) {
+        row_y -= (row_h + 4.0);
+        NSRect lr = NSMakeRect(x_label, row_y, label_w, row_h);
+        [cv addSubview:make_label(row_keys[i], lr)];
 
-    /* kPermRow is the index of "Permissions:" in row_keys; handled specially. */
-    static const NSUInteger kPermRow = 6;
-
-    for (NSUInteger i = 0; i < row_keys.count; i++) {
-        NSString *key = row_keys[i];
-        row_y -= (kRowH + 4.0);
-        NSRect lr = NSMakeRect(x_label, row_y, kLabelW, kRowH);
-        [cv addSubview:make_label(key, lr)];
-
-        if (i == kPermRow) {
+        if (i == row_permissions) {
             /* Three side-by-side NSPopUpButton controls: owner | group | other.
              * Each takes one third of the value column width with a small gap. */
             CGFloat gap         = 6.0;
@@ -322,13 +339,13 @@ init
             NSPopUpButton *btns[3];
             for (int p = 0; p < 3; p++) {
                 CGFloat px    = x_value + p * (pop_w + gap);
-                NSRect pr     = NSMakeRect(px, row_y, pop_w, kRowH);
+                NSRect pr     = NSMakeRect(px, row_y, pop_w, row_h);
                 NSPopUpButton *btn = [[NSPopUpButton alloc] initWithFrame:pr pullsDown:NO];
                 btn.font    = [NSFont monospacedSystemFontOfSize:11.0
                                                          weight:NSFontWeightRegular];
                 btn.toolTip = tips[p];
                 for (NSUInteger t = 0; t < 8; t++) {
-                    [btn addItemWithTitle:kPermItems[t]];
+                    [btn addItemWithTitle:perm_items[t]];
                     [[btn itemAtIndex:(NSInteger)t] setTag:(NSInteger)t];
                 }
                 btn.target = self;
@@ -341,10 +358,10 @@ init
             self.other_perms_popup = btns[2];
 
             /* Small centered labels below each popup. */
-            row_y -= (kSmallLabelH + 2.0);
+            row_y -= (small_label_h + 2.0);
             for (int p = 0; p < 3; p++) {
                 CGFloat px  = x_value + p * (pop_w + gap);
-                NSRect slr  = NSMakeRect(px, row_y, pop_w, kSmallLabelH);
+                NSRect slr  = NSMakeRect(px, row_y, pop_w, small_label_h);
                 NSTextField *sl = [NSTextField labelWithString:tips[p]];
                 sl.frame       = slr;
                 sl.alignment   = NSTextAlignmentCenter;
@@ -352,36 +369,31 @@ init
                 sl.textColor   = NSColor.tertiaryLabelColor;
                 [cv addSubview:sl];
             }
-            continue; /* no text field added to values */
+            continue;
         }
 
-        BOOL is_hash = (i == kSha256Row || i == kMd5Row);
-        CGFloat fw = is_hash ? (w_value - kCopyW - kCopyGap) : w_value;
-        NSRect vr = NSMakeRect(x_value, row_y, fw, kRowH);
-        NSTextField *vf = make_value(vr);
-        [cv addSubview:vf];
-        [values addObject:vf];
+        BOOL is_hash = (i == row_sha256 || i == row_md5);
+        CGFloat fw = is_hash ? (w_value - copy_w - copy_gap) : w_value;
+        NSRect vr = NSMakeRect(x_value, row_y, fw, row_h);
+        fields[i] = make_value(vr);
+        [cv addSubview:fields[i]];
 
         if (is_hash) {
-            NSRect br = NSMakeRect(x_value + fw + kCopyGap, row_y, kCopyW, kRowH);
-            SEL sel = (i == kSha256Row) ? @selector(copy_sha256_action:)
-                                         : @selector(copy_md5_action:);
-            [cv addSubview:make_copy_btn(br, self, sel)];
+            NSRect br = NSMakeRect(x_value + fw + copy_gap, row_y, copy_w, row_h);
+            NSInteger tag = (i == row_sha256) ? copy_tag_sha256 : copy_tag_md5;
+            [cv addSubview:make_copy_btn(br, self, @selector(copy_hash_action:), tag)];
         }
     }
 
-    /* values indices: 0=Name(unused), 1=Kind, 2=Size, 3=Where,
-     *   4=Created, 5=Modified, (kPermRow skipped), 6=Owner, 7=Group,
-     *   8=SHA-256, 9=MD5                                               */
-    self.kind_value      = values[1];
-    self.size_value      = values[2];
-    self.where_value     = values[3];
-    self.created_value   = values[4];
-    self.modified_value  = values[5];
-    self.owner_value     = values[6];
-    self.group_value     = values[7];
-    self.sha256_value    = values[8];
-    self.md5_value       = values[9];
+    self.kind_value      = fields[row_kind];
+    self.size_value      = fields[row_size];
+    self.where_value     = fields[row_where];
+    self.created_value   = fields[row_created];
+    self.modified_value  = fields[row_modified];
+    self.owner_value     = fields[row_owner];
+    self.group_value     = fields[row_group];
+    self.sha256_value    = fields[row_sha256];
+    self.md5_value       = fields[row_md5];
 
     /* Hash value fields: monospaced, tail-truncated with "…", selectable to copy. */
     NSFont *hash_font = [NSFont monospacedSystemFontOfSize:9.0 weight:NSFontWeightRegular];
@@ -392,25 +404,25 @@ init
     }
 
     /* Lock checkbox. */
-    row_y -= (kRowH + 4.0);
-    NSRect lock_rect = NSMakeRect(x_value, row_y, w_value, kRowH);
+    row_y -= (row_h + 4.0);
+    NSRect lock_rect = NSMakeRect(x_value, row_y, w_value, row_h);
     self.lock_check = [NSButton checkboxWithTitle:@"Locked" target:self action:@selector(lock_toggled:)];
     self.lock_check.frame = lock_rect;
     [cv addSubview:self.lock_check];
 
     /* Show Hashes checkbox. */
-    row_y -= (kRowH + 4.0);
-    NSRect hash_rect = NSMakeRect(x_value, row_y, w_value, kRowH);
+    row_y -= (row_h + 4.0);
+    NSRect hash_rect = NSMakeRect(x_value, row_y, w_value, row_h);
     self.hash_check = [NSButton checkboxWithTitle:@"Show Hashes (SHA-256 / MD5)"
                                            target:self
                                            action:@selector(hash_check_toggled:)];
     self.hash_check.frame = hash_rect;
-    self.hash_check.state = [NSUserDefaults.standardUserDefaults boolForKey:@"files.show_hashes"]
+    self.hash_check.state = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_show_hashes]
                             ? NSControlStateValueOn : NSControlStateValueOff;
     [cv addSubview:self.hash_check];
 
     /* Separator below icon. */
-    NSBox *sep        = [[NSBox alloc] initWithFrame:NSMakeRect(kMargin, icon_y - 8.0, kPanelWidth - kMargin * 2.0, 1.0)];
+    NSBox *sep        = [[NSBox alloc] initWithFrame:NSMakeRect(margin, icon_y - 8.0, panel_width - margin * 2.0, 1.0)];
     sep.boxType       = NSBoxSeparator;
     [cv addSubview:sep];
 
@@ -435,7 +447,56 @@ show_for_url:(NSURL *)url
 }
 
 /*
- * populate_fields: — reads file attributes and fills UI fields.
+ * cancel_hash_job — stops the in-flight hash read (if any) and forgets it,
+ * so its result, should it still arrive, fails the stale guard.
+ */
+- (void)
+cancel_hash_job
+{
+    [self.hash_job cancel];
+    self.hash_job = nil;
+}
+
+/*
+ * start_hash_job: — computes SHA-256 and MD5 of url in one background read
+ * pass and fills the hash fields when done. Superseded or cancelled jobs
+ * never touch the UI.
+ *
+ * Inputs:
+ *   url — regular file to hash
+ */
+- (void)
+start_hash_job:(NSURL *)url
+{
+    FilesHashJob *job = [[FilesHashJob alloc] init];
+    self.hash_job = job;
+    self.sha256_value.stringValue = @"Computing…";
+    self.md5_value.stringValue    = @"Computing…";
+
+    __weak FilesInfoPanel *ws = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        uint8_t sha_buf[FILE_SHA256_LEN];
+        uint8_t md5_buf[FILE_MD5_LEN];
+        int rc = file_digests(url.fileSystemRepresentation, sha_buf, md5_buf,
+                              [job cancel_flag]);
+        if (rc == -2) return;
+        NSString *sha = (rc == 0) ? digest_hex(sha_buf, FILE_SHA256_LEN) : nil;
+        NSString *md5 = (rc == 0) ? digest_hex(md5_buf, FILE_MD5_LEN) : nil;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            FilesInfoPanel *s = ws;
+            if (!s || s.hash_job != job) return;
+            s.hash_job = nil;
+            s.sha256_value.stringValue = sha ?: @"Error";
+            s.sha256_value.toolTip     = sha;
+            s.md5_value.stringValue    = md5 ?: @"Error";
+            s.md5_value.toolTip        = md5;
+        });
+    });
+}
+
+/*
+ * populate_fields: — reads file attributes and fills UI fields. Cancels any
+ * hash job still running for a previously shown item.
  *
  * Inputs:
  *   url — file URL
@@ -443,6 +504,8 @@ show_for_url:(NSURL *)url
 - (void)
 populate_fields:(NSURL *)url
 {
+    [self cancel_hash_job];
+
     NSArray<NSURLResourceKey> *keys = @[
         NSURLNameKey, NSURLFileSizeKey, NSURLFileAllocatedSizeKey,
         NSURLIsDirectoryKey, NSURLLocalizedTypeDescriptionKey,
@@ -462,19 +525,18 @@ populate_fields:(NSURL *)url
     self.name_field.stringValue = res[NSURLNameKey] ?: url.lastPathComponent;
 
     /* Kind */
-    NSNumber *is_dir = res[NSURLIsDirectoryKey];
-    NSString *kind   = is_dir.boolValue ? @"Folder" : (res[NSURLLocalizedTypeDescriptionKey] ?: @"—");
-    self.kind_value.stringValue = kind;
+    BOOL is_dir = [res[NSURLIsDirectoryKey] boolValue];
+    self.kind_value.stringValue = is_dir ? @"Folder"
+                                         : (res[NSURLLocalizedTypeDescriptionKey] ?: @"—");
 
     /* Size */
-    NSNumber *sz   = res[NSURLFileSizeKey];
+    NSNumber *sz       = res[NSURLFileSizeKey];
     NSNumber *alloc_sz = res[NSURLFileAllocatedSizeKey];
-    if (sz && !is_dir.boolValue) {
-        NSByteCountFormatter *fmt = [[NSByteCountFormatter alloc] init];
-        fmt.countStyle = NSByteCountFormatterCountStyleFile;
-        NSString *sz_str   = [fmt stringFromByteCount:sz.longLongValue];
-        NSString *alloc_str = [fmt stringFromByteCount:alloc_sz.longLongValue];
-        self.size_value.stringValue = [NSString stringWithFormat:@"%@ (%@ on disk)", sz_str, alloc_str];
+    if (sz && !is_dir) {
+        self.size_value.stringValue =
+            [NSString stringWithFormat:@"%@ (%@ on disk)",
+                files_format_bytes(sz.longLongValue),
+                files_format_bytes(alloc_sz.longLongValue)];
     } else {
         self.size_value.stringValue = @"—";
     }
@@ -483,14 +545,10 @@ populate_fields:(NSURL *)url
     self.where_value.stringValue = url.URLByDeletingLastPathComponent.path ?: @"—";
 
     /* Dates */
-    NSDateFormatter *dfmt = [[NSDateFormatter alloc] init];
-    dfmt.dateStyle  = NSDateFormatterMediumStyle;
-    dfmt.timeStyle  = NSDateFormatterShortStyle;
-
-    NSDate *created  = res[NSURLCreationDateKey];
-    NSDate *modified = res[NSURLContentModificationDateKey];
-    self.created_value.stringValue  = created  ? [dfmt stringFromDate:created]  : @"—";
-    self.modified_value.stringValue = modified ? [dfmt stringFromDate:modified] : @"—";
+    self.created_value.stringValue =
+        files_format_date(res[NSURLCreationDateKey], NSDateFormatterMediumStyle);
+    self.modified_value.stringValue =
+        files_format_date(res[NSURLContentModificationDateKey], NSDateFormatterMediumStyle);
 
     /* POSIX permissions, owner, group via NSDictionary attributes */
     NSDictionary<NSFileAttributeKey, id> *attrs =
@@ -519,31 +577,14 @@ populate_fields:(NSURL *)url
                             ? NSControlStateValueOn
                             : NSControlStateValueOff;
 
-    /* Hashes — computed asynchronously when enabled and item is a file. */
+    /* Hashes — computed asynchronously when enabled and item is a file. The
+     * tooltip doubles as "a real digest is present" for copy_hash_action:. */
     self.sha256_value.stringValue = @"—";
     self.md5_value.stringValue    = @"—";
-    self.hash_url = nil;
-
-    BOOL show_hashes = [NSUserDefaults.standardUserDefaults boolForKey:@"files.show_hashes"];
-    if (show_hashes && !is_dir.boolValue) {
-        self.hash_url = url;
-        self.sha256_value.stringValue = @"Computing…";
-        self.md5_value.stringValue    = @"Computing…";
-        __weak FilesInfoPanel *ws = self;
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            uint8_t sha_buf[32];
-            NSString *sha = (file_sha256(url.fileSystemRepresentation, sha_buf) == 0)
-                            ? sha256_hex(sha_buf) : nil;
-            NSString *md5 = compute_md5_hex(url.fileSystemRepresentation);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                FilesInfoPanel *s = ws;
-                if (!s || ![s.hash_url isEqual:url]) return;
-                s.sha256_value.stringValue = sha ?: @"Error";
-                s.sha256_value.toolTip     = sha;
-                s.md5_value.stringValue    = md5 ?: @"Error";
-                s.md5_value.toolTip        = md5;
-            });
-        });
+    self.sha256_value.toolTip     = nil;
+    self.md5_value.toolTip        = nil;
+    if (!is_dir && [NSUserDefaults.standardUserDefaults boolForKey:files_pref_show_hashes]) {
+        [self start_hash_job:url];
     }
 }
 
@@ -552,6 +593,7 @@ populate_fields:(NSURL *)url
  * mode to the current item via lchmod(2), preserving file-type and setuid/
  * setgid/sticky bits from the existing mode. lstat/lchmod act on a symlink
  * itself (never its target), matching the mode shown by populate_fields:.
+ * On failure shows an error sheet and reverts the popups.
  *
  * Inputs:
  *   sender — any of the three NSPopUpButton controls (unused; all three are read)
@@ -573,11 +615,8 @@ perms_popup_changed:(id)sender
     mode_t new_mode = special | (owner << 6) | (group << 3) | other;
 
     if (lchmod(self.current_url.fileSystemRepresentation, new_mode) != 0) {
-        NSString *err_str = [NSString stringWithUTF8String:strerror(errno)];
-        NSAlert *alert        = [[NSAlert alloc] init];
-        alert.messageText     = @"Could not change permissions";
-        alert.informativeText = err_str ?: @"Unknown error";
-        [alert runModal];
+        NSError *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil];
+        files_show_error(@"Could not change permissions", err, self.window);
         /* Revert popups to reflect the unchanged on-disk mode. */
         [self.owner_perms_popup selectItemWithTag:(st.st_mode >> 6) & 7];
         [self.group_perms_popup selectItemWithTag:(st.st_mode >> 3) & 7];
@@ -586,37 +625,23 @@ perms_popup_changed:(id)sender
 }
 
 /*
- * copy_sha256_action: — copies the SHA-256 hash to the general pasteboard.
+ * copy_hash_action: — copies the SHA-256 or MD5 digest (chosen by the
+ * sender's tag) to the general pasteboard. Does nothing unless a digest has
+ * actually been computed (placeholders like "Computing…" or "Error" are never
+ * copied).
  *
  * Inputs:
- *   sender — copy link button (unused)
+ *   sender — copy link button tagged copy_tag_sha256 or copy_tag_md5
  */
 - (IBAction)
-copy_sha256_action:(id)sender
+copy_hash_action:(NSButton *)sender
 {
-    (void)sender;
-    NSString *val = self.sha256_value.stringValue;
-    if (!val.length || [val isEqualToString:@"—"] || [val isEqualToString:@"Computing…"]) return;
+    NSTextField *field = (sender.tag == copy_tag_md5) ? self.md5_value : self.sha256_value;
+    NSString *digest   = field.toolTip;
+    if (digest.length == 0) return;
     NSPasteboard *pb = NSPasteboard.generalPasteboard;
     [pb clearContents];
-    [pb setString:val forType:NSPasteboardTypeString];
-}
-
-/*
- * copy_md5_action: — copies the MD5 hash to the general pasteboard.
- *
- * Inputs:
- *   sender — copy link button (unused)
- */
-- (IBAction)
-copy_md5_action:(id)sender
-{
-    (void)sender;
-    NSString *val = self.md5_value.stringValue;
-    if (!val.length || [val isEqualToString:@"—"] || [val isEqualToString:@"Computing…"]) return;
-    NSPasteboard *pb = NSPasteboard.generalPasteboard;
-    [pb clearContents];
-    [pb setString:val forType:NSPasteboardTypeString];
+    [pb setString:digest forType:NSPasteboardTypeString];
 }
 
 /*
@@ -630,7 +655,7 @@ copy_md5_action:(id)sender
 hash_check_toggled:(NSButton *)sender
 {
     BOOL on = (sender.state == NSControlStateValueOn);
-    [NSUserDefaults.standardUserDefaults setBool:on forKey:@"files.show_hashes"];
+    [NSUserDefaults.standardUserDefaults setBool:on forKey:files_pref_show_hashes];
     if (self.current_url) [self populate_fields:self.current_url];
 }
 
@@ -638,7 +663,7 @@ hash_check_toggled:(NSButton *)sender
  * lock_toggled: — sets or clears the user-immutable flag (uchg) on the
  * current item via NSURLIsUserImmutableKey — the same key populate_fields:
  * reads, and like it, applied to a symlink itself rather than its target.
- * On failure shows an alert and reverts the checkbox.
+ * On failure shows an error sheet and reverts the checkbox.
  *
  * Inputs:
  *   sender — the lock checkbox
@@ -653,17 +678,14 @@ lock_toggled:(NSButton *)sender
                                           forKey:NSURLIsUserImmutableKey
                                            error:&err];
     if (!ok) {
-        NSAlert *alert = [[NSAlert alloc] init];
-        alert.messageText     = @"Could not change lock status";
-        alert.informativeText = err.localizedDescription ?: @"Unknown error";
-        [alert runModal];
-        /* Revert checkbox. */
+        files_show_error(@"Could not change lock status", err, self.window);
         sender.state = lock ? NSControlStateValueOff : NSControlStateValueOn;
     }
 }
 
 /*
  * controlTextDidEndEditing: — renames the file when the name field loses focus.
+ * On failure shows an error sheet and restores the old name.
  *
  * Inputs:
  *   obj — notification from the name text field
@@ -680,15 +702,25 @@ controlTextDidEndEditing:(NSNotification *)obj
                           to:new_name
                   completion:^(NSURL *new_url, NSError *err) {
         if (err) {
-            NSAlert *alert = [[NSAlert alloc] init];
-            alert.messageText     = @"Rename failed";
-            alert.informativeText = err.localizedDescription ?: @"Unknown error";
-            [alert runModal];
+            files_show_error(@"Rename failed", err, self.window);
             self.name_field.stringValue = self.current_url.lastPathComponent;
         } else {
             self.current_url = new_url;
         }
     }];
+}
+
+/*
+ * windowWillClose: — stops any in-flight hash read when the panel closes so
+ * a multi-GB file is not read to the end for nobody.
+ *
+ * Inputs:
+ *   notification — NSWindowWillCloseNotification for the panel (unused)
+ */
+- (void)
+windowWillClose:(NSNotification *)notification
+{
+    [self cancel_hash_job];
 }
 
 @end

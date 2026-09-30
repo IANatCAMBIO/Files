@@ -2,8 +2,9 @@
 
 /*
  * FilesBookmarksBar — a 28pt horizontal strip of recessed buttons for quick
- * directory navigation. Defaults to Home, Desktop, Downloads, Documents, and
- * Applications. User-added bookmarks are persisted in NSUserDefaults.
+ * directory navigation. Defaults to Home, Desktop, Downloads, Documents,
+ * Applications and Trash. User-added bookmarks are persisted in
+ * NSUserDefaults.
  */
 @interface FilesBookmarksBar : NSView
 
@@ -24,6 +25,7 @@
  */
 - (instancetype)init_with_frame:(NSRect)frame NS_DESIGNATED_INITIALIZER;
 - (instancetype)initWithFrame:(NSRect)frame NS_UNAVAILABLE;
+- (instancetype)initWithCoder:(NSCoder *)coder NS_UNAVAILABLE;
 
 /*
  * add_bookmark: — appends url to the bar and persists it. Silently ignored
