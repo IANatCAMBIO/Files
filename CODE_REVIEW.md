@@ -29,10 +29,13 @@ Severity: **H** = fix before release, **M** = should fix, **L** = cleanup.
   - The back/forward history is capped at 100.
 - Docs: README and BUILD.md refreshed; the wrong comments fixed; every function has a comment block.
 
-**Still open (not in the requested scope):**
-- Packages treated as folders, and symlinked folders.
-- Rename-field placement: switch to the table's native editing.
-- The bookmarks bar's "Trash migration" re-adds Trash on every launch.
+**Follow-ups done:** app bundles stay browsable as folders by design, with a
+context-menu "Run Application". Inline rename now edits the Name cell in
+place, with the base name pre-selected. Trash is always the last bookmark;
+the saved list is only rewritten when that isn't already true.
+
+Symbolic links are followed like Finder aliases: a link to a folder shows the
+target folder, and a broken link reports an error.
 
 ## 0. Release blockers
 

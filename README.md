@@ -9,7 +9,8 @@ A minimalist macOS file manager written in Objective-C + AppKit.
 - Optional auto-fit columns (View ▸ Auto-Fit Columns)
 - Single- or dual-pane browsing (View ▸ Dual Pane, ⇧⌘2; Tab switches panes)
 - Bookmarks bar (Home, Desktop, Downloads, Documents, Applications, Trash);
-  ⌘D or the ★ button adds the current folder, right-click removes one
+  ⌘D or the ★ button adds the current folder (before Trash, which is always
+  last), right-click removes one
 - Collapsible info sidebar with a Quick Look thumbnail and file details
 - Get Info panel: size, dates, owner/group, editable permissions, Locked
   flag, rename, and optional SHA-256 / MD5 checksums
@@ -18,7 +19,10 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   verification (View ▸ Validate Copies with SHA-256). Copies use APFS clones
   when possible and keep extended attributes, tags, ACLs and dates; nothing
   at the destination is replaced until the new copy is complete
-- Move to Trash, Empty Trash, New Folder, inline rename
+- Move to Trash, Empty Trash, New Folder, inline rename (Return; the name
+  without its extension is selected, ready to type)
+- App bundles open like folders; right-click ▸ Run Application launches one
+- Symbolic links are followed (a link to a folder opens that folder)
 - Spotlight search within the current folder
 - Live updates when the current folder changes
 - Devices menu and an All Mounts panel with per-volume unmount

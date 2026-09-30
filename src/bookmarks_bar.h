@@ -4,7 +4,8 @@
  * FilesBookmarksBar — a 28pt horizontal strip of recessed buttons for quick
  * directory navigation. Defaults to Home, Desktop, Downloads, Documents,
  * Applications and Trash. User-added bookmarks are persisted in
- * NSUserDefaults.
+ * NSUserDefaults. Trash is always present as the last bookmark and cannot
+ * be removed.
  */
 @interface FilesBookmarksBar : NSView
 
@@ -28,8 +29,9 @@
 - (instancetype)initWithCoder:(NSCoder *)coder NS_UNAVAILABLE;
 
 /*
- * add_bookmark: — appends url to the bar and persists it. Silently ignored
- * if the URL is already present.
+ * add_bookmark: — adds url to the bar just before Trash (which is always
+ * the last bookmark) and persists it. Silently ignored if the URL is
+ * already present.
  *
  * Inputs:
  *   url — file-system directory URL to bookmark

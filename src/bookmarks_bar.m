@@ -40,39 +40,40 @@ init_with_frame:(NSRect)frame
 /*
  * load_bookmarks — fills _bookmarks from NSUserDefaults, or initialises
  * defaults (Home, Desktop, Downloads, Documents, Applications, Trash).
+ * Trash is always the last bookmark: the saved list is rewritten only in
+ * the rare case where it is missing or not last, so a normal launch does
+ * no extra work and writes nothing.
  */
 - (void)
 load_bookmarks
 {
-    NSString *trash_path = files_directory_url(NSTrashDirectory).path;
+    NSURL *trash = files_directory_url(NSTrashDirectory);
 
     NSArray<NSString *> *saved =
         [NSUserDefaults.standardUserDefaults arrayForKey:bookmarks_defaults_key];
-    if (saved.count > 0) {
-        _bookmarks = [NSMutableArray array];
-        for (NSString *path in saved) {
-            [_bookmarks addObject:[NSURL fileURLWithPath:path]];
-        }
-        /* Migration: add Trash if it was missing from an older saved set. */
-        BOOL has_trash = NO;
-        for (NSURL *u in _bookmarks) {
-            if ([u.path isEqualToString:trash_path]) { has_trash = YES; break; }
-        }
-        if (!has_trash) {
-            [_bookmarks addObject:[NSURL fileURLWithPath:trash_path]];
-            [self persist_bookmarks];
-        }
+    if (saved.count == 0) {
+        _bookmarks = [@[
+            files_home_url(),
+            files_directory_url(NSDesktopDirectory),
+            files_directory_url(NSDownloadsDirectory),
+            files_directory_url(NSDocumentDirectory),
+            files_directory_url(NSApplicationDirectory),
+            trash,
+        ] mutableCopy];
         return;
     }
 
-    _bookmarks = [@[
-        files_home_url(),
-        files_directory_url(NSDesktopDirectory),
-        files_directory_url(NSDownloadsDirectory),
-        files_directory_url(NSDocumentDirectory),
-        files_directory_url(NSApplicationDirectory),
-        files_directory_url(NSTrashDirectory),
-    ] mutableCopy];
+    _bookmarks = [NSMutableArray arrayWithCapacity:saved.count];
+    for (NSString *path in saved) {
+        [_bookmarks addObject:[NSURL fileURLWithPath:path]];
+    }
+    if (files_same_path(_bookmarks.lastObject, trash)) return;
+
+    NSIndexSet *trash_rows = [_bookmarks indexesOfObjectsPassingTest:
+        ^BOOL(NSURL *u, NSUInteger idx, BOOL *stop) { return files_same_path(u, trash); }];
+    [_bookmarks removeObjectsAtIndexes:trash_rows];
+    [_bookmarks addObject:trash];
+    [self persist_bookmarks];
 }
 
 /*
@@ -183,15 +184,18 @@ rebuild_buttons
         btn.target        = self;
         btn.action        = @selector(bookmark_clicked:);
 
-        NSMenuItem *remove_item = [[NSMenuItem alloc]
-            initWithTitle:@"Remove Bookmark"
-                   action:@selector(remove_bookmark_clicked:)
-            keyEquivalent:@""];
-        remove_item.tag    = (NSInteger)i;
-        remove_item.target = self;
-        NSMenu *ctx = [[NSMenu alloc] initWithTitle:@""];
-        [ctx addItem:remove_item];
-        btn.menu = ctx;
+        /* Trash is permanent (always last), so it has no Remove item. */
+        if (!is_trash) {
+            NSMenuItem *remove_item = [[NSMenuItem alloc]
+                initWithTitle:@"Remove Bookmark"
+                       action:@selector(remove_bookmark_clicked:)
+                keyEquivalent:@""];
+            remove_item.tag    = (NSInteger)i;
+            remove_item.target = self;
+            NSMenu *ctx = [[NSMenu alloc] initWithTitle:@""];
+            [ctx addItem:remove_item];
+            btn.menu = ctx;
+        }
 
         [btn sizeToFit];
 
@@ -276,7 +280,8 @@ remove_bookmark_clicked:(NSMenuItem *)sender
 }
 
 /*
- * add_bookmark: — appends url if not already present, persists, rebuilds.
+ * add_bookmark: — inserts url just before the Trash bookmark (which stays
+ * last) if not already present, then persists and rebuilds.
  *
  * Inputs:
  *   url — directory URL to add
@@ -287,7 +292,7 @@ add_bookmark:(NSURL *)url
     for (NSURL *existing in _bookmarks) {
         if (files_same_path(existing, url)) return;
     }
-    [_bookmarks addObject:url];
+    [_bookmarks insertObject:url atIndex:_bookmarks.count - 1];
     [self persist_bookmarks];
     [self rebuild_buttons];
 }

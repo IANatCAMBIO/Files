@@ -5,6 +5,8 @@
 #import <CoreServices/CoreServices.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <sys/stat.h>
+#include <limits.h>
+#include <stdlib.h>
 
 /* Column identifiers */
 static NSString * const col_name     = @"name";
@@ -55,6 +57,8 @@ listing_keys(void)
         NSURLFileSizeKey,
         NSURLIsDirectoryKey,
         NSURLIsPackageKey,
+        NSURLIsApplicationKey,
+        NSURLIsSymbolicLinkKey,
         NSURLTypeIdentifierKey,
         NSURLLocalizedTypeDescriptionKey,
         NSURLContentModificationDateKey,
@@ -221,9 +225,12 @@ icon_for_url(NSURL *url)
 @property (nonatomic, assign) NSUInteger               list_generation;
 @property (nonatomic, assign) BOOL                     auto_fit_pending;
 
-/* Inline rename state */
-@property (nonatomic, strong) NSTextField             *rename_field;
+/* Inline rename: the Name cell's own text field while it is being edited,
+ * the item being renamed, and whether a listing reload was postponed so
+ * it would not destroy the cell mid-edit. */
+@property (nonatomic, weak)   NSTextField             *rename_field;
 @property (nonatomic, strong) NSURL                   *rename_url;
+@property (nonatomic, assign) BOOL                     reload_deferred;
 
 /* Sort key and ascending flag */
 @property (nonatomic, copy)   NSString                *sort_key;
@@ -375,6 +382,7 @@ build_context_menu
     };
 
     add(@"Open",          @selector(open_selected:));
+    add(@"Run Application", @selector(run_application:));
     [menu addItem:NSMenuItem.separatorItem];
     add(@"Cut",           @selector(cut:));
     add(@"Copy",          @selector(copy:));
@@ -510,7 +518,9 @@ load_location:(NSURL *)url
 
 /*
  * navigate_to: — shows url if it is a folder (recording history), otherwise
- * opens it with its default application.
+ * opens it with its default application. A symbolic link is followed first,
+ * like a Finder alias: a link to a folder shows the folder it points to
+ * (at its real path), and a link whose target is missing reports an error.
  *
  * Inputs:
  *   url — target URL
@@ -518,6 +528,23 @@ load_location:(NSURL *)url
 - (void)
 navigate_to:(NSURL *)url
 {
+    NSNumber *is_link = nil;
+    [url getResourceValue:&is_link forKey:NSURLIsSymbolicLinkKey error:nil];
+    if (is_link.boolValue) {
+        /* realpath(3) follows chains of links and fails (ENOENT) for a
+         * broken one; -URLByResolvingSymlinksInPath would silently return
+         * the broken link itself. */
+        char target[PATH_MAX];
+        if (!realpath(url.fileSystemRepresentation, target)) {
+            files_show_error([NSString stringWithFormat:
+                @"\"%@\" points to an item that no longer exists", url.lastPathComponent],
+                [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil],
+                self.window);
+            return;
+        }
+        url = [NSURL fileURLWithFileSystemRepresentation:target isDirectory:NO relativeToURL:nil];
+    }
+
     NSNumber *is_dir = nil;
     [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
     if (!is_dir.boolValue) {
@@ -621,7 +648,8 @@ reload_directory
  * (so large or network folders never block the UI), then on the main queue
  * sorts, filters, reloads the table and restores the selection by path.
  * A generation counter drops results that a newer reload or navigation
- * has superseded. No-op while Spotlight results are displayed.
+ * has superseded. No-op while Spotlight results are displayed; postponed
+ * (without calling done) while an inline rename is in progress.
  *
  * Inputs:
  *   done — called on the main queue after the table shows the new
@@ -632,6 +660,10 @@ reload_directory_then:(void (^)(void))done
 {
     NSURL *dir = self.current_dir;
     if (!dir || self.search_active) return;
+    if (self.rename_url) {             /* reloading now would end the edit */
+        self.reload_deferred = YES;
+        return;
+    }
 
     NSUInteger generation = ++self.list_generation;
     __weak FilesBrowserView *ws = self;
@@ -1205,7 +1237,26 @@ row_double_clicked:(id)sender
 }
 
 /*
- * open_selected: — opens every selected item via navigate_to:.
+ * context_urls — the items a context-menu command applies to: the
+ * right-clicked row when it is not part of the selection (AppKit leaves the
+ * selection unchanged on right-click), otherwise the selection.
+ *
+ * Output: array of file URLs, possibly empty.
+ */
+- (NSArray<NSURL *> *)
+context_urls
+{
+    NSInteger row = self.table.clickedRow;
+    if (row >= 0 && (NSUInteger)row < self.filtered_items.count &&
+        ![self.table isRowSelected:row]) {
+        return @[self.filtered_items[row]];
+    }
+    return [self selected_urls];
+}
+
+/*
+ * open_selected: — opens every targeted item via navigate_to: (folders,
+ * including app bundles, are shown; files open in their default app).
  *
  * Inputs:
  *   sender — menu item (unused)
@@ -1213,9 +1264,71 @@ row_double_clicked:(id)sender
 - (void)
 open_selected:(id)sender
 {
-    for (NSURL *url in [self selected_urls]) {
+    for (NSURL *url in [self context_urls]) {
         [self navigate_to:url];
     }
+}
+
+/*
+ * application_urls: — the application bundles among urls.
+ *
+ * Inputs:
+ *   urls — listed file URLs (NSURLIsApplicationKey prefetched)
+ *
+ * Output: the subset that are applications, possibly empty.
+ */
+static NSArray<NSURL *> *
+application_urls(NSArray<NSURL *> *urls)
+{
+    return [urls filteredArrayUsingPredicate:
+        [NSPredicate predicateWithBlock:^BOOL(NSURL *url, NSDictionary *b) {
+            NSNumber *is_app = nil;
+            [url getResourceValue:&is_app forKey:NSURLIsApplicationKey error:nil];
+            return is_app.boolValue;
+        }]];
+}
+
+/*
+ * run_application: — launches the targeted application bundle(s) with
+ * NSWorkspace (double-click shows an app bundle's contents instead).
+ *
+ * Inputs:
+ *   sender — context-menu item (unused)
+ */
+- (void)
+run_application:(id)sender
+{
+    __weak NSWindow *win = self.window;
+    for (NSURL *app in application_urls([self context_urls])) {
+        [NSWorkspace.sharedWorkspace openApplicationAtURL:app
+                                            configuration:[NSWorkspaceOpenConfiguration configuration]
+                                        completionHandler:^(NSRunningApplication *ra, NSError *err) {
+            if (!err) return;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                files_show_error(@"Could not run application", err, win);
+            });
+        }];
+    }
+}
+
+/*
+ * validateMenuItem: — shows "Run Application" in the context menu only when
+ * the targeted items include an application.
+ *
+ * Inputs:
+ *   item — menu item being validated
+ *
+ * Output: YES if the item should be enabled.
+ */
+- (BOOL)
+validateMenuItem:(NSMenuItem *)item
+{
+    if (item.action == @selector(run_application:)) {
+        BOOL has_app = application_urls([self context_urls]).count > 0;
+        item.hidden  = !has_app;
+        return has_app;
+    }
+    return YES;
 }
 
 /* ── Keyboard handling ───────────────────────────────────────────────── */
@@ -1387,8 +1500,12 @@ selectAll:(id)sender
 /* ── Inline rename ───────────────────────────────────────────────────── */
 
 /*
- * begin_rename: — shows an NSTextField over the name cell of the selected
- * row, pre-filled with the current name.
+ * begin_rename: — edits the selected item's name in place, in the Name
+ * cell's own text field (so it lines up with the row and scrolls with it).
+ * The field is focused with the name selected minus its extension —
+ * "report" of "report.pdf", "Safari" of "Safari.app" — ready for typing;
+ * a folder's whole name is selected, since dots in folder names are not
+ * extensions.
  *
  * Inputs:
  *   sender — menu item or nil
@@ -1397,50 +1514,73 @@ selectAll:(id)sender
 begin_rename:(id)sender
 {
     NSInteger row = self.table.selectedRow;
-    if (row < 0 || (NSUInteger)row >= self.filtered_items.count) return;
+    if (row < 0 || (NSUInteger)row >= self.filtered_items.count || self.rename_url) return;
 
-    NSURL *url      = self.filtered_items[row];
-    self.rename_url = url;
+    [self.table scrollRowToVisible:row];
+    NSInteger col = [self.table columnWithIdentifier:col_name];
+    NSTableCellView *cell = [self.table viewAtColumn:col row:row makeIfNecessary:YES];
+    NSTextField *tf = cell.textField;
+    if (!tf) return;
 
-    NSRect row_rect  = [self.table rectOfRow:row];
-    NSRect col_rect  = [self.table rectOfColumn:0];
-    NSRect cell_rect = NSIntersectionRect(row_rect, col_rect);
-    /* Offset for icon and scroll position */
-    cell_rect.origin.x   += 22.0;
-    cell_rect.size.width -= 22.0;
+    NSURL *url    = self.filtered_items[row];
+    NSString *name = url.lastPathComponent;
+    self.rename_url   = url;
+    self.rename_field = tf;
 
-    NSRect field_rect = [self.table convertRect:cell_rect toView:self];
-    field_rect = [self.scroll convertRect:field_rect fromView:self.table];
-    field_rect = [self convertRect:field_rect fromView:self.scroll];
+    tf.stringValue     = name;
+    tf.editable        = YES;
+    tf.bordered        = YES;
+    tf.drawsBackground = YES;
+    tf.backgroundColor = NSColor.textBackgroundColor;
+    tf.delegate        = self;
+    [self.window makeFirstResponder:tf];
 
-    if (!self.rename_field) {
-        self.rename_field            = [[NSTextField alloc] init];
-        self.rename_field.delegate   = self;
-        self.rename_field.font       = [NSFont systemFontOfSize:12.0];
-        self.rename_field.bezelStyle = NSTextFieldSquareBezel;
-    }
-    self.rename_field.frame       = field_rect;
-    self.rename_field.stringValue = url.lastPathComponent;
-    [self addSubview:self.rename_field];
-    [self.window makeFirstResponder:self.rename_field];
-    [self.rename_field selectText:nil];
+    NSNumber *is_dir = nil, *is_pkg = nil;
+    [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
+    [url getResourceValue:&is_pkg forKey:NSURLIsPackageKey error:nil];
+    NSUInteger len = (is_dir.boolValue && !is_pkg.boolValue)
+                     ? name.length : name.stringByDeletingPathExtension.length;
+    tf.currentEditor.selectedRange = NSMakeRange(0, len ? len : name.length);
 }
 
 /*
- * cancel_rename — removes the rename field without saving.
+ * finish_rename — returns the Name cell's text field to its display state,
+ * gives focus back to the table and runs any reload that was postponed
+ * while editing.
+ */
+- (void)
+finish_rename
+{
+    NSTextField *tf    = self.rename_field;
+    self.rename_url    = nil;
+    self.rename_field  = nil;
+    tf.delegate        = nil;
+    tf.editable        = NO;
+    tf.bordered        = NO;
+    tf.drawsBackground = NO;
+    [self.window makeFirstResponder:self.table];
+
+    if (self.reload_deferred) {
+        self.reload_deferred = NO;
+        [self reload_directory];
+    }
+}
+
+/*
+ * cancel_rename — abandons the edit and restores the original name.
  */
 - (void)
 cancel_rename
 {
-    self.rename_url = nil;
-    [self.rename_field abortEditing];
-    [self.rename_field removeFromSuperview];
-    [self.window makeFirstResponder:self.table];
+    NSTextField *tf = self.rename_field;
+    [tf abortEditing];
+    tf.stringValue = self.rename_url.lastPathComponent ?: @"";
+    [self finish_rename];
 }
 
 /*
- * controlTextDidEndEditing: — commits the rename when the field ends editing
- * (unless it was cancelled, which clears rename_url first).
+ * controlTextDidEndEditing: — commits the rename when editing ends (Return,
+ * Tab or clicking elsewhere). An unchanged or empty name is a no-op.
  *
  * Inputs:
  *   note — NSControlTextDidEndEditingNotification
@@ -1448,15 +1588,16 @@ cancel_rename
 - (void)
 controlTextDidEndEditing:(NSNotification *)note
 {
-    if (note.object != self.rename_field) return;
-    NSString *new_name = self.rename_field.stringValue;
+    NSTextField *tf = self.rename_field;
+    if (note.object != tf) return;
+    NSString *new_name = tf.stringValue;
     NSURL *target      = self.rename_url;
-    self.rename_url    = nil;
-    [self.rename_field removeFromSuperview];
-    [self.window makeFirstResponder:self.table];
+    [self finish_rename];
 
-    if (!target || new_name.length == 0) return;
-    if ([new_name isEqualToString:target.lastPathComponent]) return;
+    if (new_name.length == 0 || [new_name isEqualToString:target.lastPathComponent]) {
+        tf.stringValue = target.lastPathComponent;
+        return;
+    }
 
     __weak FilesBrowserView *ws = self;
     [FilesFileOps rename_url:target to:new_name completion:^(NSURL *new_url, NSError *err) {

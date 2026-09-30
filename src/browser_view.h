@@ -54,7 +54,8 @@
 /*
  * navigate_to: — shows url if it is a folder, pushing the previous location
  * onto the back stack (capped at 100 entries) and clearing the forward
- * stack; any other item is opened with its default application.
+ * stack; any other item is opened with its default application. Symbolic
+ * links are followed to their target first.
  *
  * Inputs:
  *   url — target URL
