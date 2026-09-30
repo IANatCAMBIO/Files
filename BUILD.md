@@ -50,12 +50,13 @@ files.app/
     ├── MacOS/
     │   └── files          ← compiled binary
     └── Resources/
-        ├── folder.png, documents.png
+        ├── folder.png, documents.png, ribbon.png
         └── gh_folder_light.icns, gh_folder_dark.icns  ← git folder icon
 ```
 
-The Makefile copies the images listed in `ICONS` from the project root into
-`Resources/`.
+The Makefile copies every `.png` and `.icns` in `images/` into `Resources/`,
+so adding an image there is all it takes to bundle it; the app loads it by
+name (`NSBundle pathForResource:ofType:`).
 
 ## Version and build date
 
