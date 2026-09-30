@@ -28,7 +28,12 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   system's DiskImageMounter to ask, then open the same way
 - Spotlight search within the current folder
 - Live updates when the current folder changes
-- Devices menu and an All Mounts panel with per-volume unmount
+- Devices menu and an All Mounts panel with per-volume unmount; at the root
+  of an unmountable volume (external disk, disk image, network share) a
+  floating ⏏ button unmounts it (the status bar confirms), and any window
+  showing it moves to /Volumes. If files on it are open, a sheet lists them
+  (and the apps using them) and the volume unmounts automatically once
+  they are closed
 - Address bar (accepts `~` and relative paths), back/forward/up, Open in
   Terminal, show/hide hidden files
 

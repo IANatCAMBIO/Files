@@ -26,8 +26,12 @@
 /* Last status-bar text reported by the browser (shown when active). */
 @property (nonatomic, copy) NSString *status_text;
 
-/* YES while the browser shows the Trash (Empty Trash button visible when active). */
+/* YES while the browser shows the Trash (floating Empty Trash button). */
 @property (nonatomic) BOOL showing_trash;
+
+/* The volume whose root the browser shows, if that volume can be unmounted
+ * (floating Unmount button); nil otherwise. */
+@property (nonatomic, strong) NSURL *unmountable_volume;
 
 /*
  * init_with_frame: — designated initialiser; fills the pane with a browser.

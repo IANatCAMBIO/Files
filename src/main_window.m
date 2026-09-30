@@ -5,6 +5,7 @@
 #import "info_panel.h"
 #import "info_sidebar.h"
 #import "util.h"
+#import "volume_manager.h"
 
 /* Toolbar item identifiers */
 static NSString * const tb_back          = @"files.back";
@@ -23,6 +24,16 @@ static const CGFloat status_h        = 20.0;
 static const CGFloat sidebar_w       = 180.0;  /* initial info sidebar width */
 static const CGFloat sidebar_min_w   = 140.0;
 static const CGFloat browser_min_w   = 400.0;
+
+/* How long a transient status message stays before the item count returns. */
+static const double  transient_status_sec = 4.0;
+
+/* Retry interval for a pending unmount: starts short, backs off to the max. */
+static const double  pending_retry_min_sec = 2.0;
+static const double  pending_retry_max_sec = 10.0;
+
+/* Most open items listed in the "unmount pending" sheet. */
+static const NSUInteger pending_list_max = 10;
 
 /* KVO context for the window's firstResponder (dual-pane focus tracking). */
 static void *first_responder_ctx = &first_responder_ctx;
@@ -44,9 +55,15 @@ static void *first_responder_ctx = &first_responder_ctx;
 @property (nonatomic, strong) FilesBrowserPane *secondary_pane;    /* nil = single-pane */
 @property (nonatomic)         NSInteger         active_pane_index; /* 0 or 1 */
 
-/* Status bar (full-width, below the split) and floating Empty Trash button */
+/* Status bar (full-width, below the split) and the floating action button,
+ * which is Empty Trash in the Trash and Unmount at an unmountable volume's
+ * root (see update_floating_button). */
 @property (nonatomic, strong) NSTextField *status_label;
-@property (nonatomic, strong) NSButton    *empty_trash_btn;
+@property (nonatomic, strong) NSButton    *floating_btn;
+@property (nonatomic, assign) NSUInteger   transient_status_id;  /* 0 = none showing */
+
+/* Paths of volumes waiting for their open files to close before unmounting. */
+@property (nonatomic, strong) NSMutableSet<NSString *> *pending_unmounts;
 
 @end
 
@@ -85,6 +102,10 @@ init_with_url:(NSURL *)url
     [self build_layout];
     [self.window addObserver:self forKeyPath:@"firstResponder"
                      options:0 context:first_responder_ctx];
+    [NSNotificationCenter.defaultCenter addObserver:self
+                                           selector:@selector(volumes_changed:)
+                                               name:FilesVolumesChangedNotification
+                                             object:nil];
 
     __weak FilesMainWindow *ws = self;
     self.bookmarks_bar.selection_handler = ^(NSURL *url) {
@@ -100,12 +121,13 @@ init_with_url:(NSURL *)url
 }
 
 /*
- * dealloc — removes the firstResponder observer added in init.
+ * dealloc — removes the observers added in init_with_url:.
  */
 - (void)
 dealloc
 {
     [self.window removeObserver:self forKeyPath:@"firstResponder" context:first_responder_ctx];
+    [NSNotificationCenter.defaultCenter removeObserver:self];
 }
 
 /* ── Layout ──────────────────────────────────────────────────────────────── */
@@ -215,24 +237,20 @@ build_layout
     split_view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     [area addSubview:split_view];
 
-    /* Floating Empty Trash button — icon-only, lower-right, over the browser. */
+    /* Floating action button — icon-only, lower-right, over the browser.
+     * Its image, action and tooltip are set by update_floating_button. */
     static const CGFloat fab_size   = 36.0;
     static const CGFloat fab_margin = 14.0;
-    NSImage *fab_icon = [[NSImage imageNamed:NSImageNameTrashEmpty] copy];
-    fab_icon.size = NSMakeSize(20.0, 20.0);
-    self.empty_trash_btn = [[NSButton alloc]
+    self.floating_btn = [[NSButton alloc]
         initWithFrame:NSMakeRect(w - fab_size - fab_margin, status_h + 1.0 + fab_margin,
                                  fab_size, fab_size)];
-    self.empty_trash_btn.image            = fab_icon;
-    self.empty_trash_btn.imageScaling     = NSImageScaleProportionallyDown;
-    self.empty_trash_btn.bezelStyle       = NSBezelStyleRegularSquare;
-    self.empty_trash_btn.buttonType       = NSButtonTypeMomentaryLight;
-    self.empty_trash_btn.target           = self;
-    self.empty_trash_btn.action           = @selector(empty_trash_action:);
-    self.empty_trash_btn.autoresizingMask = NSViewMinXMargin | NSViewMaxYMargin;
-    self.empty_trash_btn.hidden           = YES;
-    self.empty_trash_btn.toolTip          = @"Empty Trash";
-    [area addSubview:self.empty_trash_btn positioned:NSWindowAbove relativeTo:nil];
+    self.floating_btn.imageScaling     = NSImageScaleProportionallyDown;
+    self.floating_btn.bezelStyle       = NSBezelStyleRegularSquare;
+    self.floating_btn.buttonType       = NSButtonTypeMomentaryLight;
+    self.floating_btn.target           = self;
+    self.floating_btn.autoresizingMask = NSViewMinXMargin | NSViewMaxYMargin;
+    self.floating_btn.hidden           = YES;
+    [area addSubview:self.floating_btn positioned:NSWindowAbove relativeTo:nil];
 }
 
 /* ── Panes ───────────────────────────────────────────────────────────────── */
@@ -276,7 +294,7 @@ all_browsers
 /*
  * wire_pane: — connects a pane's browser callbacks to the window. Every
  * callback records per-pane state, but only the active pane updates the
- * shared toolbar, status bar, Empty Trash button and info sidebar.
+ * shared toolbar, status bar, floating button and info sidebar.
  *
  * Inputs:
  *   pane — pane to wire
@@ -290,8 +308,13 @@ wire_pane:(FilesBrowserPane *)pane
 
     b.navigation_handler = ^(NSURL *url) {
         FilesMainWindow *s = ws;
-        if (!s || [s active_pane] != wp) return;
+        FilesBrowserPane *p = wp;
+        if (!s || !p) return;
+        p.showing_trash      = files_same_path(url, files_directory_url(NSTrashDirectory));
+        p.unmountable_volume = unmountable_volume_root(url);
+        if ([s active_pane] != p) return;
         [s update_toolbar_for_url:url];
+        [s update_floating_button];
         [s.bookmarks_bar update_trash_icon];
     };
     b.open_window_handler = ^(NSURL *url) {
@@ -316,20 +339,65 @@ wire_pane:(FilesBrowserPane *)pane
         p.status_text = text;
         /* Listings of the Trash are the signal that its contents changed. */
         if (p.showing_trash) [s.bookmarks_bar update_trash_icon];
-        if ([s active_pane] == p) s.status_label.stringValue = text ?: @"";
-    };
-    b.trash_visible_handler = ^(BOOL show) {
-        FilesMainWindow *s = ws;
-        FilesBrowserPane *p = wp;
-        if (!s || !p) return;
-        p.showing_trash = show;
-        if ([s active_pane] == p) s.empty_trash_btn.hidden = !show;
+        if ([s active_pane] == p) [s show_pane_status];
     };
 }
 
 /*
+ * unmountable_volume_root — url itself if it is the root of a volume the
+ * user may unmount (FilesVolumeManager can_unmount_volume: — anything but
+ * the boot volume and fixed internal disks).
+ *
+ * Inputs:
+ *   url — folder being shown
+ *
+ * Output: the volume root URL, or nil.
+ */
+static NSURL *
+unmountable_volume_root(NSURL *url)
+{
+    NSURL *volume = nil;
+    [url getResourceValue:&volume forKey:NSURLVolumeURLKey error:nil];
+    if (!files_same_path(volume, url)) return nil;
+    return [FilesVolumeManager.shared can_unmount_volume:volume] ? volume : nil;
+}
+
+/*
+ * update_floating_button — shows the floating button for the active pane:
+ * Empty Trash while it shows the Trash, Unmount "<name>" while it shows the
+ * root of an unmountable volume, hidden otherwise.
+ */
+- (void)
+update_floating_button
+{
+    FilesBrowserPane *p = [self active_pane];
+    NSButton *btn = self.floating_btn;
+    NSImage  *icon;
+    if (p.showing_trash) {
+        icon        = [[NSImage imageNamed:NSImageNameTrashEmpty] copy];
+        icon.size   = NSMakeSize(20.0, 20.0);
+        btn.action  = @selector(empty_trash_action:);
+        btn.toolTip = @"Empty Trash";
+    } else if (p.unmountable_volume) {
+        NSString *name = [FilesVolumeManager.shared display_name_for_volume:p.unmountable_volume];
+        btn.toolTip = [NSString stringWithFormat:@"Unmount \"%@\"", name];
+        icon        = [[NSImage imageWithSystemSymbolName:@"eject" accessibilityDescription:btn.toolTip]
+                          imageWithSymbolConfiguration:
+                              [NSImageSymbolConfiguration configurationWithPointSize:16
+                                                                              weight:NSFontWeightRegular]];
+        btn.action  = @selector(unmount_action:);
+    } else {
+        btn.hidden = YES;
+        return;
+    }
+    btn.image   = icon;
+    btn.enabled = YES;
+    btn.hidden  = NO;
+}
+
+/*
  * set_active_pane: — makes pane index idx active and refreshes everything
- * that follows the active pane: dimming, toolbar, status bar, Empty Trash
+ * that follows the active pane: dimming, toolbar, status bar, floating
  * button and info sidebar.
  *
  * Inputs:
@@ -344,9 +412,43 @@ set_active_pane:(NSInteger)idx
 
     FilesBrowserPane *p = [self active_pane];
     [self update_toolbar_for_url:p.browser.current_url];
-    self.status_label.stringValue = p.status_text ?: @"";
-    self.empty_trash_btn.hidden   = !p.showing_trash;
+    [self show_pane_status];
+    [self update_floating_button];
     [self refresh_sidebar_for_active_pane];
+}
+
+/*
+ * show_pane_status — puts the active pane's item count in the status bar,
+ * unless a transient message is currently being shown.
+ */
+- (void)
+show_pane_status
+{
+    if (self.transient_status_id) return;
+    self.status_label.stringValue = [self active_pane].status_text ?: @"";
+}
+
+/*
+ * show_transient_status: — shows msg in the status bar for
+ * transient_status_sec, then restores the active pane's item count. Item
+ * counts reported meanwhile are recorded and shown once it expires.
+ *
+ * Inputs:
+ *   msg — message to show
+ */
+- (void)
+show_transient_status:(NSString *)msg
+{
+    NSUInteger msg_id = ++self.transient_status_id;
+    self.status_label.stringValue = msg;
+    __weak FilesMainWindow *ws = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(transient_status_sec * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        FilesMainWindow *s = ws;
+        if (!s || s.transient_status_id != msg_id) return;  /* superseded */
+        s.transient_status_id = 0;
+        [s show_pane_status];
+    });
 }
 
 /*
@@ -804,15 +906,148 @@ open_terminal_action:(id)sender
 
 /*
  * empty_trash_action: — forwards to the active browser (the floating button
- * is only visible while that browser shows the Trash).
+ * shows Empty Trash only while that browser shows the Trash).
  *
  * Inputs:
- *   sender — the floating Empty Trash button
+ *   sender — the floating button
  */
 - (IBAction)
 empty_trash_action:(id)sender
 {
     [[self active_browser] empty_trash_action:sender];
+}
+
+/*
+ * unmount_action: — unmounts the volume whose root the active pane shows.
+ * The button is disabled while the unmount runs. On success the status bar
+ * says so for a few seconds and volumes_changed: moves every pane off the
+ * vanished volume to /Volumes. If it fails because files on the volume are
+ * open, a sheet lists them and says the unmount is pending (see
+ * watch_pending_unmount:); any other failure shows an error sheet.
+ *
+ * Inputs:
+ *   sender — the floating button
+ */
+- (IBAction)
+unmount_action:(id)sender
+{
+    NSURL *volume = [self active_pane].unmountable_volume;
+    if (!volume) return;
+    NSString *name = [FilesVolumeManager.shared display_name_for_volume:volume];
+    self.floating_btn.enabled = NO;
+    __weak FilesMainWindow *ws = self;
+    [FilesVolumeManager.shared unmount_volume:volume completion:^(NSError *err) {
+        FilesMainWindow *s = ws;
+        if (!s) return;
+        s.floating_btn.enabled = YES;
+        if (!err) {
+            [s show_transient_status:[NSString stringWithFormat:@"\"%@\" was unmounted.", name]];
+            return;
+        }
+        [FilesVolumeManager.shared open_files_on_volume:volume completion:^(NSArray<NSString *> *items) {
+            if (items.count == 0) {
+                files_show_error([NSString stringWithFormat:@"Could not unmount \"%@\"", name],
+                                 err, s.window);
+                return;
+            }
+            [s show_pending_unmount:name items:items];
+            [s watch_pending_unmount:volume name:name delay:pending_retry_min_sec];
+        }];
+    }];
+}
+
+/*
+ * show_pending_unmount:items: — sheet telling the user the unmount is
+ * pending and which open files (and the apps holding them) must be closed.
+ *
+ * Inputs:
+ *   name  — volume display name
+ *   items — open-file descriptions from open_files_on_volume:completion:
+ */
+- (void)
+show_pending_unmount:(NSString *)name items:(NSArray<NSString *> *)items
+{
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    for (NSUInteger i = 0; i < MIN(items.count, pending_list_max); i++) {
+        [lines addObject:[@"• " stringByAppendingString:items[i]]];
+    }
+    if (items.count > pending_list_max) {
+        [lines addObject:[NSString stringWithFormat:@"…and %lu more",
+                          (unsigned long)(items.count - pending_list_max)]];
+    }
+    NSAlert *alert        = [[NSAlert alloc] init];
+    alert.messageText     = [NSString stringWithFormat:@"Unmounting \"%@\" is pending", name];
+    alert.informativeText = [NSString stringWithFormat:
+        @"It will be unmounted automatically once these are closed:\n\n%@",
+        [lines componentsJoinedByString:@"\n"]];
+    [alert beginSheetModalForWindow:self.window completionHandler:nil];
+}
+
+/*
+ * watch_pending_unmount:name:delay: — after delay, checks a pending volume:
+ * if it is already gone (macOS completed the unmount itself), or a retried
+ * unmount now succeeds, the status bar reports it; otherwise it checks
+ * again, backing off to pending_retry_max_sec. A retry is a single cheap
+ * unmount request, not a scan of open files. One watcher per volume;
+ * stops if this window closes.
+ *
+ * Inputs:
+ *   volume — volume root URL
+ *   name   — its display name (for the status message)
+ *   delay  — seconds until the next check
+ */
+- (void)
+watch_pending_unmount:(NSURL *)volume name:(NSString *)name delay:(double)delay
+{
+    if (!self.pending_unmounts) self.pending_unmounts = [NSMutableSet set];
+    if (delay == pending_retry_min_sec) {
+        if ([self.pending_unmounts containsObject:volume.path]) return;  /* already watching */
+        [self.pending_unmounts addObject:volume.path];
+    }
+
+    __weak FilesMainWindow *ws = self;
+    void (^done)(void) = ^{
+        FilesMainWindow *s = ws;
+        [s.pending_unmounts removeObject:volume.path];
+        [s show_transient_status:[NSString stringWithFormat:@"\"%@\" was unmounted.", name]];
+    };
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        FilesMainWindow *s = ws;
+        if (!s) return;
+        if (![volume checkResourceIsReachableAndReturnError:nil]) {
+            done();
+            return;
+        }
+        [FilesVolumeManager.shared unmount_volume:volume completion:^(NSError *err) {
+            if (!err) {
+                done();
+            } else {
+                [ws watch_pending_unmount:volume name:name
+                                    delay:MIN(delay * 2.0, pending_retry_max_sec)];
+            }
+        }];
+    });
+}
+
+/*
+ * volumes_changed: — after any mount, unmount or rename (from this app,
+ * Finder, or elsewhere), moves each pane whose folder no longer exists —
+ * e.g. it was on an unmounted volume — to /Volumes, where the remaining
+ * volumes are listed.
+ *
+ * Inputs:
+ *   note — FilesVolumesChangedNotification (unused)
+ */
+- (void)
+volumes_changed:(NSNotification *)note
+{
+    for (FilesBrowserView *b in [self all_browsers]) {
+        NSURL *url = b.current_url;
+        if (url && ![url checkResourceIsReachableAndReturnError:nil]) {
+            [b navigate_to:[NSURL fileURLWithPath:@"/Volumes" isDirectory:YES]];
+        }
+    }
 }
 
 /* ── View preferences (apply to every pane) ──────────────────────────────── */

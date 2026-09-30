@@ -24,6 +24,71 @@ volume_keys(void)
     return keys;
 }
 
+/*
+ * process_name — a user-facing name for pid: the app's localized name for
+ * GUI apps, otherwise the command name lsof reported.
+ *
+ * Inputs:
+ *   pid     — process id
+ *   command — lsof's command name (fallback)
+ *
+ * Output: display name.
+ */
+static NSString *
+process_name(pid_t pid, NSString *command)
+{
+    NSRunningApplication *app = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+    return app.localizedName ?: command ?: [NSString stringWithFormat:@"pid %d", pid];
+}
+
+/*
+ * list_open_files — runs `lsof -Fpctn +f -- <volume>` (every open file,
+ * folder or working directory on that file system) and turns its field
+ * output into de-duplicated, sorted descriptions. Blocks; call off the
+ * main thread.
+ *
+ * Inputs:
+ *   volume — volume root URL
+ *
+ * Output: array of descriptions (possibly empty).
+ */
+static NSArray<NSString *> *
+list_open_files(NSURL *volume)
+{
+    NSTask *task        = [[NSTask alloc] init];
+    task.executableURL  = [NSURL fileURLWithPath:@"/usr/sbin/lsof"];
+    task.arguments      = @[@"-Fpctn", @"+f", @"--", volume.path];
+    task.standardError  = NSFileHandle.fileHandleWithNullDevice;
+    NSPipe *out         = [NSPipe pipe];
+    task.standardOutput = out;
+    if (![task launchAndReturnError:nil]) return @[];
+    NSData *data = [out.fileHandleForReading readDataToEndOfFile];
+    [task waitUntilExit];
+
+    NSString *root = volume.path;
+    NSMutableOrderedSet<NSString *> *items = [NSMutableOrderedSet orderedSet];
+    pid_t pid = 0;
+    NSString *command = nil, *type = nil;
+    NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    for (NSString *line in [text componentsSeparatedByString:@"\n"]) {
+        if (line.length < 2) continue;
+        NSString *value = [line substringFromIndex:1];
+        switch ([line characterAtIndex:0]) {
+        case 'p': pid = (pid_t)value.intValue; command = nil; break;
+        case 'c': command = value; break;
+        case 't': type = value; break;
+        case 'n': {
+            NSString *rel = [value hasPrefix:[root stringByAppendingString:@"/"]]
+                ? [value substringFromIndex:root.length + 1] : value.lastPathComponent;
+            if ([type isEqualToString:@"DIR"]) rel = [rel stringByAppendingString:@" (folder)"];
+            [items addObject:[NSString stringWithFormat:@"%@ — %@", rel, process_name(pid, command)]];
+            break;
+        }
+        }
+    }
+    return [items.array sortedArrayUsingSelector:@selector(localizedStandardCompare:)];
+}
+
 /* How long to wait for DiskImageMounter to mount an image it was handed. */
 static const int64_t interactive_mount_timeout_sec = 120;
 
@@ -206,6 +271,23 @@ unmount_volume:(NSURL *)url
             }
         });
     }];
+}
+
+/*
+ * open_files_on_volume:completion: — runs list_open_files in the background.
+ *
+ * Inputs:
+ *   volume     — volume root URL
+ *   completion — see volume_manager.h
+ */
+- (void)
+open_files_on_volume:(NSURL *)volume
+          completion:(void (^)(NSArray<NSString *> *items))completion
+{
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSArray<NSString *> *items = list_open_files(volume);
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(items); });
+    });
 }
 
 /*

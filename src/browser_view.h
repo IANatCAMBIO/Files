@@ -33,12 +33,6 @@
 @property (nonatomic, copy) void (^status_text_handler)(NSString *text);
 
 /*
- * trash_visible_handler — called when navigating to or away from ~/.Trash.
- * Receives YES when the Empty Trash button should be shown.
- */
-@property (nonatomic, copy) void (^trash_visible_handler)(BOOL show);
-
-/*
  * open_window_handler — called to show a folder in a new window (used for
  * the volume of a newly mounted disk image). If nil, the folder is shown in
  * this browser instead.

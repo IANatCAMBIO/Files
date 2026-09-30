@@ -70,6 +70,20 @@ extern NSString * const FilesVolumesChangedNotification;
 - (void)unmount_volume:(NSURL *)url completion:(void (^)(NSError *err))completion;
 
 /*
+ * open_files_on_volume:completion: — lists what is keeping a volume busy:
+ * files and folders on it that processes have open (via lsof; only the
+ * current user's processes are visible). Runs in the background.
+ *
+ * Inputs:
+ *   volume     — volume root URL
+ *   completion — called on the main thread with one description per open
+ *                item, e.g. "inner/a.txt — Preview" or "Projects (folder)
+ *                — Terminal"; empty if nothing visible is open
+ */
+- (void)open_files_on_volume:(NSURL *)volume
+                  completion:(void (^)(NSArray<NSString *> *items))completion;
+
+/*
  * mount_disk_image:completion: — mounts a disk image (.dmg, .iso, …) and
  * reports the mounted volume. Runs `hdiutil attach` in the background
  * without a terminal, so it can never block on a prompt; an image that is

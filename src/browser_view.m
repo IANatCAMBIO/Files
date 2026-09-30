@@ -496,7 +496,7 @@ push_history:(NSURL *)url onto:(NSMutableArray<NSURL *> *)stack
 /*
  * load_location: — makes url the displayed folder: ends any Spotlight search,
  * re-targets the watcher, starts a listing (auto-fit runs when it lands) and
- * notifies the navigation and Empty Trash handlers. Shared by navigate_to:,
+ * notifies the navigation handler. Shared by navigate_to:,
  * go_back and go_forward; does not touch the history stacks.
  *
  * Inputs:
@@ -512,9 +512,6 @@ load_location:(NSURL *)url
     [self reload_directory];
 
     if (self.navigation_handler) self.navigation_handler(url);
-    if (self.trash_visible_handler) {
-        self.trash_visible_handler(files_same_path(url, files_directory_url(NSTrashDirectory)));
-    }
 }
 
 /*
