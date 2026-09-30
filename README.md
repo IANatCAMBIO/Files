@@ -23,6 +23,9 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   without its extension is selected, ready to type)
 - App bundles open like folders; right-click ▸ Run Application launches one
 - Symbolic links are followed (a link to a folder opens that folder)
+- Opening a disk image (.dmg, .iso, …) mounts it and opens its volume in a
+  new window; password-protected or licensed images are handed to the
+  system's DiskImageMounter to ask, then open the same way
 - Spotlight search within the current folder
 - Live updates when the current folder changes
 - Devices menu and an All Mounts panel with per-volume unmount
@@ -57,6 +60,7 @@ Or double-click `files.app` in `~/Applications` after installing.
 | Copy           | ⌘C                 |
 | Cut            | ⌘X                 |
 | Paste          | ⌘V                 |
+| New Window     | ⌘N                 |
 | Move to Trash  | ⌘⌫                 |
 | Add Bookmark   | ⌘D                 |
 | Open in Terminal | ⌘⇧T              |

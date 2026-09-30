@@ -39,6 +39,13 @@
 @property (nonatomic, copy) void (^trash_visible_handler)(BOOL show);
 
 /*
+ * open_window_handler — called to show a folder in a new window (used for
+ * the volume of a newly mounted disk image). If nil, the folder is shown in
+ * this browser instead.
+ */
+@property (nonatomic, copy) void (^open_window_handler)(NSURL *url);
+
+/*
  * init_with_frame: — designated initialiser; builds subviews and sets up the
  * table.
  *
@@ -54,8 +61,9 @@
 /*
  * navigate_to: — shows url if it is a folder, pushing the previous location
  * onto the back stack (capped at 100 entries) and clearing the forward
- * stack; any other item is opened with its default application. Symbolic
- * links are followed to their target first.
+ * stack. A disk image is mounted and its volume shown via
+ * open_window_handler; any other item is opened with its default
+ * application. Symbolic links are followed to their target first.
  *
  * Inputs:
  *   url — target URL

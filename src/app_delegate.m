@@ -6,7 +6,7 @@
 #import "util.h"
 
 @interface FilesAppDelegate () <NSMenuDelegate>
-@property (nonatomic, strong) FilesMainWindow *main_window;
+@property (nonatomic, strong) NSMutableArray<FilesMainWindow *> *windows;  /* open browser windows */
 @end
 
 @implementation FilesAppDelegate
@@ -21,9 +21,79 @@
 applicationDidFinishLaunching:(NSNotification *)n
 {
     [self build_menu_bar];
-    self.main_window = [[FilesMainWindow alloc] init];
-    [self.main_window showWindow:nil];
+    self.windows = [NSMutableArray array];
+    [NSNotificationCenter.defaultCenter addObserver:self
+                                           selector:@selector(window_will_close:)
+                                               name:NSWindowWillCloseNotification
+                                             object:nil];
+    [self open_window_at:files_home_url()];
     [NSApp activate];
+}
+
+/* ── Windows ─────────────────────────────────────────────────────────────── */
+
+/*
+ * open_window_at: — opens a new browser window showing url, cascaded down
+ * and right from the frontmost browser window (the first window uses the
+ * saved frame). Used at launch, by File ▸ New Window, and when a window
+ * asks for one (a newly mounted disk image).
+ *
+ * Inputs:
+ *   url — folder to show
+ */
+- (void)
+open_window_at:(NSURL *)url
+{
+    FilesMainWindow *front = [self front_window];
+    FilesMainWindow *w     = [[FilesMainWindow alloc] init_with_url:url];
+    if (front) {
+        NSRect f = front.window.frame;
+        [w.window setFrameTopLeftPoint:NSMakePoint(NSMinX(f) + 24.0, NSMaxY(f) - 24.0)];
+    }
+    __weak FilesAppDelegate *ws = self;
+    w.new_window_handler = ^(NSURL *u) { [ws open_window_at:u]; };
+    [self.windows addObject:w];
+    [w showWindow:nil];
+}
+
+/*
+ * new_window_action: — File ▸ New Window (⌘N): opens a browser window on the
+ * home folder, like Finder's default new window.
+ *
+ * Inputs:
+ *   sender — menu item (unused)
+ */
+- (void)
+new_window_action:(id)sender
+{
+    [self open_window_at:files_home_url()];
+}
+
+/*
+ * front_window — the browser window menu commands should act on: the main
+ * window if it is a browser window, otherwise the most recently opened one.
+ *
+ * Output: FilesMainWindow, or nil if none is open.
+ */
+- (FilesMainWindow *)
+front_window
+{
+    id wc = NSApp.mainWindow.windowController;
+    return [self.windows containsObject:wc] ? wc : self.windows.lastObject;
+}
+
+/*
+ * window_will_close: — releases a browser window's controller when its
+ * window closes (other windows, e.g. panels, are ignored).
+ *
+ * Inputs:
+ *   note — NSWindowWillCloseNotification; object is the closing window
+ */
+- (void)
+window_will_close:(NSNotification *)note
+{
+    id wc = ((NSWindow *)note.object).windowController;
+    if ([self.windows containsObject:wc]) [self.windows removeObject:wc];
 }
 
 /*
@@ -85,7 +155,7 @@ toggle_hash_validation:(NSMenuItem *)sender
 /*
  * menuNeedsUpdate: — NSMenuDelegate; repopulates the Devices menu from the
  * mounted volumes each time it opens, so it never needs mount observers.
- * Each volume item navigates the main window's active pane; a separator
+ * Each volume item navigates the front window's active pane; a separator
  * and "All Mounts…" follow.
  *
  * Inputs:
@@ -122,7 +192,7 @@ menuNeedsUpdate:(NSMenu *)menu
 }
 
 /*
- * device_menu_item_clicked: — navigates the main window's active pane to the
+ * device_menu_item_clicked: — navigates the front window's active pane to the
  * volume URL stored in the menu item's representedObject.
  *
  * Inputs:
@@ -133,7 +203,7 @@ device_menu_item_clicked:(NSMenuItem *)sender
 {
     NSURL *vol = sender.representedObject;
     if (!vol) return;
-    [[self.main_window active_pane].browser navigate_to:vol];
+    [[[self front_window] active_pane].browser navigate_to:vol];
 }
 
 /*
@@ -170,6 +240,9 @@ build_menu_bar
     /* ── File menu ── */
     NSMenuItem *file_mi = [[NSMenuItem alloc] init];
     NSMenu *file_menu   = [[NSMenu alloc] initWithTitle:@"File"];
+    NSMenuItem *new_window = make_item(@"New Window", @selector(new_window_action:), @"n", 0);
+    new_window.target = self;
+    [file_menu addItem:new_window];
     [file_menu addItem:make_item(@"New Folder",
                                  @selector(new_folder_action:),
                                  @"n", NSEventModifierFlagShift)];

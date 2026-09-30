@@ -2,6 +2,7 @@
 #import "file_ops.h"
 #import "info_panel.h"
 #import "util.h"
+#import "volume_manager.h"
 #import <CoreServices/CoreServices.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <sys/stat.h>
@@ -546,9 +547,15 @@ navigate_to:(NSURL *)url
     }
 
     NSNumber *is_dir = nil;
+    NSString *uti    = nil;
     [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
     if (!is_dir.boolValue) {
-        [NSWorkspace.sharedWorkspace openURL:url];
+        [url getResourceValue:&uti forKey:NSURLTypeIdentifierKey error:nil];
+        if (uti && [[UTType typeWithIdentifier:uti] conformsToType:UTTypeDiskImage]) {
+            [self mount_disk_image:url];
+        } else {
+            [NSWorkspace.sharedWorkspace openURL:url];
+        }
         return;
     }
     if (files_same_path(url, self.current_dir)) return;
@@ -556,6 +563,39 @@ navigate_to:(NSURL *)url
     [self push_history:self.current_dir onto:self.back_stack];
     [self.forward_stack removeAllObjects];
     [self load_location:url];
+}
+
+/*
+ * mount_disk_image: — mounts a disk image (see FilesVolumeManager
+ * mount_disk_image:completion:) and shows its volume in a new window via
+ * open_window_handler, or in this browser if none is set. The status bar
+ * reads "Mounting …" meanwhile.
+ *
+ * Inputs:
+ *   image — disk image file URL
+ */
+- (void)
+mount_disk_image:(NSURL *)image
+{
+    if (self.status_text_handler) {
+        self.status_text_handler([NSString stringWithFormat:@"Mounting \"%@\"…",
+                                  image.lastPathComponent]);
+    }
+    __weak FilesBrowserView *ws = self;
+    [FilesVolumeManager.shared mount_disk_image:image
+                                     completion:^(NSURL *volume, NSError *err) {
+        FilesBrowserView *s = ws;
+        if (!s) return;
+        [s update_status_bar];
+        if (err) {
+            files_show_error([NSString stringWithFormat:@"Could not open \"%@\"",
+                              image.lastPathComponent], err, s.window);
+        } else if (volume && s.open_window_handler) {
+            s.open_window_handler(volume);
+        } else if (volume) {
+            [s navigate_to:volume];
+        }
+    }];
 }
 
 /*

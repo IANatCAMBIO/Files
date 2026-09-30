@@ -24,6 +24,48 @@ volume_keys(void)
     return keys;
 }
 
+/* How long to wait for DiskImageMounter to mount an image it was handed. */
+static const int64_t interactive_mount_timeout_sec = 120;
+
+/*
+ * attach_disk_image — runs `hdiutil attach -plist -noautoopen` on image with
+ * stdin at /dev/null (so password or license prompts fail instead of
+ * hanging) and returns the first mount point in its plist output. Blocks;
+ * call off the main thread.
+ *
+ * Inputs:
+ *   image — disk image file URL
+ *
+ * Output: mounted volume root URL, or nil if hdiutil could not mount it.
+ */
+static NSURL *
+attach_disk_image(NSURL *image)
+{
+    NSTask *task       = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/hdiutil"];
+    task.arguments     = @[@"attach", @"-plist", @"-noautoopen", image.path];
+    task.standardInput = NSFileHandle.fileHandleWithNullDevice;
+    task.standardError = NSFileHandle.fileHandleWithNullDevice;
+    NSPipe *out        = [NSPipe pipe];
+    task.standardOutput = out;
+    if (![task launchAndReturnError:nil]) return nil;
+
+    NSData *data = [out.fileHandleForReading readDataToEndOfFile];
+    [task waitUntilExit];
+    if (task.terminationStatus != 0) return nil;
+
+    NSDictionary *plist = [NSPropertyListSerialization propertyListWithData:data
+                                                                    options:0
+                                                                     format:NULL
+                                                                      error:nil];
+    if (![plist isKindOfClass:NSDictionary.class]) return nil;
+    for (NSDictionary *entity in plist[@"system-entities"]) {
+        NSString *mount_point = entity[@"mount-point"];
+        if (mount_point.length) return [NSURL fileURLWithPath:mount_point isDirectory:YES];
+    }
+    return nil;
+}
+
 @implementation FilesVolumeManager
 
 /*
@@ -164,6 +206,74 @@ unmount_volume:(NSURL *)url
             }
         });
     }];
+}
+
+/*
+ * mount_disk_image:completion: — tries a non-interactive hdiutil attach;
+ * on failure falls back to mount_interactively:completion:.
+ *
+ * Inputs:
+ *   image      — disk image file URL
+ *   completion — see volume_manager.h
+ */
+- (void)
+mount_disk_image:(NSURL *)image
+      completion:(void (^)(NSURL *volume, NSError *err))completion
+{
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSURL *volume = attach_disk_image(image);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (volume) {
+                completion(volume, nil);
+            } else {
+                [self mount_interactively:image completion:completion];
+            }
+        });
+    });
+}
+
+/*
+ * mount_interactively:completion: — opens image with the system's handler
+ * (DiskImageMounter, which prompts for passwords and license agreements),
+ * then, each time a volume mounts, re-runs attach_disk_image — which for an
+ * already-attached image just reports its volume without prompting — until
+ * the image's volume appears or interactive_mount_timeout_sec passes.
+ *
+ * Inputs:
+ *   image      — disk image file URL
+ *   completion — see volume_manager.h; called exactly once
+ */
+- (void)
+mount_interactively:(NSURL *)image
+         completion:(void (^)(NSURL *volume, NSError *err))completion
+{
+    if (![NSWorkspace.sharedWorkspace openURL:image]) {
+        completion(nil, [NSError errorWithDomain:NSCocoaErrorDomain
+                                            code:NSFileReadUnknownError
+                                        userInfo:@{NSFilePathErrorKey: image.path}]);
+        return;
+    }
+
+    __block id  observer = nil;
+    __block BOOL done    = NO;
+    void (^finish)(NSURL *) = ^(NSURL *volume) {
+        if (done) return;
+        done = YES;
+        [NSNotificationCenter.defaultCenter removeObserver:observer];
+        completion(volume, nil);
+    };
+
+    observer = [NSNotificationCenter.defaultCenter
+        addObserverForName:FilesVolumesChangedNotification object:self
+                     queue:NSOperationQueue.mainQueue
+                usingBlock:^(NSNotification *note) {
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            NSURL *volume = attach_disk_image(image);
+            if (volume) dispatch_async(dispatch_get_main_queue(), ^{ finish(volume); });
+        });
+    }];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, interactive_mount_timeout_sec * (int64_t)NSEC_PER_SEC),
+                   dispatch_get_main_queue(), ^{ finish(nil); });
 }
 
 @end

@@ -12,11 +12,22 @@
 @interface FilesMainWindow : NSWindowController
 
 /*
- * init — creates the window, toolbar, bookmarks bar, and primary browser pane.
+ * new_window_handler — asked to open url in a new window (e.g. a freshly
+ * mounted disk image's volume). Set by the app delegate, which owns windows.
+ */
+@property (nonatomic, copy) void (^new_window_handler)(NSURL *url);
+
+/*
+ * init_with_url: — creates the window, toolbar, bookmarks bar, and primary
+ * browser pane, showing url.
+ *
+ * Inputs:
+ *   url — folder to show first
  *
  * Output: self or nil on failure.
  */
-- (instancetype)init NS_DESIGNATED_INITIALIZER;
+- (instancetype)init_with_url:(NSURL *)url NS_DESIGNATED_INITIALIZER;
+- (instancetype)init NS_UNAVAILABLE;
 - (instancetype)initWithWindow:(NSWindow *)window NS_UNAVAILABLE;
 - (instancetype)initWithCoder:(NSCoder *)coder NS_UNAVAILABLE;
 

@@ -69,4 +69,23 @@ extern NSString * const FilesVolumesChangedNotification;
  */
 - (void)unmount_volume:(NSURL *)url completion:(void (^)(NSError *err))completion;
 
+/*
+ * mount_disk_image:completion: — mounts a disk image (.dmg, .iso, …) and
+ * reports the mounted volume. Runs `hdiutil attach` in the background
+ * without a terminal, so it can never block on a prompt; an image that is
+ * already attached just reports its existing volume. If hdiutil cannot
+ * mount the image by itself (password-protected, license agreement), the
+ * image is handed to the system's DiskImageMounter, which asks the user,
+ * and the volume is reported once it appears (up to 2 minutes).
+ *
+ * Inputs:
+ *   image      — disk image file URL
+ *   completion — called once on the main thread with the volume root URL;
+ *                or with an error if the image could not be opened at
+ *                all; or with (nil, nil) if the user never finished
+ *                mounting it (e.g. cancelled the password prompt)
+ */
+- (void)mount_disk_image:(NSURL *)image
+              completion:(void (^)(NSURL *volume, NSError *err))completion;
+
 @end

@@ -53,14 +53,17 @@ static void *first_responder_ctx = &first_responder_ctx;
 @implementation FilesMainWindow
 
 /*
- * init — builds the window, toolbar, layout and primary browser pane, then
- * shows the home folder. The window frame is restored from the previous
+ * init_with_url: — builds the window, toolbar, layout and primary browser
+ * pane, then shows url. The window frame is restored from the previous
  * session when one was saved; otherwise the window is centered.
+ *
+ * Inputs:
+ *   url — folder to show first
  *
  * Output: self or nil.
  */
 - (instancetype)
-init
+init_with_url:(NSURL *)url
 {
     NSWindowStyleMask style =
         NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
@@ -87,7 +90,7 @@ init
     self.bookmarks_bar.selection_handler = ^(NSURL *url) {
         [[ws active_browser] navigate_to:url];
     };
-    [self.primary_pane.browser navigate_to:files_home_url()];
+    [self.primary_pane.browser navigate_to:url];
 
     /* Deferred so it runs after the window's initial first-responder pass. */
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -290,6 +293,14 @@ wire_pane:(FilesBrowserPane *)pane
         if (!s || [s active_pane] != wp) return;
         [s update_toolbar_for_url:url];
         [s.bookmarks_bar update_trash_icon];
+    };
+    b.open_window_handler = ^(NSURL *url) {
+        FilesMainWindow *s = ws;
+        if (s.new_window_handler) {
+            s.new_window_handler(url);
+        } else {
+            [[s active_browser] navigate_to:url];
+        }
     };
     b.info_handler = ^(NSArray<NSURL *> *urls) {
         [FilesInfoPanel.shared show_for_url:urls.firstObject];
