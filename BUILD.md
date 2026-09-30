@@ -24,6 +24,9 @@ No third-party libraries. All dependencies are Apple system frameworks:
 | UniformTypeIdentifiers | Per-file-type icon lookup (icon cache) |
 | ServiceManagement | Login item for Keep Files running (`SMAppService`) |
 
+At run time Get Info runs `/usr/bin/git` (Command Line Tools) to read the
+branch and push state of git folders; nothing else needs it.
+
 The C library's `copyfile(3)`, `renamex_np(2)` and CommonCrypto (SHA-256 / MD5)
 are part of libSystem and need no extra linking.
 
@@ -47,7 +50,12 @@ files.app/
     ├── MacOS/
     │   └── files          ← compiled binary
     └── Resources/
+        ├── folder.png, documents.png
+        └── gh_folder_light.icns, gh_folder_dark.icns  ← git folder icon
 ```
+
+The Makefile copies the images listed in `ICONS` from the project root into
+`Resources/`.
 
 ## Version and build date
 

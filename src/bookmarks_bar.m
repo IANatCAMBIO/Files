@@ -167,8 +167,7 @@ rebuild_buttons
         if (is_trash) {
             icon = [NSImage imageNamed:NSImageNameTrashEmpty];
         } else {
-            icon = [NSWorkspace.sharedWorkspace iconForFile:url.path]
-                   ?: [NSImage imageNamed:NSImageNameFolder];
+            icon = files_icon_for_url(url);
         }
         icon = [icon copy];
         icon.size = NSMakeSize(14, 14);

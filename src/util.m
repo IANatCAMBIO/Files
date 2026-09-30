@@ -1,4 +1,5 @@
 #import "util.h"
+#import "git_info.h"
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -59,6 +60,17 @@ files_same_path(NSURL *a, NSURL *b)
 }
 
 /*
+ * files_icon_for_url — git folder icon for git working trees, else the
+ * Workspace icon. Inputs/output are documented in util.h.
+ */
+NSImage *
+files_icon_for_url(NSURL *url)
+{
+    NSImage *git = files_is_git_repo(url) ? files_git_folder_icon() : nil;
+    return git ?: [NSWorkspace.sharedWorkspace iconForFile:url.path];
+}
+
+/*
  * files_has_full_disk_access — tries to open the TCC database read-only.
  * Inputs/output are documented in util.h.
  */
@@ -74,21 +86,16 @@ files_has_full_disk_access(void)
 }
 
 /*
- * run_defaults — runs /usr/bin/defaults with args, optionally capturing
- * stdout.
- *
- * Inputs:
- *   args — arguments after "defaults"
- *   out  — receives stdout if non-NULL
- *
- * Output: YES if it ran and exited 0.
+ * files_run_tool — runs a command-line tool and waits for it.
+ * Inputs/output are documented in util.h.
  */
-static BOOL
-run_defaults(NSArray<NSString *> *args, NSData **out)
+BOOL
+files_run_tool(NSString *tool, NSArray<NSString *> *args, NSData **out)
 {
     NSTask *task        = [[NSTask alloc] init];
-    task.executableURL  = [NSURL fileURLWithPath:@"/usr/bin/defaults"];
+    task.executableURL  = [NSURL fileURLWithPath:tool];
     task.arguments      = args;
+    task.standardInput  = NSFileHandle.fileHandleWithNullDevice;
     task.standardError  = NSFileHandle.fileHandleWithNullDevice;
     NSPipe *pipe        = [NSPipe pipe];
     task.standardOutput = pipe;
@@ -99,6 +106,8 @@ run_defaults(NSArray<NSString *> *args, NSData **out)
     return task.terminationStatus == 0;
 }
 
+static NSString * const defaults_tool = @"/usr/bin/defaults";
+
 /*
  * files_sync_prefs — read once, write only differences.
  * Inputs/output are documented in util.h.
@@ -108,7 +117,7 @@ files_sync_prefs(NSString *domain, NSDictionary<NSString *, NSArray *> *values,
                  NSMutableDictionary<NSString *, NSArray *> *previous)
 {
     NSData *data = nil;
-    if (!run_defaults(@[@"export", domain, @"-"], &data)) return NO;
+    if (!files_run_tool(defaults_tool, @[@"export", domain, @"-"], &data)) return NO;
     NSDictionary *current = [NSPropertyListSerialization propertyListWithData:data
                                                                       options:0
                                                                        format:NULL
@@ -131,9 +140,9 @@ files_sync_prefs(NSString *domain, NSDictionary<NSString *, NSArray *> *values,
                                                                       error:nil];
             NSString *plist = xml ? [[NSString alloc] initWithData:xml encoding:NSUTF8StringEncoding]
                                   : nil;
-            wrote = plist && run_defaults(@[@"write", domain, key, plist], NULL);
+            wrote = plist && files_run_tool(defaults_tool, @[@"write", domain, key, plist], NULL);
         } else {
-            wrote = run_defaults(@[@"delete", domain, key], NULL);
+            wrote = files_run_tool(defaults_tool, @[@"delete", domain, key], NULL);
         }
         if (wrote && previous) previous[key] = have ? @[have] : @[];
         ok = wrote && ok;

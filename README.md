@@ -15,6 +15,11 @@ A minimalist macOS file manager written in Objective-C + AppKit.
 - Collapsible info sidebar with a Quick Look thumbnail and file details
 - Get Info panel: size, dates, owner/group, editable permissions, Locked
   flag, rename, and optional SHA-256 / MD5 checksums
+- Git folders: the top folder of a git working tree shows a GitHub folder
+  icon (light or dark to match the system appearance), and its Get Info
+  panel adds "Git folder detected", the current branch, and whether the
+  branch is pushed (compared with its upstream as of the last fetch —
+  commits ahead/behind, no upstream, detached HEAD)
 - Copy, cut and paste, and drag and drop (moves by default; hold ⌥ to
   copy), with a progress panel (speed graph, transfer log, cancel), Keep
   Both / Replace prompts, and optional SHA-256 verification (View ▸

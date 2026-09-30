@@ -1,6 +1,7 @@
 #import "info_panel.h"
 #import "file_ops.h"
 #import "file_hash.h"
+#import "git_info.h"
 #import "util.h"
 #include <sys/stat.h>
 #include <errno.h>
@@ -15,13 +16,17 @@ static const CGFloat icon_size      = 64.0;
 static const CGFloat small_label_h  = 11.0; /* height of per-popup sub-labels */
 static const CGFloat copy_w         = 30.0; /* width of "copy" link button */
 static const CGFloat copy_gap       =  4.0; /* gap between hash field and copy btn */
+static const CGFloat git_sep_gap    =  8.0; /* space for the separator above Git rows */
 
-/* Indices into the row_keys table built in -init. */
+/* Indices into the row_keys table built in -init. The Git rows come last
+ * (below the checkboxes) so shrinking the panel hides them. */
 enum {
     row_kind, row_size, row_where, row_created, row_modified,
     row_permissions, row_owner, row_group, row_sha256, row_md5,
+    row_git, row_branch, row_pushed,
     row_count
 };
+static const NSUInteger git_row_count = row_count - row_git;
 
 /* Tags on the two "copy" buttons; copy_hash_action: selects the field by tag. */
 enum {
@@ -253,6 +258,13 @@ cancel
 @property (nonatomic, strong) NSButton    *lock_check;
 @property (nonatomic, strong) NSButton    *hash_check;
 @property (nonatomic, strong) FilesHashJob *hash_job; /* in-flight hash; stale guard */
+@property (nonatomic, strong) NSTextField *git_value;
+@property (nonatomic, strong) NSTextField *branch_value;
+@property (nonatomic, strong) NSTextField *pushed_value;
+@property (nonatomic, assign) NSUInteger   git_generation; /* stale guard for git reads */
+@property (nonatomic, assign) CGFloat      git_section_h;  /* height the Git rows add */
+@property (nonatomic, assign) BOOL         git_section_shown;
+@property (nonatomic, strong) NSArray<NSView *> *git_views; /* separator, labels, values */
 
 @end
 
@@ -293,12 +305,17 @@ init
         [row_group]       = @"Group:",
         [row_sha256]      = @"SHA-256:",
         [row_md5]         = @"MD5:",
+        [row_git]         = @"Git:",
+        [row_branch]      = @"Branch:",
+        [row_pushed]      = @"Pushed:",
     };
+    CGFloat git_section_h = git_sep_gap + git_row_count * (row_h + 4);
     CGFloat content_h    = margin                  /* top margin */
                          + icon_size + margin      /* icon row */
                          + (row_count * (row_h + 4)) /* attribute rows */
                          + small_label_h + 2.0     /* extra for perm sub-labels */
                          + (row_h + 4) * 2         /* lock + hash checkboxes */
+                         + git_sep_gap             /* separator above Git rows */
                          + margin;                 /* bottom margin */
 
     NSRect win_rect = NSMakeRect(0, 0, panel_width, content_h);
@@ -365,12 +382,43 @@ init
     /* Attribute rows; fields[i] is the value field of row i (nil for the
      * permissions row, which uses popups instead). */
     NSTextField *fields[row_count] = { nil };
+    NSMutableArray<NSView *> *git_views = [NSMutableArray array];
     CGFloat row_y = icon_y - margin;
 
     for (NSUInteger i = 0; i < row_count; i++) {
+        if (i == row_git) {
+            /* Lock and Show Hashes checkboxes, then a separator, between the
+             * file rows and the Git section. */
+            row_y -= (row_h + 4.0);
+            NSRect lock_rect = NSMakeRect(x_value, row_y, w_value, row_h);
+            self.lock_check = [NSButton checkboxWithTitle:@"Locked" target:self
+                                                   action:@selector(lock_toggled:)];
+            self.lock_check.frame = lock_rect;
+            [cv addSubview:self.lock_check];
+
+            row_y -= (row_h + 4.0);
+            NSRect hash_rect = NSMakeRect(x_value, row_y, w_value, row_h);
+            self.hash_check = [NSButton checkboxWithTitle:@"Show Hashes (SHA-256 / MD5)"
+                                                   target:self
+                                                   action:@selector(hash_check_toggled:)];
+            self.hash_check.frame = hash_rect;
+            self.hash_check.state = [NSUserDefaults.standardUserDefaults
+                                        boolForKey:files_pref_show_hashes]
+                                    ? NSControlStateValueOn : NSControlStateValueOff;
+            [cv addSubview:self.hash_check];
+
+            row_y -= git_sep_gap;
+            NSBox *git_sep  = [[NSBox alloc] initWithFrame:NSMakeRect(margin, row_y + git_sep_gap / 2.0,
+                                                                      panel_width - margin * 2.0, 1.0)];
+            git_sep.boxType = NSBoxSeparator;
+            [cv addSubview:git_sep];
+            [git_views addObject:git_sep];
+        }
+
         row_y -= (row_h + 4.0);
         NSRect lr = NSMakeRect(x_label, row_y, label_w, row_h);
-        [cv addSubview:make_label(row_keys[i], lr)];
+        NSTextField *label = make_label(row_keys[i], lr);
+        [cv addSubview:label];
 
         if (i == row_permissions) {
             /* Three side-by-side NSPopUpButton controls: owner | group | other.
@@ -419,6 +467,7 @@ init
         NSRect vr = NSMakeRect(x_value, row_y, fw, row_h);
         fields[i] = make_value(vr);
         [cv addSubview:fields[i]];
+        if (i >= row_git) [git_views addObjectsFromArray:@[label, fields[i]]];
 
         if (is_hash) {
             NSRect br = NSMakeRect(x_value + fw + copy_gap, row_y, copy_w, row_h);
@@ -436,6 +485,9 @@ init
     self.group_value     = fields[row_group];
     self.sha256_value    = fields[row_sha256];
     self.md5_value       = fields[row_md5];
+    self.git_value       = fields[row_git];
+    self.branch_value    = fields[row_branch];
+    self.pushed_value    = fields[row_pushed];
 
     /* Hash value fields: monospaced, tail-truncated with "…", selectable to copy. */
     NSFont *hash_font = [NSFont monospacedSystemFontOfSize:9.0 weight:NSFontWeightRegular];
@@ -445,28 +497,18 @@ init
         hf.lineBreakMode = NSLineBreakByTruncatingTail;
     }
 
-    /* Lock checkbox. */
-    row_y -= (row_h + 4.0);
-    NSRect lock_rect = NSMakeRect(x_value, row_y, w_value, row_h);
-    self.lock_check = [NSButton checkboxWithTitle:@"Locked" target:self action:@selector(lock_toggled:)];
-    self.lock_check.frame = lock_rect;
-    [cv addSubview:self.lock_check];
-
-    /* Show Hashes checkbox. */
-    row_y -= (row_h + 4.0);
-    NSRect hash_rect = NSMakeRect(x_value, row_y, w_value, row_h);
-    self.hash_check = [NSButton checkboxWithTitle:@"Show Hashes (SHA-256 / MD5)"
-                                           target:self
-                                           action:@selector(hash_check_toggled:)];
-    self.hash_check.frame = hash_rect;
-    self.hash_check.state = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_show_hashes]
-                            ? NSControlStateValueOn : NSControlStateValueOff;
-    [cv addSubview:self.hash_check];
-
     /* Separator below icon. */
     NSBox *sep        = [[NSBox alloc] initWithFrame:NSMakeRect(margin, icon_y - 8.0, panel_width - margin * 2.0, 1.0)];
     sep.boxType       = NSBoxSeparator;
     [cv addSubview:sep];
+
+    /* Pin everything to the top edge so the panel can grow and shrink at the
+     * bottom, where the Git section sits; it starts hidden. */
+    for (NSView *v in cv.subviews) v.autoresizingMask = NSViewMinYMargin;
+    for (NSView *v in git_views) v.hidden = YES;
+    self.git_views     = git_views;
+    self.git_section_h = git_section_h;
+    [panel setContentSize:NSMakeSize(panel_width, content_h - git_section_h)];
 
     return self;
 }
@@ -561,7 +603,7 @@ populate_fields:(NSURL *)url
         [url resourceValuesForKeys:keys error:nil];
 
     /* Icon */
-    self.icon_view.image = [NSWorkspace.sharedWorkspace iconForFile:url.path];
+    self.icon_view.image = files_icon_for_url(url);
 
     /* Name */
     self.name_field.stringValue = res[NSURLNameKey] ?: url.lastPathComponent;
@@ -628,6 +670,75 @@ populate_fields:(NSURL *)url
     if (!is_dir && [NSUserDefaults.standardUserDefaults boolForKey:files_pref_show_hashes]) {
         [self start_hash_job:url];
     }
+
+    /* Git — shown only for the top folder of a git working tree. */
+    self.git_generation++;
+    BOOL is_git = files_is_git_repo(url);
+    [self set_git_section_visible:is_git];
+    if (is_git) [self start_git_job:url];
+}
+
+/*
+ * set_git_section_visible: — grows or shrinks the panel at the bottom to
+ * show or hide the Git rows, keeping its top edge in place. The rows are
+ * also hidden, since the top of the section would otherwise show in the
+ * bottom margin.
+ *
+ * Inputs:
+ *   visible — YES to show the Git rows
+ */
+- (void)
+set_git_section_visible:(BOOL)visible
+{
+    if (visible == self.git_section_shown) return;
+    self.git_section_shown = visible;
+    for (NSView *v in self.git_views) v.hidden = !visible;
+    NSWindow *w  = self.window;
+    NSRect   c   = [w contentRectForFrameRect:w.frame];
+    CGFloat  dh  = visible ? self.git_section_h : -self.git_section_h;
+    c.size.height += dh;
+    c.origin.y    -= dh;
+    [w setFrame:[w frameRectForContentRect:c] display:YES];
+}
+
+/*
+ * start_git_job: — reads the branch and push state of repo on a background
+ * queue and fills the Git rows when done, unless the panel has moved on to
+ * another item (git_generation changed) in the meantime.
+ *
+ * Inputs:
+ *   repo — git working-tree root
+ */
+- (void)
+start_git_job:(NSURL *)repo
+{
+    NSUInteger gen = self.git_generation;
+    self.git_value.stringValue    = @"Git folder detected";
+    self.branch_value.stringValue = @"Checking…";
+    self.pushed_value.stringValue = @"Checking…";
+    self.branch_value.toolTip     = nil;
+    self.pushed_value.toolTip     = nil;
+
+    __weak FilesInfoPanel *ws = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *branch = nil, *pushed = nil;
+        BOOL ok = files_git_describe(repo, &branch, &pushed);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            FilesInfoPanel *s = ws;
+            if (!s || s.git_generation != gen) return;
+            if (!ok) {
+                s.branch_value.stringValue = @"Unavailable (git could not read it)";
+                s.pushed_value.stringValue = @"—";
+                return;
+            }
+            /* Tooltips carry the full text, which may be truncated. */
+            s.branch_value.stringValue = branch;
+            s.branch_value.toolTip     = branch;
+            s.pushed_value.stringValue = pushed;
+            s.pushed_value.toolTip     = [pushed stringByAppendingString:
+                @"\nCompared with the upstream branch as of the last fetch."];
+        });
+    });
 }
 
 /*

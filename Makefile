@@ -47,14 +47,17 @@ all: $(BUNDLE)
 
 # Info.plist gets the version from VERSION and the time the bundle was
 # assembled as FilesBuildDate (UTC), both shown in the About panel.
-$(BUNDLE): $(MACOS)/$(APP) resources/Info.plist VERSION folder.png documents.png
+# gh_folder_light/dark.icns: the git working-tree folder icon for light and
+# dark appearance.
+ICONS    = folder.png documents.png gh_folder_light.icns gh_folder_dark.icns
+
+$(BUNDLE): $(MACOS)/$(APP) resources/Info.plist VERSION $(ICONS)
 	@mkdir -p $(RSRC)
 	@cp resources/Info.plist $(CONTENTS)/Info.plist
 	@plutil -replace CFBundleShortVersionString -string "$(VERSION)" $(CONTENTS)/Info.plist
 	@plutil -replace CFBundleVersion -string "$(VERSION)" $(CONTENTS)/Info.plist
 	@plutil -replace FilesBuildDate -string "$$(date -u +%Y-%m-%dT%H:%M:%SZ)" $(CONTENTS)/Info.plist
-	@cp folder.png    $(RSRC)/folder.png
-	@cp documents.png $(RSRC)/documents.png
+	@cp $(ICONS) $(RSRC)/
 	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(BUNDLE)
 	@touch $(BUNDLE)  # codesign rewrites the binary; keep the bundle newer than it
 

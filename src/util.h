@@ -58,6 +58,33 @@ NSURL *files_home_url(void);
 BOOL files_same_path(NSURL *a, NSURL *b);
 
 /*
+ * files_icon_for_url — the icon Files shows for an item: the git folder
+ * icon (light or dark to match the appearance) for the top folder of a git
+ * working tree, otherwise the Workspace icon (custom icons included). The
+ * caller owns the image and may resize it. Main thread.
+ *
+ * Inputs:
+ *   url — file URL of the item
+ *
+ * Output: NSImage (never nil).
+ */
+NSImage *files_icon_for_url(NSURL *url);
+
+/*
+ * files_run_tool — runs a command-line tool with stdin and stderr at
+ * /dev/null, optionally capturing stdout, and waits for it to exit.
+ * Blocks; call off the main thread.
+ *
+ * Inputs:
+ *   tool — absolute path of the executable, e.g. @"/usr/bin/defaults"
+ *   args — arguments after the tool name
+ *   out  — receives stdout if non-NULL
+ *
+ * Output: YES if it ran and exited 0.
+ */
+BOOL files_run_tool(NSString *tool, NSArray<NSString *> *args, NSData **out);
+
+/*
  * files_has_full_disk_access — whether this process has Full Disk Access.
  * macOS has no API for this; the reliable check is whether the user's TCC
  * database (~/Library/Application Support/com.apple.TCC/TCC.db), which only

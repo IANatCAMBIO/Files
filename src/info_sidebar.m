@@ -1,4 +1,5 @@
 #import "info_sidebar.h"
+#import "git_info.h"
 #import "util.h"
 #import <QuickLookThumbnailing/QuickLookThumbnailing.h>
 
@@ -216,8 +217,9 @@ request_thumbnail:(NSURL *)url
 
 /*
  * show_url: — shows the QL thumbnail and metadata for a single item.
- * Immediately sets a Workspace icon as a placeholder, then replaces it with
- * the QL thumbnail when the system cache delivers it.
+ * Immediately sets the item's icon as a placeholder, then replaces it with
+ * the QL thumbnail when the system cache delivers it (git working trees
+ * keep the git folder icon).
  *
  * Inputs:
  *   url — file-system URL of the item to inspect
@@ -246,11 +248,12 @@ show_url:(NSURL *)url
     _row_vals[row_modified].stringValue =
         files_format_date(res[NSURLContentModificationDateKey], NSDateFormatterMediumStyle);
 
-    /* ── Immediate placeholder icon, then async QL thumbnail ── */
-    NSImage *icon = [NSWorkspace.sharedWorkspace iconForFile:url.path];
+    /* ── Immediate placeholder icon, then async QL thumbnail — except for a
+     * git working tree, whose Quick Look thumbnail is a plain folder. ── */
+    NSImage *icon = files_icon_for_url(url);
     icon.size = NSMakeSize(128, 128);
     _preview_view.image = icon;
-    [self request_thumbnail:url];
+    if (!files_is_git_repo(url)) [self request_thumbnail:url];
 }
 
 /*

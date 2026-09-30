@@ -170,9 +170,10 @@ perms_string_for_mode(mode_t mode)
 /*
  * icon_for_url — icon for a listed item at the given size, cached. Plain
  * files share one icon per type (keyed by UTI) so a folder of 10,000 JPEGs
- * costs one image; folders, packages and apps can carry custom icons, so
- * they are cached per path. The cache is bounded and evictable under
- * memory pressure.
+ * costs one image; folders, packages and apps can carry custom icons (or
+ * be git working trees), so they are cached per path. The git icon picks
+ * light or dark when drawn, so cached icons follow appearance changes. The
+ * cache is bounded and evictable under memory pressure.
  *
  * Inputs:
  *   url  — file URL from a listing (resource values prefetched)
@@ -201,7 +202,7 @@ icon_for_url(NSURL *url, CGFloat size)
     if (!icon) {
         UTType *type = by_type ? [UTType typeWithIdentifier:uti] : nil;
         icon = type ? [NSWorkspace.sharedWorkspace iconForContentType:type]
-                    : [NSWorkspace.sharedWorkspace iconForFile:url.path];
+                    : files_icon_for_url(url);
         icon = [icon copy];
         icon.size = NSMakeSize(size, size);
         [cache setObject:icon forKey:key];
