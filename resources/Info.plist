@@ -8,10 +8,8 @@
     <string>Files</string>
     <key>CFBundleIdentifier</key>
     <string>com.salt.files</string>
-    <key>CFBundleVersion</key>
-    <string>1.0</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <!-- CFBundleShortVersionString and CFBundleVersion (from VERSION) and
+         FilesBuildDate (UTC, ISO 8601) are added by the Makefile. -->
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleSignature</key>

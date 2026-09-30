@@ -44,8 +44,12 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   (and the apps using them) and the volume unmounts automatically once
   they are closed
 - Default file viewer in place of Finder: "Show in Finder" from other apps
-  opens Files; File ▸ Restore Finder as Default File Viewer… undoes every
-  change (see Replacing Finder)
+  opens Files; setting Preferences ▸ Default file browser to Finder undoes
+  every change (see Replacing Finder)
+- Preferences window (Files ▸ Preferences…, ⌘,): every View-menu
+  preference, the default file browser (Files or Finder), and Keep Files
+  running for faster startup (see Keeping Files running)
+- About Files shows the version (from the `VERSION` file) and build date
 - Address bar (accepts `~` and relative paths), back/forward/up, Open in
   Terminal, show/hide hidden files
 
@@ -138,12 +142,36 @@ take them:
 
 ### Uninstalling
 
-Before removing Files, choose **File ▸ Restore Finder as Default File
-Viewer…**. Files writes every recorded setting back exactly as it was,
+Before removing Files, open **Files ▸ Preferences…**, set **Default file
+browser** to **Finder**, and turn off **Keep Files running for faster
+startup** so it is no longer a login item. Files writes every recorded setting back exactly as it was,
 turns Archive Utility's reveal back on, and relaunches Finder. Then quit
 Files, delete `~/Applications/files.app`, and log out and back in so
-LaunchServices sends folders to Finder again. The same menu item reads
-**Make Files the Default File Viewer** after a restore, to switch back.
+LaunchServices sends folders to Finder again. Setting Default file browser
+back to Files switches back.
+
+## Keeping Files running
+
+By default Files quits when its last window closes, so the next "Show in
+Finder" or opened folder has to launch it again. Turn on **Preferences ▸
+Keep Files running for faster startup** (off by default) to have Files
+behave like Finder:
+
+- it stays open, without windows, after the last window closes, so the
+  next window appears instantly
+- clicking its Dock icon with no window open opens a home-folder window
+- it is added to your login items and starts at login without opening a
+  window (if you have turned Files off in System Settings ▸ General ▸
+  Login Items, it asks you to turn it back on)
+- each time it is used again with no windows open it repeats its launch
+  checks: Full Disk Access, and the Finder / Archive Utility settings it
+  manages
+
+Only opening windows gets faster; browsing within a window is the same.
+Turning the option off removes the login item. The login item points at
+the copy of Files that was running when you turned the option on, so turn
+it on from `~/Applications/files.app`, not from a build in the project
+folder.
 
 ## Keyboard shortcuts
 
@@ -153,6 +181,7 @@ LaunchServices sends folders to Finder again. The same menu item reads
 | Cut            | ⌘X                 |
 | Paste          | ⌘V                 |
 | New Window     | ⌘N                 |
+| Preferences    | ⌘,                 |
 | Find (search)  | ⌘F                 |
 | New File       | ⌥⌘N                |
 | Move to Trash  | ⌘⌫                 |

@@ -154,12 +154,4 @@
  */
 - (IBAction)empty_trash_action:(id)sender;
 
-/*
- * apply_auto_fit — sizes columns to their content and lets the Name column
- * absorb the remaining width. Runs automatically after each navigation when
- * files_pref_auto_fit is on; FilesMainWindow also calls it when the Auto-Fit
- * Columns toggle is turned on.
- */
-- (void)apply_auto_fit;
-
 @end

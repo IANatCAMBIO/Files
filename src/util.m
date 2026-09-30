@@ -10,6 +10,7 @@ NSString * const files_pref_large_rows      = @"files.large_rows";
 NSString * const files_pref_simple_copies   = @"files.simple_copies";
 NSString * const files_pref_archive_reveal  = @"files.archive_reveal";
 NSString * const files_pref_default_viewer  = @"files.default_viewer";
+NSString * const files_pref_keep_running    = @"files.keep_running";
 
 /*
  * files_register_defaults — registers non-NO preference defaults.
@@ -190,6 +191,21 @@ files_format_date(NSDate *date, NSDateFormatterStyle date_style)
 }
 
 /*
+ * files_present_alert — alert as a sheet (or app-modal if no window).
+ * Inputs/output are documented in util.h.
+ */
+void
+files_present_alert(NSAlert *alert, NSWindow *window, void (^handler)(NSModalResponse resp))
+{
+    if (window) {
+        [alert beginSheetModalForWindow:window completionHandler:handler];
+    } else {
+        NSModalResponse resp = [alert runModal];
+        if (handler) handler(resp);
+    }
+}
+
+/*
  * files_show_error — error alert as a sheet (or app-modal if no window).
  * Inputs/output are documented in util.h.
  */
@@ -199,9 +215,5 @@ files_show_error(NSString *title, NSError *err, NSWindow *window)
     NSAlert *alert        = [[NSAlert alloc] init];
     alert.messageText     = title;
     alert.informativeText = err.localizedDescription ?: @"Unknown error";
-    if (window) {
-        [alert beginSheetModalForWindow:window completionHandler:nil];
-    } else {
-        [alert runModal];
-    }
+    files_present_alert(alert, window, nil);
 }

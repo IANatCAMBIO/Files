@@ -16,6 +16,7 @@ extern NSString * const files_pref_large_rows;      /* double-height file rows *
 extern NSString * const files_pref_simple_copies;   /* copy/move without the progress panel (default on) */
 extern NSString * const files_pref_archive_reveal;  /* Archive Utility reveals results in Finder */
 extern NSString * const files_pref_default_viewer;  /* Files replaces Finder as file viewer (default on) */
+extern NSString * const files_pref_keep_running;    /* stay running with no windows; open at login */
 
 /*
  * files_register_defaults — registers the default value of every preference
@@ -125,6 +126,18 @@ NSString *files_format_rate(double bytes_per_sec);
  * Output: formatted string.
  */
 NSString *files_format_date(NSDate *date, NSDateFormatterStyle date_style);
+
+/*
+ * files_present_alert — shows alert as a sheet on window when given,
+ * otherwise app-modal, and passes the response to handler. Must be called
+ * on the main thread.
+ *
+ * Inputs:
+ *   alert   — configured alert
+ *   window  — window to attach the sheet to; nil = app-modal alert
+ *   handler — receives the button response; may be nil
+ */
+void files_present_alert(NSAlert *alert, NSWindow *window, void (^handler)(NSModalResponse resp));
 
 /*
  * files_show_error — shows an error alert: as a sheet on window when given,

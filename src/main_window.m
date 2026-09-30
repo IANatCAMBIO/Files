@@ -1132,26 +1132,8 @@ toggle_hidden_files_action:(id)sender
 }
 
 /*
- * auto_fit_columns_action: — toggles files_pref_auto_fit; when turned on,
- * fits the columns of every pane immediately.
- *
- * Inputs:
- *   sender — View menu item (unused)
- */
-- (IBAction)
-auto_fit_columns_action:(id)sender
-{
-    NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
-    BOOL now_on = ![ud boolForKey:files_pref_auto_fit];
-    [ud setBool:now_on forKey:files_pref_auto_fit];
-    if (now_on) {
-        for (FilesBrowserView *b in [self all_browsers]) [b apply_auto_fit];
-    }
-}
-
-/*
- * validateMenuItem: — sets the Auto-Fit Columns and Dual Pane checkmarks and
- * enables Back/Forward only when possible.
+ * validateMenuItem: — sets the Dual Pane checkmark and enables Back/Forward
+ * only when possible.
  *
  * Inputs:
  *   item — the menu item being validated
@@ -1162,10 +1144,7 @@ auto_fit_columns_action:(id)sender
 validateMenuItem:(NSMenuItem *)item
 {
     SEL action = item.action;
-    if (action == @selector(auto_fit_columns_action:)) {
-        item.state = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_auto_fit]
-            ? NSControlStateValueOn : NSControlStateValueOff;
-    } else if (action == @selector(toggle_dual_pane:)) {
+    if (action == @selector(toggle_dual_pane:)) {
         item.state = self.secondary_pane ? NSControlStateValueOn : NSControlStateValueOff;
     } else if (action == @selector(go_back_action:)) {
         return [[self active_browser] can_go_back];

@@ -6,6 +6,9 @@ RSRC     = $(CONTENTS)/Resources
 
 CC       = clang
 
+# The version shown in the About panel; edit VERSION to change it.
+VERSION  = $(strip $(shell cat VERSION))
+
 # Code-signing identity. macOS ties privacy grants such as Full Disk Access
 # to the app's signature: for an ad-hoc ("-") signature that is the exact
 # build, so every rebuild loses the grant; for a certificate it is the bundle
@@ -33,7 +36,7 @@ CFLAGS   = -fobjc-arc -O2 -Wall -Wextra -Wno-unused-parameter \
            -Werror=unguarded-availability \
            -mmacosx-version-min=14.0 -I src -MMD -MP
 LDFLAGS  = -framework Cocoa -framework CoreServices -framework QuickLookThumbnailing \
-           -framework UniformTypeIdentifiers
+           -framework UniformTypeIdentifiers -framework ServiceManagement
 SRCS     = $(wildcard src/*.m)
 OBJS     = $(patsubst src/%.m,build/%.o,$(SRCS))
 DEPS     = $(OBJS:.o=.d)
@@ -42,9 +45,14 @@ DEPS     = $(OBJS:.o=.d)
 
 all: $(BUNDLE)
 
-$(BUNDLE): $(MACOS)/$(APP) resources/Info.plist folder.png documents.png
+# Info.plist gets the version from VERSION and the time the bundle was
+# assembled as FilesBuildDate (UTC), both shown in the About panel.
+$(BUNDLE): $(MACOS)/$(APP) resources/Info.plist VERSION folder.png documents.png
 	@mkdir -p $(RSRC)
 	@cp resources/Info.plist $(CONTENTS)/Info.plist
+	@plutil -replace CFBundleShortVersionString -string "$(VERSION)" $(CONTENTS)/Info.plist
+	@plutil -replace CFBundleVersion -string "$(VERSION)" $(CONTENTS)/Info.plist
+	@plutil -replace FilesBuildDate -string "$$(date -u +%Y-%m-%dT%H:%M:%SZ)" $(CONTENTS)/Info.plist
 	@cp folder.png    $(RSRC)/folder.png
 	@cp documents.png $(RSRC)/documents.png
 	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(BUNDLE)

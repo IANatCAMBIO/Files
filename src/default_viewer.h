@@ -39,3 +39,22 @@
  *          then kept so a later sync can retry). May be nil.
  */
 void files_default_viewer_sync(void (^done)(BOOL ok));
+
+/*
+ * files_default_viewer_choose — makes Files (files = YES) or Finder the
+ * default file viewer, for Preferences ▸ Integration ▸ Default file
+ * browser. Choosing Finder asks for confirmation, then turns
+ * files_pref_default_viewer off (which writes back every setting Files
+ * replaced) and turns
+ * files_pref_archive_reveal on (Archive Utility's own default); choosing
+ * Files reverses both. The outcome is reported in an alert: after a
+ * restore, Files can be uninstalled. Does nothing but call finished when
+ * the choice is already in effect. Main thread only.
+ *
+ * Inputs:
+ *   files    — YES for Files, NO for Finder
+ *   window   — window for the alert sheets; nil = app-modal alerts
+ *   finished — called on the main queue once the choice was applied (its
+ *              result alert shown) or cancelled; may be nil
+ */
+void files_default_viewer_choose(BOOL files, NSWindow *window, void (^finished)(void));

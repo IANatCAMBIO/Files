@@ -22,6 +22,7 @@ No third-party libraries. All dependencies are Apple system frameworks:
 | CoreServices    | FSEventStream for folder watching            |
 | QuickLookThumbnailing | Thumbnails in the info sidebar         |
 | UniformTypeIdentifiers | Per-file-type icon lookup (icon cache) |
+| ServiceManagement | Login item for Keep Files running (`SMAppService`) |
 
 The C library's `copyfile(3)`, `renamex_np(2)` and CommonCrypto (SHA-256 / MD5)
 are part of libSystem and need no extra linking.
@@ -48,6 +49,23 @@ files.app/
     └── Resources/
 ```
 
+## Version and build date
+
+The version lives in the `VERSION` file at the project root (one line,
+e.g. `1.0`). When `make` assembles the bundle it copies
+`resources/Info.plist` and writes into the copy:
+
+| Key | Value |
+|-----|-------|
+| `CFBundleShortVersionString`, `CFBundleVersion` | contents of `VERSION` |
+| `FilesBuildDate` | time the bundle was assembled, UTC, ISO 8601 |
+
+Files ▸ About Files shows them as "Version 1.0 (built <date>)", with the date in
+local time. To release a new version, edit `VERSION` and run `make`; editing
+it is enough to rebuild the bundle. The build date is refreshed whenever the
+bundle is reassembled (any source change, `Info.plist` or `VERSION`), not on
+a no-op `make`.
+
 ## Incremental builds and compiler checks
 
 - Header dependencies are tracked automatically (`-MMD -MP` writes `build/*.d`),
@@ -64,7 +82,8 @@ files.app/
 ```
 src/
 ├── main.m                  — entry point
-├── app_delegate.h/.m       — app lifecycle, menu bar, Devices menu
+├── app_delegate.h/.m       — app lifecycle (incl. Keep Files running and
+│                             its login item), menu bar, Devices menu
 ├── main_window.h/.m        — window controller: toolbar, split views, pane
 │                             switching, Go-menu and view-preference actions
 ├── browser_pane.h/.m       — one pane: browser view + per-pane state
@@ -83,6 +102,8 @@ src/
 ├── default_viewer.h/.m     — takes over from Finder as default file viewer
 │                             (NSFileViewer, Finder settings) and restores
 │                             the recorded originals
+├── prefs_window.h/.m       — Preferences window; the View-menu preference
+│                             list both it and the menu are built from
 └── util.h/.m               — shared helpers: preference keys, other apps'
                               preferences (`defaults`), standard folder
                               URLs, size/date formatting, error alerts

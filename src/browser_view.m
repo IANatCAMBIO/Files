@@ -252,8 +252,10 @@ icon_for_url(NSURL *url, CGFloat size)
 @property (nonatomic, strong) NSMetadataQuery         *search_query;
 @property (nonatomic, assign) BOOL                     search_active;
 
-/* Mirrors files_pref_large_rows as currently applied to the table. */
+/* Mirror files_pref_large_rows and files_pref_auto_fit as currently
+ * applied to the table. */
 @property (nonatomic, assign) BOOL                     large_rows;
+@property (nonatomic, assign) BOOL                     auto_fit;
 
 - (void)schedule_reload;
 
@@ -324,10 +326,11 @@ init_with_frame:(NSRect)frame
 
     [self build_table];
     [self update_sort_indicators];
-    [self apply_row_height];
-    /* Every browser in every window follows the Large Rows preference. */
+    [self apply_view_prefs];
+    /* Every browser in every window follows the Large Rows and Auto-Fit
+     * Columns preferences, wherever they are changed. */
     [NSNotificationCenter.defaultCenter addObserver:self
-                                           selector:@selector(apply_row_height)
+                                           selector:@selector(apply_view_prefs)
                                                name:NSUserDefaultsDidChangeNotification
                                              object:nil];
 
@@ -501,22 +504,28 @@ dealloc
 }
 
 /*
- * apply_row_height — applies files_pref_large_rows: normal rows (20pt,
- * 16pt icons) or large rows (twice both). No-op when already applied, so
- * it is cheap to call on every defaults change; otherwise the table is
- * redrawn and, with auto-fit on, the columns refitted for the icon size.
+ * apply_view_prefs — applies files_pref_large_rows (normal rows: 20pt,
+ * 16pt icons; large rows: twice both) and files_pref_auto_fit. No-op when
+ * both are already applied, so it is cheap to call on every defaults
+ * change; otherwise the table is redrawn for a new row height, and the
+ * columns are fitted when auto-fit is on and either it was just turned on
+ * or the icon size changed.
  */
 - (void)
-apply_row_height
+apply_view_prefs
 {
-    BOOL large = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_large_rows];
-    if (large == self.large_rows && self.table.rowHeight == [self row_height]) return;
-    self.large_rows = large;
-    self.table.rowHeight = [self row_height];
-    [self.table reloadData];
-    if ([NSUserDefaults.standardUserDefaults boolForKey:files_pref_auto_fit]) {
-        [self apply_auto_fit];
+    NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
+    BOOL large = [ud boolForKey:files_pref_large_rows];
+    BOOL fit   = [ud boolForKey:files_pref_auto_fit];
+    BOOL rows_changed = large != self.large_rows || self.table.rowHeight != [self row_height];
+    BOOL fit_turned_on = fit && !self.auto_fit;
+    self.auto_fit = fit;
+    if (rows_changed) {
+        self.large_rows = large;
+        self.table.rowHeight = [self row_height];
+        [self.table reloadData];
     }
+    if (fit && (rows_changed || fit_turned_on)) [self apply_auto_fit];
 }
 
 /*

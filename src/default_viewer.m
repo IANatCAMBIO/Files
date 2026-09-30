@@ -262,3 +262,63 @@ files_default_viewer_sync(void (^done)(BOOL ok))
         if (done) dispatch_async(dispatch_get_main_queue(), ^{ done(ok); });
     });
 }
+
+/*
+ * files_default_viewer_choose — confirm, apply and report a default-viewer
+ * choice. Inputs/output are documented in default_viewer.h.
+ */
+void
+files_default_viewer_choose(BOOL files, NSWindow *window, void (^finished)(void))
+{
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    if ([defaults boolForKey:files_pref_default_viewer] == files) {
+        if (finished) finished();
+        return;
+    }
+
+    void (^apply)(void) = ^{
+        [defaults setBool:files forKey:files_pref_default_viewer];
+        [defaults setBool:!files forKey:files_pref_archive_reveal];
+        files_default_viewer_sync(^(BOOL ok) {
+            NSAlert *done = [[NSAlert alloc] init];
+            if (!ok) {
+                done.messageText     = files ? @"Some settings could not be changed"
+                                             : @"Some settings could not be restored";
+                done.informativeText = @"Files will try again the next time it opens.";
+            } else if (files) {
+                done.messageText     = @"Files is the default file viewer";
+                done.informativeText = @"\"Show in Finder\" requests from other apps now open "
+                                        "in Files. Folders opened from other apps open in "
+                                        "Files after you log out and back in.";
+            } else {
+                done.messageText     = @"Finder is the default file viewer again";
+                done.informativeText = @"Every setting Files changed has been put back. "
+                                        "You can now quit and uninstall Files; folders "
+                                        "open in Finder again after you log out and back in.";
+            }
+            files_present_alert(done, window, nil);
+            if (finished) finished();
+        });
+    };
+    if (files) {
+        apply();
+        return;
+    }
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText     = @"Restore Finder as the default file viewer?";
+    alert.informativeText = @"\"Show in Finder\" requests and opened folders will go to Finder "
+                             "again, and the settings Files changed (desktop icons, Finder's "
+                             "Quit menu item, Archive Utility revealing its results) go back "
+                             "to what they were before Files. Do this before uninstalling "
+                             "Files.";
+    [alert addButtonWithTitle:@"Restore Finder"];
+    [alert addButtonWithTitle:@"Cancel"];
+    files_present_alert(alert, window, ^(NSModalResponse resp) {
+        if (resp == NSAlertFirstButtonReturn) {
+            apply();
+        } else if (finished) {
+            finished();
+        }
+    });
+}
