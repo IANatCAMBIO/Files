@@ -18,9 +18,9 @@ A minimalist macOS file manager written in Objective-C + AppKit.
 - Copy, cut and paste, and drag and drop (moves by default; hold ⌥ to
   copy), with a progress panel (speed graph, transfer log, cancel), Keep
   Both / Replace prompts, and optional SHA-256 verification (View ▸
-  Validate Copies with SHA-256). View ▸ Simple Copies skips the panel:
-  transfers run silently, keeping both on name clashes, and only errors
-  are shown. Copies use APFS clones
+  Validate Copies with SHA-256). View ▸ Simple Copies (on by default) skips
+  the panel: transfers run silently, keeping both on name clashes, and only
+  errors are shown; turn it off to get the full progress panel. Copies use APFS clones
   when possible and keep extended attributes, tags, ACLs and dates; nothing
   at the destination is replaced until the new copy is complete
 - Move to Trash, Empty Trash, New Folder and New File (File menu, right-click,
@@ -33,9 +33,10 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   system's DiskImageMounter to ask, then open the same way
 - Spotlight search within the current folder
 - Live updates when the current folder changes
-- View ▸ Show Finder After Archive Operations (off by default) sets
-  Archive Utility's archive-reveal-after / dearchive-reveal-after, so
-  expanding or creating an archive does not pop open a Finder window
+- View ▸ Show Finder After Archive Operations (off by default) keeps
+  Archive Utility's archive-reveal-after / dearchive-reveal-after in step
+  with the menu (checked at every launch, including the first), so by
+  default expanding or creating an archive does not pop open a Finder window
 - Devices menu and an All Mounts panel with per-volume unmount; at the root
   of an unmountable volume (external disk, disk image, network share) a
   floating ⏏ button unmounts it (the status bar confirms), and any window

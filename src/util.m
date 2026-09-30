@@ -11,6 +11,18 @@ NSString * const files_pref_simple_copies   = @"files.simple_copies";
 NSString * const files_pref_archive_reveal  = @"files.archive_reveal";
 
 /*
+ * files_register_defaults — registers non-NO preference defaults.
+ * Inputs/output are documented in util.h.
+ */
+void
+files_register_defaults(void)
+{
+    [NSUserDefaults.standardUserDefaults registerDefaults:@{
+        files_pref_simple_copies: @YES,
+    }];
+}
+
+/*
  * files_directory_url — standard user folder URL (Applications: local domain).
  * Inputs/output are documented in util.h.
  */
@@ -56,6 +68,56 @@ files_has_full_disk_access(void)
     if (fd < 0) return NO;
     close(fd);
     return YES;
+}
+
+/*
+ * run_defaults — runs /usr/bin/defaults with args, optionally capturing
+ * stdout.
+ *
+ * Inputs:
+ *   args — arguments after "defaults"
+ *   out  — receives stdout if non-NULL
+ *
+ * Output: YES if it ran and exited 0.
+ */
+static BOOL
+run_defaults(NSArray<NSString *> *args, NSData **out)
+{
+    NSTask *task        = [[NSTask alloc] init];
+    task.executableURL  = [NSURL fileURLWithPath:@"/usr/bin/defaults"];
+    task.arguments      = args;
+    task.standardError  = NSFileHandle.fileHandleWithNullDevice;
+    NSPipe *pipe        = [NSPipe pipe];
+    task.standardOutput = pipe;
+    if (![task launchAndReturnError:nil]) return NO;
+    NSData *data = [pipe.fileHandleForReading readDataToEndOfFile];
+    [task waitUntilExit];
+    if (out) *out = data;
+    return task.terminationStatus == 0;
+}
+
+/*
+ * files_sync_bool_prefs — read once, write only differences.
+ * Inputs/output are documented in util.h.
+ */
+BOOL
+files_sync_bool_prefs(NSString *domain, NSArray<NSString *> *keys, BOOL value)
+{
+    NSData *data = nil;
+    if (!run_defaults(@[@"export", domain, @"-"], &data)) return NO;
+    NSDictionary *current = [NSPropertyListSerialization propertyListWithData:data
+                                                                      options:0
+                                                                       format:NULL
+                                                                        error:nil];
+    if (![current isKindOfClass:NSDictionary.class]) return NO;
+
+    BOOL ok = YES;
+    for (NSString *key in keys) {
+        id have = current[key];
+        if ([have isKindOfClass:NSNumber.class] && [have boolValue] == value) continue;
+        ok = run_defaults(@[@"write", domain, key, @"-bool", value ? @"true" : @"false"], NULL) && ok;
+    }
+    return ok;
 }
 
 /*

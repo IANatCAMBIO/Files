@@ -10,15 +10,16 @@
 @property (nonatomic, strong) NSNumber *archive_reveal_attempted;  /* value tried this session */
 @end
 
-/* Archive Utility's value this app last wrote, so launches only run
- * `defaults` when the preference actually changed. Internal bookkeeping,
- * not a user preference. */
-static NSString * const archive_reveal_applied_key = @"files.archive_reveal_applied";
+/* Archive Utility's preferences domain and the "reveal in Finder after
+ * archiving / expanding" keys View ▸ Show Finder After Archive Operations
+ * controls. */
+static NSString * const archive_utility_domain = @"com.apple.archiveutility";
 
 @implementation FilesAppDelegate
 
 /*
- * applicationDidFinishLaunching: — creates the menu bar and main window.
+ * applicationDidFinishLaunching: — registers preference defaults, then creates
+ * the menu bar and main window.
  *
  * Inputs:
  *   n — NSApplicationDidFinishLaunchingNotification (unused)
@@ -26,6 +27,7 @@ static NSString * const archive_reveal_applied_key = @"files.archive_reveal_appl
 - (void)
 applicationDidFinishLaunching:(NSNotification *)n
 {
+    files_register_defaults();
     [self build_menu_bar];
     self.windows = [NSMutableArray array];
     [NSNotificationCenter.defaultCenter addObserver:self
@@ -63,26 +65,24 @@ sync_archive_utility
 }
 
 /*
- * sync_archive_utility_reporting: — makes Archive Utility's "reveal in
- * Finder after archiving / expanding" settings match
- * files_pref_archive_reveal (off by default) by running, on a serial
- * background queue:
- *   defaults write com.apple.archiveutility dearchive-reveal-after -bool <v>
- *   defaults write com.apple.archiveutility archive-reveal-after -bool <v>
- * `defaults` is used rather than CFPreferences because Archive Utility is
- * sandboxed: `defaults` writes its container's preferences, CFPreferences
- * from this process would not. Writing another app's container requires
- * Full Disk Access, which Files is expected to have (the launch check
- * prompts for it); the `defaults` child process inherits it.
+ * sync_archive_utility_reporting: — makes Archive Utility's
+ * dearchive-reveal-after and archive-reveal-after equal
+ * files_pref_archive_reveal (off by default), so the View menu item always
+ * describes what Archive Utility will actually do. Runs at every launch —
+ * including the first, which applies the default — and whenever the
+ * preference changes. files_sync_bool_prefs reads Archive Utility's real
+ * values and writes only what differs (missing keys included), on a serial
+ * background queue; nothing is cached, so values changed or reset
+ * elsewhere are corrected at the next launch. This needs Full Disk Access
+ * (Archive Utility is sandboxed), which the launch check prompts for.
  *
- * The value is recorded as applied only after both writes succeed. Each
- * value is attempted at most once per session, so the frequent defaults
- * notifications never retry (or re-alert) a blocked write.
+ * Each value is attempted at most once per session, so the frequent
+ * defaults notifications never re-run (or re-alert) it.
  *
  * Inputs:
- *   report — YES to prompt for Full Disk Access if the write is blocked
- *            (user toggled the option); NO at launch, where the Full Disk
- *            Access check has already prompted
+ *   report — YES to prompt for Full Disk Access if it fails (the user
+ *            toggled the option); NO at launch, where the Full Disk Access
+ *            check has already prompted
  */
 - (void)
 sync_archive_utility_reporting:(BOOL)report
@@ -93,36 +93,19 @@ sync_archive_utility_reporting:(BOOL)report
         queue = dispatch_queue_create("files.archive_utility", DISPATCH_QUEUE_SERIAL);
     });
 
-    NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
-    BOOL want          = [ud boolForKey:files_pref_archive_reveal];
-    NSNumber *applied  = [ud objectForKey:archive_reveal_applied_key];
-    if (applied && applied.boolValue == want) return;
+    BOOL want = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_archive_reveal];
     if (self.archive_reveal_attempted && self.archive_reveal_attempted.boolValue == want) return;
     self.archive_reveal_attempted = @(want);
 
-    NSString *value = want ? @"true" : @"false";
     dispatch_async(queue, ^{
-        BOOL ok = YES;
-        for (NSString *key in @[@"dearchive-reveal-after", @"archive-reveal-after"]) {
-            NSTask *task       = [[NSTask alloc] init];
-            task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/defaults"];
-            task.arguments     = @[@"write", @"com.apple.archiveutility", key, @"-bool", value];
-            task.standardError = NSFileHandle.fileHandleWithNullDevice;
-            if ([task launchAndReturnError:nil]) {
-                [task waitUntilExit];
-                ok = ok && task.terminationStatus == 0;
-            } else {
-                ok = NO;
-            }
-        }
+        BOOL ok = files_sync_bool_prefs(archive_utility_domain,
+                                        @[@"dearchive-reveal-after", @"archive-reveal-after"],
+                                        want);
+        if (ok || !report) return;
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (ok) {
-                [ud setBool:want forKey:archive_reveal_applied_key];
-            } else if (report) {
-                [self prompt_full_disk_access:
-                    @"Files could not change Archive Utility's setting. Writing another "
-                     "app's settings requires Full Disk Access."];
-            }
+            [self prompt_full_disk_access:
+                @"Files could not change Archive Utility's setting. Changing another "
+                 "app's settings requires Full Disk Access."];
         });
     });
 }
