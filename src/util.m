@@ -4,6 +4,8 @@ NSString * const files_pref_show_hidden     = @"files.show_hidden_files";
 NSString * const files_pref_auto_fit        = @"files.auto_fit_columns";
 NSString * const files_pref_hash_validation = @"files.copy.hash_validation";
 NSString * const files_pref_show_hashes     = @"files.show_hashes";
+NSString * const files_pref_large_rows      = @"files.large_rows";
+NSString * const files_pref_simple_copies   = @"files.simple_copies";
 
 /*
  * files_directory_url — standard user folder URL (Applications: local domain).

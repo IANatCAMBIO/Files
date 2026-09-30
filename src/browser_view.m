@@ -35,6 +35,11 @@ static const column_spec_t column_specs[] = {
 };
 #define COLUMN_COUNT (sizeof(column_specs) / sizeof(column_specs[0]))
 
+/* Row height and Name-column icon size; Large Rows (files_pref_large_rows)
+ * doubles both. */
+static const CGFloat row_height_normal = 20.0;
+static const CGFloat icon_size_normal  = 16.0;
+
 /* Most back/forward entries kept; older ones are dropped. */
 #define HISTORY_LIMIT 100
 
@@ -163,18 +168,20 @@ perms_string_for_mode(mode_t mode)
 }
 
 /*
- * icon_for_url — 16pt icon for a listed item, cached. Plain files share one
- * icon per type (keyed by UTI) so a folder of 10,000 JPEGs costs one image;
- * folders, packages and apps can carry custom icons, so they are cached per
- * path. The cache is bounded and evictable under memory pressure.
+ * icon_for_url — icon for a listed item at the given size, cached. Plain
+ * files share one icon per type (keyed by UTI) so a folder of 10,000 JPEGs
+ * costs one image; folders, packages and apps can carry custom icons, so
+ * they are cached per path. The cache is bounded and evictable under
+ * memory pressure.
  *
  * Inputs:
- *   url — file URL from a listing (resource values prefetched)
+ *   url  — file URL from a listing (resource values prefetched)
+ *   size — edge length in points (16 normal, 32 for Large Rows)
  *
- * Output: NSImage sized 16×16.
+ * Output: NSImage sized size×size.
  */
 static NSImage *
-icon_for_url(NSURL *url)
+icon_for_url(NSURL *url, CGFloat size)
 {
     static NSCache<NSString *, NSImage *> *cache;
     static dispatch_once_t once;
@@ -188,7 +195,7 @@ icon_for_url(NSURL *url)
     [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
     [url getResourceValue:&uti forKey:NSURLTypeIdentifierKey error:nil];
     BOOL by_type = !is_dir.boolValue && uti.length > 0;
-    NSString *key = by_type ? uti : url.path;
+    NSString *key = [NSString stringWithFormat:@"%g:%@", size, by_type ? uti : url.path];
 
     NSImage *icon = [cache objectForKey:key];
     if (!icon) {
@@ -196,7 +203,7 @@ icon_for_url(NSURL *url)
         icon = type ? [NSWorkspace.sharedWorkspace iconForContentType:type]
                     : [NSWorkspace.sharedWorkspace iconForFile:url.path];
         icon = [icon copy];
-        icon.size = NSMakeSize(16, 16);
+        icon.size = NSMakeSize(size, size);
         [cache setObject:icon forKey:key];
     }
     return icon;
@@ -240,6 +247,9 @@ icon_for_url(NSURL *url)
 /* Spotlight search state */
 @property (nonatomic, strong) NSMetadataQuery         *search_query;
 @property (nonatomic, assign) BOOL                     search_active;
+
+/* Mirrors files_pref_large_rows as currently applied to the table. */
+@property (nonatomic, assign) BOOL                     large_rows;
 
 - (void)schedule_reload;
 
@@ -310,6 +320,12 @@ init_with_frame:(NSRect)frame
 
     [self build_table];
     [self update_sort_indicators];
+    [self apply_row_height];
+    /* Every browser in every window follows the Large Rows preference. */
+    [NSNotificationCenter.defaultCenter addObserver:self
+                                           selector:@selector(apply_row_height)
+                                               name:NSUserDefaultsDidChangeNotification
+                                             object:nil];
 
     return self;
 }
@@ -323,7 +339,6 @@ build_table
     self.table = [[NSTableView alloc] initWithFrame:self.bounds];
     self.table.style                              = NSTableViewStylePlain;
     self.table.usesAlternatingRowBackgroundColors = YES;
-    self.table.rowHeight                          = 20.0;
     self.table.allowsMultipleSelection            = YES;
     self.table.allowsEmptySelection               = YES;
     /* First column (Name) fills spare width; other columns are fixed.
@@ -346,9 +361,10 @@ build_table
     self.table.target       = self;
     self.table.doubleAction = @selector(row_double_clicked:);
 
-    /* Drag source: allow copying rows out to any destination. */
-    [self.table setDraggingSourceOperationMask:NSDragOperationCopy forLocal:YES];
-    [self.table setDraggingSourceOperationMask:NSDragOperationCopy forLocal:NO];
+    /* Drag source: rows can be moved (the default) or, with ⌥, copied. */
+    NSDragOperation drag_ops = NSDragOperationMove | NSDragOperationCopy;
+    [self.table setDraggingSourceOperationMask:drag_ops forLocal:YES];
+    [self.table setDraggingSourceOperationMask:drag_ops forLocal:NO];
 
     /* Drag destination: accept file URL drops from any source. */
     [self.table registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
@@ -466,13 +482,58 @@ schedule_reload
 }
 
 /*
- * dealloc — stops the folder watcher and any Spotlight query.
+ * dealloc — stops the folder watcher, any Spotlight query and the defaults
+ * observer.
  */
 - (void)
 dealloc
 {
+    [NSNotificationCenter.defaultCenter removeObserver:self
+                                                  name:NSUserDefaultsDidChangeNotification
+                                                object:nil];
     [self stop_watching];
     [self stop_search_query];
+}
+
+/*
+ * apply_row_height — applies files_pref_large_rows: normal rows (20pt,
+ * 16pt icons) or large rows (twice both). No-op when already applied, so
+ * it is cheap to call on every defaults change; otherwise the table is
+ * redrawn and, with auto-fit on, the columns refitted for the icon size.
+ */
+- (void)
+apply_row_height
+{
+    BOOL large = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_large_rows];
+    if (large == self.large_rows && self.table.rowHeight == [self row_height]) return;
+    self.large_rows = large;
+    self.table.rowHeight = [self row_height];
+    [self.table reloadData];
+    if ([NSUserDefaults.standardUserDefaults boolForKey:files_pref_auto_fit]) {
+        [self apply_auto_fit];
+    }
+}
+
+/*
+ * row_height — current table row height.
+ *
+ * Output: row_height_normal, doubled for Large Rows.
+ */
+- (CGFloat)
+row_height
+{
+    return self.large_rows ? 2.0 * row_height_normal : row_height_normal;
+}
+
+/*
+ * icon_size — current Name-column icon edge length.
+ *
+ * Output: icon_size_normal, doubled for Large Rows.
+ */
+- (CGFloat)
+icon_size
+{
+    return self.large_rows ? 2.0 * icon_size_normal : icon_size_normal;
 }
 
 /* ── Navigation ──────────────────────────────────────────────────────── */
@@ -1033,7 +1094,7 @@ cell_font_for_column(NSString *col_id)
 apply_auto_fit
 {
     /* Extra fixed pixels: icon+gap for Name col; cell left+right padding elsewhere. */
-    static const CGFloat name_extra = 16 + 4 + 2 + 2; /* icon + gap + l-pad + r-pad */
+    CGFloat name_extra = [self icon_size] + 4 + 2 + 2; /* icon + gap + l-pad + r-pad */
     static const CGFloat cell_extra = 2 + 2;           /* l-pad + r-pad */
     static const CGFloat header_pad = 10;              /* header side padding + margin */
 
@@ -1170,10 +1231,15 @@ viewForTableColumn:(NSTableColumn *)col
     NSURL *url = self.filtered_items[row];
 
     NSString *ident = col.identifier;
-    NSTableCellView *cell = [tv makeViewWithIdentifier:ident owner:nil];
+    CGFloat icon_sz = [self icon_size];
+    /* Name cells are built for one icon size, so each size gets its own
+     * reuse identifier. */
+    NSString *reuse_id = [ident isEqualToString:col_name]
+        ? [NSString stringWithFormat:@"%@.%g", ident, icon_sz] : ident;
+    NSTableCellView *cell = [tv makeViewWithIdentifier:reuse_id owner:nil];
     if (!cell) {
         cell            = [[NSTableCellView alloc] init];
-        cell.identifier = ident;
+        cell.identifier = reuse_id;
         NSTextField *tf = [[NSTextField alloc] init];
         tf.editable        = NO;
         tf.bordered        = NO;
@@ -1196,8 +1262,8 @@ viewForTableColumn:(NSTableColumn *)col
             [NSLayoutConstraint activateConstraints:@[
                 [iv.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:2],
                 [iv.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
-                [iv.widthAnchor constraintEqualToConstant:16],
-                [iv.heightAnchor constraintEqualToConstant:16],
+                [iv.widthAnchor constraintEqualToConstant:icon_sz],
+                [iv.heightAnchor constraintEqualToConstant:icon_sz],
                 [tf.leadingAnchor constraintEqualToAnchor:iv.trailingAnchor constant:4],
                 [tf.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-2],
                 [tf.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
@@ -1212,7 +1278,7 @@ viewForTableColumn:(NSTableColumn *)col
     }
 
     cell.textField.stringValue = [self cell_text_for_column:ident url:url];
-    if ([ident isEqualToString:col_name]) cell.imageView.image = icon_for_url(url);
+    if ([ident isEqualToString:col_name]) cell.imageView.image = icon_for_url(url, icon_sz);
     return cell;
 }
 
@@ -1724,6 +1790,25 @@ dest_url_for_row:(NSInteger)row op:(NSTableViewDropOperation)op
 }
 
 /*
+ * drop_operation — the operation a drop performs: Move by default, Copy
+ * when the source only allows copying (the user holds ⌥, or the source
+ * app does not permit moves), None if neither is allowed.
+ *
+ * Inputs:
+ *   info — dragging session info
+ *
+ * Output: NSDragOperationMove, NSDragOperationCopy or NSDragOperationNone.
+ */
+static NSDragOperation
+drop_operation(id<NSDraggingInfo> info)
+{
+    NSDragOperation allowed = info.draggingSourceOperationMask;
+    if (allowed & NSDragOperationMove) return NSDragOperationMove;
+    if (allowed & NSDragOperationCopy) return NSDragOperationCopy;
+    return NSDragOperationNone;
+}
+
+/*
  * tableView:validateDrop:proposedRow:proposedDropOperation: — accepts file-URL
  * drags. Highlights a folder row when the pointer is over one; otherwise
  * highlights the whole table (drop into the current folder). Refuses drops
@@ -1735,7 +1820,8 @@ dest_url_for_row:(NSInteger)row op:(NSTableViewDropOperation)op
  *   row  — proposed row
  *   op   — proposed operation
  *
- * Output: NSDragOperationCopy, or NSDragOperationNone if the drop is refused.
+ * Output: drop_operation(info) (Move unless ⌥ is held), or
+ *         NSDragOperationNone if the drop is refused.
  */
 - (NSDragOperation)
 tableView:(NSTableView *)tv
@@ -1756,13 +1842,13 @@ proposedDropOperation:(NSTableViewDropOperation)op
     for (NSURL *src in srcs) {
         if (files_same_path(src.URLByDeletingLastPathComponent, dest)) return NSDragOperationNone;
     }
-    return NSDragOperationCopy;
+    return drop_operation(info);
 }
 
 /*
- * tableView:acceptDrop:row:dropOperation: — copies dragged files to the
- * resolved destination via FilesFileOps transfer_urls (progress panel,
- * conflict prompts, cancel).
+ * tableView:acceptDrop:row:dropOperation: — moves (default) or, with ⌥,
+ * copies dragged files to the resolved destination via FilesFileOps
+ * transfer_urls (progress panel unless Simple Copies is on).
  *
  * Inputs:
  *   tv   — table view
@@ -1770,7 +1856,7 @@ proposedDropOperation:(NSTableViewDropOperation)op
  *   row  — drop row
  *   op   — drop operation
  *
- * Output: YES if the copy was initiated.
+ * Output: YES if the move/copy was initiated.
  */
 - (BOOL)
 tableView:(NSTableView *)tv
@@ -1782,13 +1868,17 @@ dropOperation:(NSTableViewDropOperation)op
         [info.draggingPasteboard readObjectsForClasses:@[NSURL.class]
              options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
     NSURL *dest = [self dest_url_for_row:row op:op];
-    if (srcs.count == 0 || !dest) return NO;
+    NSDragOperation drop_op = drop_operation(info);
+    if (srcs.count == 0 || !dest || drop_op == NSDragOperationNone) return NO;
 
+    BOOL is_move = (drop_op == NSDragOperationMove);
     __weak FilesBrowserView *ws = self;
-    [FilesFileOps transfer_urls:srcs to:dest is_cut:NO completion:^(NSError *err) {
+    [FilesFileOps transfer_urls:srcs to:dest is_cut:is_move completion:^(NSError *err) {
         FilesBrowserView *s = ws;
         if (!s) return;
-        if (err && err.code != NSUserCancelledError) files_show_error(@"Copy failed", err, s.window);
+        if (err && err.code != NSUserCancelledError) {
+            files_show_error(is_move ? @"Move failed" : @"Copy failed", err, s.window);
+        }
         [s reload_directory];
     }];
     return YES;

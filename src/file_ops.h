@@ -23,9 +23,11 @@
 + (BOOL)pasteboard_has_files;
 
 /*
- * transfer_urls:to:is_cut:completion: — copies or moves srcs into dest,
- * showing the progress panel (conflict prompts, cancel, speed graph).
- * Reads NSUserDefaults key files_pref_hash_validation (util.h) for hash behaviour.
+ * transfer_urls:to:is_cut:completion: — copies or moves srcs into dest.
+ * Normally shows the progress panel (conflict prompts, cancel, speed
+ * graph). With files_pref_simple_copies on, runs silently instead: no
+ * panel, name clashes resolved as Keep Both, errors still reported through
+ * completion. Honours files_pref_hash_validation either way (util.h).
  *
  * Inputs:
  *   srcs       — source file/directory URLs

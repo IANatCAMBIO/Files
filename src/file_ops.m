@@ -532,8 +532,9 @@ hash_validate:(BOOL)hash_validate
 }
 
 /*
- * transfer_urls:to:is_cut:completion: — copies or moves srcs into dest with
- * the progress panel, honouring the files_pref_hash_validation preference.
+ * transfer_urls:to:is_cut:completion: — copies or moves srcs into dest:
+ * through the progress panel, or silently (Keep Both on clashes) when
+ * files_pref_simple_copies is on. Honours files_pref_hash_validation.
  *
  * Inputs:
  *   srcs       — source file/directory URLs
@@ -547,11 +548,19 @@ transfer_urls:(NSArray<NSURL *> *)srcs
        is_cut:(BOOL)is_cut
    completion:(void (^)(NSError *))completion
 {
-    BOOL hash = [NSUserDefaults.standardUserDefaults
-                     boolForKey:files_pref_hash_validation];
-    [FilesCopyProgress begin_copy:srcs to:dest is_cut:is_cut
-                    hash_validate:hash
-                       completion:completion];
+    NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
+    BOOL hash = [ud boolForKey:files_pref_hash_validation];
+    if (![ud boolForKey:files_pref_simple_copies]) {
+        [FilesCopyProgress begin_copy:srcs to:dest is_cut:is_cut
+                        hash_validate:hash
+                           completion:completion];
+        return;
+    }
+    [self run_copy_srcs:srcs to:dest is_cut:is_cut hash_validate:hash
+               conflict:nil cancel_flag:NULL progress:nil
+             completion:^(NSError *err, NSDictionary<NSURL *, NSNumber *> *hash_results) {
+        if (completion) completion(err);
+    }];
 }
 
 /*

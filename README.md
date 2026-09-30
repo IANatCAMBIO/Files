@@ -6,7 +6,8 @@ A minimalist macOS file manager written in Objective-C + AppKit.
 
 - List-view browser with Name, Size, Kind, Permissions and Date Modified
   columns; click a header to sort (folders first, Finder-style name order)
-- Optional auto-fit columns (View ▸ Auto-Fit Columns)
+- Optional auto-fit columns (View ▸ Auto-Fit Columns) and double-height
+  rows with larger icons (View ▸ Large Rows)
 - Single- or dual-pane browsing (View ▸ Dual Pane, ⇧⌘2; Tab switches panes)
 - Bookmarks bar (Home, Desktop, Downloads, Documents, Applications, Trash);
   ⌘D or the ★ button adds the current folder (before Trash, which is always
@@ -14,9 +15,12 @@ A minimalist macOS file manager written in Objective-C + AppKit.
 - Collapsible info sidebar with a Quick Look thumbnail and file details
 - Get Info panel: size, dates, owner/group, editable permissions, Locked
   flag, rename, and optional SHA-256 / MD5 checksums
-- Copy, cut and paste, and drag and drop, with a progress panel (speed graph,
-  transfer log, cancel), Keep Both / Replace prompts, and optional SHA-256
-  verification (View ▸ Validate Copies with SHA-256). Copies use APFS clones
+- Copy, cut and paste, and drag and drop (moves by default; hold ⌥ to
+  copy), with a progress panel (speed graph, transfer log, cancel), Keep
+  Both / Replace prompts, and optional SHA-256 verification (View ▸
+  Validate Copies with SHA-256). View ▸ Simple Copies skips the panel:
+  transfers run silently, keeping both on name clashes, and only errors
+  are shown. Copies use APFS clones
   when possible and keep extended attributes, tags, ACLs and dates; nothing
   at the destination is replaced until the new copy is complete
 - Move to Trash, Empty Trash, New Folder, inline rename (Return; the name

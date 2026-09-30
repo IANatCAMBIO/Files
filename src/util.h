@@ -12,6 +12,8 @@ extern NSString * const files_pref_show_hidden;     /* list dotfiles/hidden item
 extern NSString * const files_pref_auto_fit;        /* auto-fit table columns */
 extern NSString * const files_pref_hash_validation; /* SHA-256 verify copies */
 extern NSString * const files_pref_show_hashes;     /* hashes in Get Info */
+extern NSString * const files_pref_large_rows;      /* double-height file rows */
+extern NSString * const files_pref_simple_copies;   /* copy/move without the progress panel */
 
 /*
  * files_directory_url — returns the current user's URL for a standard folder

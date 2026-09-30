@@ -135,18 +135,43 @@ make_item(NSString *title, SEL action, NSString *key, NSEventModifierFlags mod)
 }
 
 /*
- * toggle_hash_validation: — toggles the SHA-256 copy-validation preference.
+ * make_pref_item — a View-menu checkbox item bound to a BOOL preference:
+ * checked to match the current value, toggled by toggle_pref:.
  *
  * Inputs:
- *   sender — NSMenuItem with state tracking
+ *   title  — menu item title
+ *   key    — NSUserDefaults key (a files_pref_* constant from util.h)
+ *   target — object implementing toggle_pref:
+ *
+ * Output: configured NSMenuItem.
+ */
+static NSMenuItem *
+make_pref_item(NSString *title, NSString *key, id target)
+{
+    NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title
+                                                  action:@selector(toggle_pref:)
+                                           keyEquivalent:@""];
+    item.target            = target;
+    item.representedObject = key;
+    item.state = [NSUserDefaults.standardUserDefaults boolForKey:key]
+                 ? NSControlStateValueOn : NSControlStateValueOff;
+    return item;
+}
+
+/*
+ * toggle_pref: — flips the BOOL preference named by the menu item's
+ * representedObject and updates its checkmark. Code that depends on a
+ * preference reads it when needed (copies) or observes it (Large Rows).
+ *
+ * Inputs:
+ *   sender — menu item made by make_pref_item
  */
 - (void)
-toggle_hash_validation:(NSMenuItem *)sender
+toggle_pref:(NSMenuItem *)sender
 {
-    BOOL next = ![NSUserDefaults.standardUserDefaults
-                      boolForKey:files_pref_hash_validation];
-    [NSUserDefaults.standardUserDefaults setBool:next
-                                          forKey:files_pref_hash_validation];
+    NSString *key = sender.representedObject;
+    BOOL next = ![NSUserDefaults.standardUserDefaults boolForKey:key];
+    [NSUserDefaults.standardUserDefaults setBool:next forKey:key];
     sender.state = next ? NSControlStateValueOn : NSControlStateValueOff;
 }
 
@@ -292,18 +317,11 @@ build_menu_bar
     [view_menu addItem:make_item(@"Auto-Fit Columns",
                                  @selector(auto_fit_columns_action:),
                                  @"", 0)];
+    [view_menu addItem:make_pref_item(@"Large Rows", files_pref_large_rows, self)];
     [view_menu addItem:NSMenuItem.separatorItem];
-    {
-        BOOL hash_on = [NSUserDefaults.standardUserDefaults
-                            boolForKey:files_pref_hash_validation];
-        NSMenuItem *hash_item = [[NSMenuItem alloc]
-            initWithTitle:@"Validate Copies with SHA-256"
-                   action:@selector(toggle_hash_validation:)
-            keyEquivalent:@""];
-        hash_item.target = self;
-        hash_item.state  = hash_on ? NSControlStateValueOn : NSControlStateValueOff;
-        [view_menu addItem:hash_item];
-    }
+    [view_menu addItem:make_pref_item(@"Simple Copies", files_pref_simple_copies, self)];
+    [view_menu addItem:make_pref_item(@"Validate Copies with SHA-256",
+                                      files_pref_hash_validation, self)];
     view_mi.submenu = view_menu;
     [bar addItem:view_mi];
 
