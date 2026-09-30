@@ -7,7 +7,13 @@
 
 @interface FilesAppDelegate () <NSMenuDelegate>
 @property (nonatomic, strong) NSMutableArray<FilesMainWindow *> *windows;  /* open browser windows */
+@property (nonatomic, strong) NSNumber *archive_reveal_attempted;  /* value tried this session */
 @end
+
+/* Archive Utility's value this app last wrote, so launches only run
+ * `defaults` when the preference actually changed. Internal bookkeeping,
+ * not a user preference. */
+static NSString * const archive_reveal_applied_key = @"files.archive_reveal_applied";
 
 @implementation FilesAppDelegate
 
@@ -28,6 +34,131 @@ applicationDidFinishLaunching:(NSNotification *)n
                                              object:nil];
     [self open_window_at:files_home_url()];
     [NSApp activate];
+
+    if (!files_has_full_disk_access()) {
+        [self prompt_full_disk_access:
+            @"Files is a file manager and needs Full Disk Access to show and manage "
+             "all of your files (for example the Trash, Mail and Messages data, and "
+             "other apps' containers)."];
+    }
+
+    /* Keep Archive Utility in step with files_pref_archive_reveal, now and
+     * whenever it changes (View ▸ Show Finder After Archive Operations). */
+    [self sync_archive_utility_reporting:NO];
+    [NSNotificationCenter.defaultCenter addObserver:self
+                                           selector:@selector(sync_archive_utility)
+                                               name:NSUserDefaultsDidChangeNotification
+                                             object:nil];
+}
+
+/*
+ * sync_archive_utility — NSUserDefaultsDidChangeNotification handler: applies
+ * files_pref_archive_reveal to Archive Utility, reporting failure (the
+ * preference just changed, most likely from the View menu).
+ */
+- (void)
+sync_archive_utility
+{
+    [self sync_archive_utility_reporting:YES];
+}
+
+/*
+ * sync_archive_utility_reporting: — makes Archive Utility's "reveal in
+ * Finder after archiving / expanding" settings match
+ * files_pref_archive_reveal (off by default) by running, on a serial
+ * background queue:
+ *   defaults write com.apple.archiveutility dearchive-reveal-after -bool <v>
+ *   defaults write com.apple.archiveutility archive-reveal-after -bool <v>
+ * `defaults` is used rather than CFPreferences because Archive Utility is
+ * sandboxed: `defaults` writes its container's preferences, CFPreferences
+ * from this process would not. Writing another app's container requires
+ * Full Disk Access, which Files is expected to have (the launch check
+ * prompts for it); the `defaults` child process inherits it.
+ *
+ * The value is recorded as applied only after both writes succeed. Each
+ * value is attempted at most once per session, so the frequent defaults
+ * notifications never retry (or re-alert) a blocked write.
+ *
+ * Inputs:
+ *   report — YES to prompt for Full Disk Access if the write is blocked
+ *            (user toggled the option); NO at launch, where the Full Disk
+ *            Access check has already prompted
+ */
+- (void)
+sync_archive_utility_reporting:(BOOL)report
+{
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create("files.archive_utility", DISPATCH_QUEUE_SERIAL);
+    });
+
+    NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
+    BOOL want          = [ud boolForKey:files_pref_archive_reveal];
+    NSNumber *applied  = [ud objectForKey:archive_reveal_applied_key];
+    if (applied && applied.boolValue == want) return;
+    if (self.archive_reveal_attempted && self.archive_reveal_attempted.boolValue == want) return;
+    self.archive_reveal_attempted = @(want);
+
+    NSString *value = want ? @"true" : @"false";
+    dispatch_async(queue, ^{
+        BOOL ok = YES;
+        for (NSString *key in @[@"dearchive-reveal-after", @"archive-reveal-after"]) {
+            NSTask *task       = [[NSTask alloc] init];
+            task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/defaults"];
+            task.arguments     = @[@"write", @"com.apple.archiveutility", key, @"-bool", value];
+            task.standardError = NSFileHandle.fileHandleWithNullDevice;
+            if ([task launchAndReturnError:nil]) {
+                [task waitUntilExit];
+                ok = ok && task.terminationStatus == 0;
+            } else {
+                ok = NO;
+            }
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (ok) {
+                [ud setBool:want forKey:archive_reveal_applied_key];
+            } else if (report) {
+                [self prompt_full_disk_access:
+                    @"Files could not change Archive Utility's setting. Writing another "
+                     "app's settings requires Full Disk Access."];
+            }
+        });
+    });
+}
+
+/*
+ * prompt_full_disk_access: — explains why Full Disk Access is needed and how
+ * to grant it, as a sheet on the front window. "Open System Settings" opens
+ * Privacy & Security ▸ Full Disk Access directly.
+ *
+ * Inputs:
+ *   reason — first paragraph: why access is needed right now
+ */
+- (void)
+prompt_full_disk_access:(NSString *)reason
+{
+    NSString *app_path = NSBundle.mainBundle.bundlePath;
+    NSAlert *alert     = [[NSAlert alloc] init];
+    alert.messageText  = @"Files needs Full Disk Access";
+    alert.informativeText = [NSString stringWithFormat:
+        @"%@\n\nTo grant it:\n"
+         "1. Click Open System Settings (Privacy & Security ▸ Full Disk Access).\n"
+         "2. Turn on Files, or click + and add:\n    %@\n"
+         "3. When asked, choose Quit & Reopen.", reason, app_path];
+    [alert addButtonWithTitle:@"Open System Settings"];
+    [alert addButtonWithTitle:@"Not Now"];
+    void (^handle)(NSModalResponse) = ^(NSModalResponse resp) {
+        if (resp != NSAlertFirstButtonReturn) return;
+        [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:
+            @"x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"]];
+    };
+    NSWindow *win = [self front_window].window;
+    if (win) {
+        [alert beginSheetModalForWindow:win completionHandler:handle];
+    } else {
+        handle([alert runModal]);
+    }
 }
 
 /* ── Windows ─────────────────────────────────────────────────────────────── */
@@ -302,6 +433,8 @@ build_menu_bar
     [edit_menu addItem:make_item(@"Paste",      @selector(paste:),  @"v", 0)];
     [edit_menu addItem:make_item(@"Select All", @selector(selectAll:), @"a", 0)];
     [edit_menu addItem:NSMenuItem.separatorItem];
+    [edit_menu addItem:make_item(@"Find…", @selector(find_action:), @"f", 0)];
+    [edit_menu addItem:NSMenuItem.separatorItem];
     [edit_menu addItem:make_item(@"Move to Trash",
                                  @selector(move_to_trash_action:), @"\x08", 0)];
     edit_mi.submenu = edit_menu;
@@ -325,6 +458,8 @@ build_menu_bar
     [view_menu addItem:make_pref_item(@"Simple Copies", files_pref_simple_copies, self)];
     [view_menu addItem:make_pref_item(@"Validate Copies with SHA-256",
                                       files_pref_hash_validation, self)];
+    [view_menu addItem:make_pref_item(@"Show Finder After Archive Operations",
+                                      files_pref_archive_reveal, self)];
     view_mi.submenu = view_menu;
     [bar addItem:view_mi];
 

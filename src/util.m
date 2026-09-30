@@ -1,4 +1,6 @@
 #import "util.h"
+#include <fcntl.h>
+#include <unistd.h>
 
 NSString * const files_pref_show_hidden     = @"files.show_hidden_files";
 NSString * const files_pref_auto_fit        = @"files.auto_fit_columns";
@@ -6,6 +8,7 @@ NSString * const files_pref_hash_validation = @"files.copy.hash_validation";
 NSString * const files_pref_show_hashes     = @"files.show_hashes";
 NSString * const files_pref_large_rows      = @"files.large_rows";
 NSString * const files_pref_simple_copies   = @"files.simple_copies";
+NSString * const files_pref_archive_reveal  = @"files.archive_reveal";
 
 /*
  * files_directory_url — standard user folder URL (Applications: local domain).
@@ -38,6 +41,21 @@ files_same_path(NSURL *a, NSURL *b)
 {
     if (!a || !b) return NO;
     return [a.URLByStandardizingPath.path isEqualToString:b.URLByStandardizingPath.path];
+}
+
+/*
+ * files_has_full_disk_access — tries to open the TCC database read-only.
+ * Inputs/output are documented in util.h.
+ */
+BOOL
+files_has_full_disk_access(void)
+{
+    NSString *db = [NSHomeDirectory() stringByAppendingPathComponent:
+                    @"Library/Application Support/com.apple.TCC/TCC.db"];
+    int fd = open(db.fileSystemRepresentation, O_RDONLY);
+    if (fd < 0) return NO;
+    close(fd);
+    return YES;
 }
 
 /*

@@ -84,6 +84,15 @@ src/
                               folder URLs, size/date formatting, error alerts
 ```
 
+## Code signing
+
+The bundle is signed with `CODESIGN_IDENTITY`, which defaults to the first
+"Apple Development" identity in your keychain, or `-` (ad hoc) if there is
+none. Privacy grants such as Full Disk Access follow the signature: with a
+certificate they survive rebuilds; with an ad-hoc signature they are tied to
+one build. `build/codesign.id` records the identity so that changing it
+re-signs the bundle on the next `make`. See README ▸ Full Disk Access.
+
 ## Platform notes
 
 - Requires macOS 14 (Sonoma) or later; the deployment target (`-mmacosx-version-min`) and `LSMinimumSystemVersion` are both 14.0. macOS 13 is not supported.

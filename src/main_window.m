@@ -897,6 +897,28 @@ address_bar_action:(NSTextField *)sender
 }
 
 /*
+ * find_action: — Edit ▸ Find (⌘F): moves focus to the toolbar search field,
+ * showing the toolbar and expanding a collapsed search field first. A
+ * custom selector (not performFindPanelAction:) so that a focused text
+ * field such as the address bar cannot intercept it.
+ *
+ * Inputs:
+ *   sender — menu item (unused)
+ */
+- (IBAction)
+find_action:(id)sender
+{
+    NSToolbar *tb = self.window.toolbar;
+    tb.visible = YES;
+    for (NSToolbarItem *item in tb.items) {
+        if ([item isKindOfClass:NSSearchToolbarItem.class]) {
+            [(NSSearchToolbarItem *)item beginSearchInteraction];
+            return;
+        }
+    }
+}
+
+/*
  * search_changed: — runs (or clears) a Spotlight search in the active pane.
  *
  * Inputs:

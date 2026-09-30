@@ -14,6 +14,7 @@ extern NSString * const files_pref_hash_validation; /* SHA-256 verify copies */
 extern NSString * const files_pref_show_hashes;     /* hashes in Get Info */
 extern NSString * const files_pref_large_rows;      /* double-height file rows */
 extern NSString * const files_pref_simple_copies;   /* copy/move without the progress panel */
+extern NSString * const files_pref_archive_reveal;  /* Archive Utility reveals results in Finder */
 
 /*
  * files_directory_url — returns the current user's URL for a standard folder
@@ -44,6 +45,16 @@ NSURL *files_home_url(void);
  * Output: YES if both are non-nil and their standardized paths match.
  */
 BOOL files_same_path(NSURL *a, NSURL *b);
+
+/*
+ * files_has_full_disk_access — whether this process has Full Disk Access.
+ * macOS has no API for this; the reliable check is whether the user's TCC
+ * database (~/Library/Application Support/com.apple.TCC/TCC.db), which only
+ * Full Disk Access processes may read, can be opened.
+ *
+ * Output: YES if Full Disk Access is granted.
+ */
+BOOL files_has_full_disk_access(void);
 
 /*
  * files_format_bytes — formats a byte count the way Finder does

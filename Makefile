@@ -5,6 +5,25 @@ MACOS    = $(CONTENTS)/MacOS
 RSRC     = $(CONTENTS)/Resources
 
 CC       = clang
+
+# Code-signing identity. macOS ties privacy grants such as Full Disk Access
+# to the app's signature: for an ad-hoc ("-") signature that is the exact
+# build, so every rebuild loses the grant; for a certificate it is the bundle
+# ID plus certificate, which rebuilds keep. Defaults to the first
+# "Apple Development" identity in the keychain, else ad hoc. Override with
+#   make CODESIGN_IDENTITY="…"   (list: security find-identity -v -p codesigning)
+ifeq ($(origin CODESIGN_IDENTITY),undefined)
+CODESIGN_IDENTITY := $(or $(shell security find-identity -v -p codesigning 2>/dev/null \
+    | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -n 1),-)
+endif
+
+# build/codesign.id records the signing identity. When the identity changes
+# it is rewritten (while the Makefile is read) and the bundle is backdated,
+# which forces a re-sign even within the same second as the last build; an
+# unchanged identity triggers nothing.
+$(shell mkdir -p build && (echo '$(CODESIGN_IDENTITY)' | cmp -s - build/codesign.id \
+    || { echo '$(CODESIGN_IDENTITY)' > build/codesign.id; \
+         [ -d $(BUNDLE) ] && touch -t 200001010000 $(BUNDLE); true; }))
 # -Werror=unguarded-availability: calling an API newer than the deployment
 # target without an @available check is a build error. (Clang cannot check
 # messages to __kindof receivers such as NSApp or +sharedApplication.)
@@ -28,7 +47,8 @@ $(BUNDLE): $(MACOS)/$(APP) resources/Info.plist folder.png documents.png
 	@cp resources/Info.plist $(CONTENTS)/Info.plist
 	@cp folder.png    $(RSRC)/folder.png
 	@cp documents.png $(RSRC)/documents.png
-	@codesign --force --sign - $(BUNDLE)
+	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(BUNDLE)
+	@touch $(BUNDLE)  # codesign rewrites the binary; keep the bundle newer than it
 
 $(MACOS)/$(APP): $(OBJS)
 	@mkdir -p $(MACOS)
@@ -43,6 +63,7 @@ build/%.o: src/%.m Makefile | build
 
 build:
 	@mkdir -p build
+
 
 run: all
 	@open $(BUNDLE)

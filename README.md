@@ -33,6 +33,9 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   system's DiskImageMounter to ask, then open the same way
 - Spotlight search within the current folder
 - Live updates when the current folder changes
+- View ▸ Show Finder After Archive Operations (off by default) sets
+  Archive Utility's archive-reveal-after / dearchive-reveal-after, so
+  expanding or creating an archive does not pop open a Finder window
 - Devices menu and an All Mounts panel with per-volume unmount; at the root
   of an unmountable volume (external disk, disk image, network share) a
   floating ⏏ button unmounts it (the status bar confirms), and any window
@@ -55,6 +58,24 @@ make install
 
 This builds the app bundle and copies it to `~/Applications/files.app` (per-user; no `sudo` needed). Re-running `make install` replaces the previous copy.
 
+## Full Disk Access
+
+Files expects Full Disk Access (to show protected folders such as the Trash
+and to change Archive Utility's settings). On launch it checks, and if access
+is missing it explains how to grant it: System Settings ▸ Privacy & Security ▸
+Full Disk Access, turn on Files (or add `~/Applications/files.app` with +),
+then Quit & Reopen.
+
+The build signs with your first "Apple Development" certificate if you have
+one (`security find-identity -v -p codesigning`), so the grant survives
+rebuilds and `make install`. Without a certificate it falls back to an
+ad-hoc signature, which macOS ties to a single build — the grant then has
+to be given again after each install. To choose a specific identity:
+
+```sh
+make install CODESIGN_IDENTITY="Apple Development: Your Name (TEAMID)"
+```
+
 ## First run
 
 ```sh
@@ -71,6 +92,7 @@ Or double-click `files.app` in `~/Applications` after installing.
 | Cut            | ⌘X                 |
 | Paste          | ⌘V                 |
 | New Window     | ⌘N                 |
+| Find (search)  | ⌘F                 |
 | New File       | ⌥⌘N                |
 | Move to Trash  | ⌘⌫                 |
 | Add Bookmark   | ⌘D                 |
