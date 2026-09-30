@@ -3,9 +3,10 @@
 #import "browser_pane.h"
 #import "volume_manager.h"
 #import "mounts_panel.h"
+#import "default_viewer.h"
 #import "util.h"
 
-@interface FilesAppDelegate () <NSMenuDelegate>
+@interface FilesAppDelegate () <NSMenuDelegate, NSMenuItemValidation>
 @property (nonatomic, strong) NSMutableArray<FilesMainWindow *> *windows;  /* open browser windows */
 @property (nonatomic, strong) NSNumber *archive_reveal_attempted;  /* value tried this session */
 @end
@@ -18,8 +19,30 @@ static NSString * const archive_utility_domain = @"com.apple.archiveutility";
 @implementation FilesAppDelegate
 
 /*
- * applicationDidFinishLaunching: — registers preference defaults, then creates
- * the menu bar and main window.
+ * applicationWillFinishLaunching: — registers preference defaults and
+ * prepares window tracking. Runs before application:openURLs:, which a
+ * launch to reveal files delivers ahead of applicationDidFinishLaunching:.
+ *
+ * Inputs:
+ *   n — NSApplicationWillFinishLaunchingNotification (unused)
+ */
+- (void)
+applicationWillFinishLaunching:(NSNotification *)n
+{
+    files_register_defaults();
+    self.windows = [NSMutableArray array];
+    [NSNotificationCenter.defaultCenter addObserver:self
+                                           selector:@selector(window_will_close:)
+                                               name:NSWindowWillCloseNotification
+                                             object:nil];
+}
+
+/*
+ * applicationDidFinishLaunching: — creates the menu bar and, unless the
+ * launch already opened one (to reveal files), a home-folder window; then
+ * checks Full Disk Access and brings the settings Files manages in other
+ * apps (Archive Utility, Finder / default file viewer) in line with its
+ * preferences.
  *
  * Inputs:
  *   n — NSApplicationDidFinishLaunchingNotification (unused)
@@ -27,14 +50,8 @@ static NSString * const archive_utility_domain = @"com.apple.archiveutility";
 - (void)
 applicationDidFinishLaunching:(NSNotification *)n
 {
-    files_register_defaults();
     [self build_menu_bar];
-    self.windows = [NSMutableArray array];
-    [NSNotificationCenter.defaultCenter addObserver:self
-                                           selector:@selector(window_will_close:)
-                                               name:NSWindowWillCloseNotification
-                                             object:nil];
-    [self open_window_at:files_home_url()];
+    if (self.windows.count == 0) [self open_window_at:files_home_url()];
     [NSApp activate];
 
     if (!files_has_full_disk_access()) {
@@ -51,6 +68,11 @@ applicationDidFinishLaunching:(NSNotification *)n
                                            selector:@selector(sync_archive_utility)
                                                name:NSUserDefaultsDidChangeNotification
                                              object:nil];
+
+    /* First launch takes over from Finder (files_pref_default_viewer is on
+     * by default); later launches re-check and repair those settings, or,
+     * after File ▸ Restore Finder…, make sure they stay restored. */
+    files_default_viewer_sync(nil);
 }
 
 /*
@@ -98,9 +120,10 @@ sync_archive_utility_reporting:(BOOL)report
     self.archive_reveal_attempted = @(want);
 
     dispatch_async(queue, ^{
-        BOOL ok = files_sync_bool_prefs(archive_utility_domain,
-                                        @[@"dearchive-reveal-after", @"archive-reveal-after"],
-                                        want);
+        BOOL ok = files_sync_prefs(archive_utility_domain,
+                                   @{ @"dearchive-reveal-after": @[@(want)],
+                                      @"archive-reveal-after":   @[@(want)] },
+                                   nil);
         if (ok || !report) return;
         dispatch_async(dispatch_get_main_queue(), ^{
             [self prompt_full_disk_access:
@@ -154,8 +177,10 @@ prompt_full_disk_access:(NSString *)reason
  *
  * Inputs:
  *   url — folder to show
+ *
+ * Output: the new window's controller.
  */
-- (void)
+- (FilesMainWindow *)
 open_window_at:(NSURL *)url
 {
     FilesMainWindow *front = [self front_window];
@@ -168,6 +193,66 @@ open_window_at:(NSURL *)url
     w.new_window_handler = ^(NSURL *u) { [ws open_window_at:u]; };
     [self.windows addObject:w];
     [w showWindow:nil];
+    return w;
+}
+
+/*
+ * window_for_folder: — the browser window to show folder in: one whose
+ * active pane already shows it, else a new window on it.
+ *
+ * Inputs:
+ *   folder — folder URL
+ *
+ * Output: window controller, brought to the front.
+ */
+- (FilesMainWindow *)
+window_for_folder:(NSURL *)folder
+{
+    for (FilesMainWindow *w in self.windows) {
+        if (files_same_path([w active_pane].browser.current_url, folder)) {
+            [w showWindow:nil];
+            return w;
+        }
+    }
+    return [self open_window_at:folder];
+}
+
+/*
+ * application:openURLs: — handles "open documents" requests from other
+ * apps. As the default file viewer (NSFileViewer) Files receives "Show in
+ * Finder" / "Reveal in Finder" this way, with the items themselves as the
+ * URLs; `open -a files <path>` arrives the same way. A reveal of a folder
+ * is indistinguishable from an open, so folders are shown (their contents);
+ * files and packages (apps, bundles) are selected in their parent folder,
+ * one window per parent.
+ *
+ * Inputs:
+ *   app  — NSApplication (unused)
+ *   urls — file URLs to show
+ */
+- (void)
+application:(NSApplication *)app openURLs:(NSArray<NSURL *> *)urls
+{
+    NSMutableDictionary<NSURL *, NSMutableArray<NSString *> *> *reveal =
+        [NSMutableDictionary dictionary];
+    for (NSURL *url in urls) {
+        if (!url.isFileURL) continue;
+        NSNumber *is_dir = nil, *is_pkg = nil;
+        NSURL *target = url.URLByResolvingSymlinksInPath;
+        [target getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
+        [target getResourceValue:&is_pkg forKey:NSURLIsPackageKey error:nil];
+        if (is_dir.boolValue && !is_pkg.boolValue) {
+            [self window_for_folder:target];
+            continue;
+        }
+        NSURL *parent = url.URLByDeletingLastPathComponent.URLByStandardizingPath;
+        if (!reveal[parent]) reveal[parent] = [NSMutableArray array];
+        [reveal[parent] addObject:url.lastPathComponent];
+    }
+    for (NSURL *parent in reveal) {
+        [[[self window_for_folder:parent] active_pane].browser reveal_items:reveal[parent]];
+    }
+    [NSApp activate];
 }
 
 /*
@@ -249,13 +334,14 @@ make_item(NSString *title, SEL action, NSString *key, NSEventModifierFlags mod)
 }
 
 /*
- * make_pref_item — a View-menu checkbox item bound to a BOOL preference:
- * checked to match the current value, toggled by toggle_pref:.
+ * make_pref_item — a View-menu checkbox item bound to a BOOL preference,
+ * toggled by toggle_pref:; validateMenuItem: sets its checkmark each time
+ * the menu opens, so changes made elsewhere show too.
  *
  * Inputs:
  *   title  — menu item title
  *   key    — NSUserDefaults key (a files_pref_* constant from util.h)
- *   target — object implementing toggle_pref:
+ *   target — object implementing toggle_pref: and validateMenuItem:
  *
  * Output: configured NSMenuItem.
  */
@@ -267,15 +353,13 @@ make_pref_item(NSString *title, NSString *key, id target)
                                            keyEquivalent:@""];
     item.target            = target;
     item.representedObject = key;
-    item.state = [NSUserDefaults.standardUserDefaults boolForKey:key]
-                 ? NSControlStateValueOn : NSControlStateValueOff;
     return item;
 }
 
 /*
  * toggle_pref: — flips the BOOL preference named by the menu item's
- * representedObject and updates its checkmark. Code that depends on a
- * preference reads it when needed (copies) or observes it (Large Rows).
+ * representedObject. Code that depends on a preference reads it when
+ * needed (copies) or observes it (Large Rows).
  *
  * Inputs:
  *   sender — menu item made by make_pref_item
@@ -284,9 +368,103 @@ make_pref_item(NSString *title, NSString *key, id target)
 toggle_pref:(NSMenuItem *)sender
 {
     NSString *key = sender.representedObject;
-    BOOL next = ![NSUserDefaults.standardUserDefaults boolForKey:key];
-    [NSUserDefaults.standardUserDefaults setBool:next forKey:key];
-    sender.state = next ? NSControlStateValueOn : NSControlStateValueOff;
+    [NSUserDefaults.standardUserDefaults setBool:![NSUserDefaults.standardUserDefaults boolForKey:key]
+                                          forKey:key];
+}
+
+/*
+ * validateMenuItem: — NSMenuItemValidation for the delegate's own items:
+ * checkmarks of preference items, and the default-viewer item's title,
+ * which names what choosing it will do.
+ *
+ * Inputs:
+ *   item — menu item about to be shown
+ *
+ * Output: YES (every item the delegate handles is always available).
+ */
+- (BOOL)
+validateMenuItem:(NSMenuItem *)item
+{
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    if (item.action == @selector(toggle_pref:)) {
+        item.state = [defaults boolForKey:item.representedObject]
+                     ? NSControlStateValueOn : NSControlStateValueOff;
+    } else if (item.action == @selector(default_viewer_action:)) {
+        item.title = [defaults boolForKey:files_pref_default_viewer]
+                     ? @"Restore Finder as Default File Viewer…"
+                     : @"Make Files the Default File Viewer";
+    }
+    return YES;
+}
+
+/*
+ * default_viewer_action: — File ▸ Restore Finder as Default File Viewer…
+ * (while Files is the default) or Make Files the Default File Viewer.
+ * Restoring asks for confirmation, then turns files_pref_default_viewer
+ * off, which writes back every setting Files replaced, and turns View ▸
+ * Show Finder After Archive Operations on (Archive Utility's own
+ * default). Making Files the default reverses both. The outcome is
+ * reported in an alert: after a restore, Files can be uninstalled.
+ *
+ * Inputs:
+ *   sender — menu item (unused)
+ */
+- (void)
+default_viewer_action:(id)sender
+{
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    BOOL restore = [defaults boolForKey:files_pref_default_viewer];
+    NSWindow *win = [self front_window].window;
+
+    void (^apply)(void) = ^{
+        [defaults setBool:!restore forKey:files_pref_default_viewer];
+        [defaults setBool:restore forKey:files_pref_archive_reveal];
+        files_default_viewer_sync(^(BOOL ok) {
+            NSAlert *done = [[NSAlert alloc] init];
+            if (!ok) {
+                done.messageText     = restore ? @"Some settings could not be restored"
+                                               : @"Some settings could not be changed";
+                done.informativeText = @"Files will try again the next time it opens.";
+            } else if (restore) {
+                done.messageText     = @"Finder is the default file viewer again";
+                done.informativeText = @"Every setting Files changed has been put back. "
+                                        "You can now quit and uninstall Files; folders "
+                                        "open in Finder again after you log out and back in.";
+            } else {
+                done.messageText     = @"Files is the default file viewer";
+                done.informativeText = @"\"Show in Finder\" requests from other apps now open "
+                                        "in Files. Folders opened from other apps open in "
+                                        "Files after you log out and back in.";
+            }
+            if (win) {
+                [done beginSheetModalForWindow:win completionHandler:nil];
+            } else {
+                [done runModal];
+            }
+        });
+    };
+    if (!restore) {
+        apply();
+        return;
+    }
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText     = @"Restore Finder as the default file viewer?";
+    alert.informativeText = @"\"Show in Finder\" requests and opened folders will go to Finder "
+                             "again, and the settings Files changed (desktop icons, Finder's "
+                             "Quit menu item, Archive Utility revealing its results) go back "
+                             "to what they were before Files. Do this before uninstalling "
+                             "Files.";
+    [alert addButtonWithTitle:@"Restore Finder"];
+    [alert addButtonWithTitle:@"Cancel"];
+    void (^handle)(NSModalResponse) = ^(NSModalResponse resp) {
+        if (resp == NSAlertFirstButtonReturn) apply();
+    };
+    if (win) {
+        [alert beginSheetModalForWindow:win completionHandler:handle];
+    } else {
+        handle([alert runModal]);
+    }
 }
 
 /* ── Devices menu ────────────────────────────────────────────────────────── */
@@ -397,6 +575,11 @@ build_menu_bar
     [file_menu addItem:make_item(@"Open in Terminal",
                                  @selector(open_terminal_action:),
                                  @"t", NSEventModifierFlagShift)];
+    [file_menu addItem:NSMenuItem.separatorItem];
+    NSMenuItem *viewer = make_item(@"Restore Finder as Default File Viewer…",
+                                   @selector(default_viewer_action:), @"", 0);
+    viewer.target = self;  /* title set by validateMenuItem: */
+    [file_menu addItem:viewer];
     [file_menu addItem:NSMenuItem.separatorItem];
     [file_menu addItem:make_item(@"Close Window",
                                  @selector(performClose:),

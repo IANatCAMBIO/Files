@@ -9,6 +9,7 @@ NSString * const files_pref_show_hashes     = @"files.show_hashes";
 NSString * const files_pref_large_rows      = @"files.large_rows";
 NSString * const files_pref_simple_copies   = @"files.simple_copies";
 NSString * const files_pref_archive_reveal  = @"files.archive_reveal";
+NSString * const files_pref_default_viewer  = @"files.default_viewer";
 
 /*
  * files_register_defaults — registers non-NO preference defaults.
@@ -18,7 +19,8 @@ void
 files_register_defaults(void)
 {
     [NSUserDefaults.standardUserDefaults registerDefaults:@{
-        files_pref_simple_copies: @YES,
+        files_pref_simple_copies:  @YES,
+        files_pref_default_viewer: @YES,
     }];
 }
 
@@ -97,11 +99,12 @@ run_defaults(NSArray<NSString *> *args, NSData **out)
 }
 
 /*
- * files_sync_bool_prefs — read once, write only differences.
+ * files_sync_prefs — read once, write only differences.
  * Inputs/output are documented in util.h.
  */
 BOOL
-files_sync_bool_prefs(NSString *domain, NSArray<NSString *> *keys, BOOL value)
+files_sync_prefs(NSString *domain, NSDictionary<NSString *, NSArray *> *values,
+                 NSMutableDictionary<NSString *, NSArray *> *previous)
 {
     NSData *data = nil;
     if (!run_defaults(@[@"export", domain, @"-"], &data)) return NO;
@@ -112,10 +115,27 @@ files_sync_bool_prefs(NSString *domain, NSArray<NSString *> *keys, BOOL value)
     if (![current isKindOfClass:NSDictionary.class]) return NO;
 
     BOOL ok = YES;
-    for (NSString *key in keys) {
+    for (NSString *key in values) {
+        id want = values[key].firstObject;  /* nil: remove the key */
         id have = current[key];
-        if ([have isKindOfClass:NSNumber.class] && [have boolValue] == value) continue;
-        ok = run_defaults(@[@"write", domain, key, @"-bool", value ? @"true" : @"false"], NULL) && ok;
+        if (want ? [have isEqual:want] : have == nil) continue;
+
+        BOOL wrote;
+        if (want) {
+            /* `defaults write` parses a value starting with "<" as a property
+             * list, so any type (string, bool, number, …) round-trips. */
+            NSData *xml = [NSPropertyListSerialization dataWithPropertyList:want
+                                                                     format:NSPropertyListXMLFormat_v1_0
+                                                                    options:0
+                                                                      error:nil];
+            NSString *plist = xml ? [[NSString alloc] initWithData:xml encoding:NSUTF8StringEncoding]
+                                  : nil;
+            wrote = plist && run_defaults(@[@"write", domain, key, plist], NULL);
+        } else {
+            wrote = run_defaults(@[@"delete", domain, key], NULL);
+        }
+        if (wrote && previous) previous[key] = have ? @[have] : @[];
+        ok = wrote && ok;
     }
     return ok;
 }

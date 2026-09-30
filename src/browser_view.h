@@ -65,6 +65,16 @@
 - (void)navigate_to:(NSURL *)url;
 
 /*
+ * reveal_items: — selects the named items of the current folder once it has
+ * been re-listed, scrolling the first into view (ends any Spotlight search).
+ * Items that are hidden while hidden files are not shown stay unselected.
+ *
+ * Inputs:
+ *   names — file names (last path components) within current_url
+ */
+- (void)reveal_items:(NSArray<NSString *> *)names;
+
+/*
  * go_back — navigates to the previous location, if any.
  */
 - (void)go_back;

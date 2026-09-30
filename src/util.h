@@ -15,10 +15,12 @@ extern NSString * const files_pref_show_hashes;     /* hashes in Get Info */
 extern NSString * const files_pref_large_rows;      /* double-height file rows */
 extern NSString * const files_pref_simple_copies;   /* copy/move without the progress panel (default on) */
 extern NSString * const files_pref_archive_reveal;  /* Archive Utility reveals results in Finder */
+extern NSString * const files_pref_default_viewer;  /* Files replaces Finder as file viewer (default on) */
 
 /*
  * files_register_defaults — registers the default value of every preference
- * whose default is not NO (currently: Simple Copies on). A value the user
+ * whose default is not NO (currently: Simple Copies and Files as the
+ * default file viewer on). A value the user
  * has set is never overridden. Call once at launch, before anything reads
  * preferences.
  */
@@ -65,22 +67,30 @@ BOOL files_same_path(NSURL *a, NSURL *b);
 BOOL files_has_full_disk_access(void);
 
 /*
- * files_sync_bool_prefs — makes BOOL preferences in another app's domain
- * equal value, using the `defaults` tool (which, unlike CFPreferences,
- * reaches a sandboxed app's container; that needs Full Disk Access). Reads
- * the domain once (`defaults export`) and writes only the keys that are
- * missing or different, so the common case costs one process and no
+ * files_sync_prefs — makes preferences in another app's (or the global)
+ * domain hold the given values, using the `defaults` tool (which, unlike
+ * CFPreferences, reaches a sandboxed app's container; that needs Full Disk
+ * Access). Reads the domain once (`defaults export`) and writes or deletes
+ * only the keys that differ, so the common case costs one process and no
  * writes. Blocks; call off the main thread.
  *
- * Inputs:
- *   domain — preferences domain, e.g. @"com.apple.archiveutility"
- *   keys   — BOOL keys to set
- *   value  — value every key should have
+ * Values are "wrapped": @[value] means the key should hold value (any
+ * property-list object), @[] means the key should be absent. The same form
+ * is reported in previous, so passing previous back as values undoes the
+ * change.
  *
- * Output: YES if every key now has value; NO if the domain could not be
- *         read or a write failed (typically: no Full Disk Access).
+ * Inputs:
+ *   domain   — preferences domain, e.g. @"com.apple.archiveutility" or
+ *              @"NSGlobalDomain"
+ *   values   — key → wrapped wanted value
+ *   previous — if non-nil, receives key → wrapped prior value for every key
+ *              that was written or deleted
+ *
+ * Output: YES if every key now has its wanted value; NO if the domain could
+ *         not be read or a write failed (typically: no Full Disk Access).
  */
-BOOL files_sync_bool_prefs(NSString *domain, NSArray<NSString *> *keys, BOOL value);
+BOOL files_sync_prefs(NSString *domain, NSDictionary<NSString *, NSArray *> *values,
+                      NSMutableDictionary<NSString *, NSArray *> *previous);
 
 /*
  * files_format_bytes — formats a byte count the way Finder does

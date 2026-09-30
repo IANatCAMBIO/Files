@@ -80,8 +80,12 @@ src/
 ├── file_hash.h/.m          — single-pass, cancellable SHA-256 / MD5
 ├── mounts_panel.h/.m       — All Mounts panel (per-volume unmount)
 ├── volume_manager.h/.m     — mounted-volume list and unmount
-└── util.h/.m               — shared helpers: preference keys, standard
-                              folder URLs, size/date formatting, error alerts
+├── default_viewer.h/.m     — takes over from Finder as default file viewer
+│                             (NSFileViewer, Finder settings) and restores
+│                             the recorded originals
+└── util.h/.m               — shared helpers: preference keys, other apps'
+                              preferences (`defaults`), standard folder
+                              URLs, size/date formatting, error alerts
 ```
 
 ## Code signing

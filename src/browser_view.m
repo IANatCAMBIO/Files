@@ -233,6 +233,10 @@ icon_for_url(NSURL *url, CGFloat size)
 @property (nonatomic, assign) NSUInteger               list_generation;
 @property (nonatomic, assign) BOOL                     auto_fit_pending;
 
+/* Names to select when the next listing lands (reveal_items:), replacing
+ * the kept selection; nil normally. */
+@property (nonatomic, copy)   NSSet<NSString *>       *pending_names;
+
 /* Inline rename: the Name cell's own text field while it is being edited,
  * the item being renamed, and whether a listing reload was postponed so
  * it would not destroy the cell mid-edit. */
@@ -625,6 +629,22 @@ navigate_to:(NSURL *)url
 }
 
 /*
+ * reveal_items: — selects the named items of the current folder: re-lists
+ * it (ending any Spotlight search) and selects them when the listing lands.
+ * Hidden items are only found while hidden files are shown.
+ *
+ * Inputs:
+ *   names — file names within current_url
+ */
+- (void)
+reveal_items:(NSArray<NSString *> *)names
+{
+    if (!self.current_dir) return;
+    self.pending_names = [NSSet setWithArray:names];
+    [self load_location:self.current_dir];
+}
+
+/*
  * mount_disk_image: — mounts a disk image (see FilesVolumeManager
  * mount_disk_image:completion:) and shows its volume in a new window via
  * open_window_handler, or in this browser if none is set. The status bar
@@ -786,7 +806,9 @@ reload_directory_then:(void (^)(void))done
 
 /*
  * show_listing: — installs a fresh folder listing in the table, keeping the
- * selection (matched by path) and running a pending auto-fit.
+ * selection (matched by name) and running a pending auto-fit. Names
+ * requested by reveal_items: are selected instead, and the first of them
+ * scrolled into view.
  *
  * Inputs:
  *   items — folder contents with listing_keys() prefetched
@@ -794,20 +816,23 @@ reload_directory_then:(void (^)(void))done
 - (void)
 show_listing:(NSArray<NSURL *> *)items
 {
-    NSSet<NSString *> *prev_sel = [NSSet setWithArray:
-        [[self selected_urls] valueForKey:@"path"]];
+    NSSet<NSString *> *want = self.pending_names
+                              ?: [NSSet setWithArray:[[self selected_urls] valueForKey:@"lastPathComponent"]];
+    BOOL reveal = self.pending_names != nil;
+    self.pending_names = nil;
 
     self.all_items = [items mutableCopy];
     [self apply_sort];
     [self apply_filter];
     [self.table reloadData];
 
-    if (prev_sel.count > 0) {
+    if (want.count > 0) {
         NSIndexSet *rows = [self.filtered_items indexesOfObjectsPassingTest:
             ^BOOL(NSURL *item, NSUInteger idx, BOOL *stop) {
-                return [prev_sel containsObject:item.path];
+                return [want containsObject:item.lastPathComponent];
             }];
         [self.table selectRowIndexes:rows byExtendingSelection:NO];
+        if (reveal && rows.count > 0) [self.table scrollRowToVisible:(NSInteger)rows.firstIndex];
     }
 
     [self update_status_bar];

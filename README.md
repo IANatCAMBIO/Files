@@ -43,6 +43,9 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   showing it moves to /Volumes. If files on it are open, a sheet lists them
   (and the apps using them) and the volume unmounts automatically once
   they are closed
+- Default file viewer in place of Finder: "Show in Finder" from other apps
+  opens Files; File ▸ Restore Finder as Default File Viewer… undoes every
+  change (see Replacing Finder)
 - Address bar (accepts `~` and relative paths), back/forward/up, Open in
   Terminal, show/hide hidden files
 
@@ -84,6 +87,63 @@ make run
 ```
 
 Or double-click `files.app` in `~/Applications` after installing.
+
+## Replacing Finder
+
+On first launch Files makes itself the default file viewer. It does not
+replace or disable Finder, which macOS still needs. Instead it changes four
+settings:
+
+| Setting | Files sets | Effect |
+|---------|------------|--------|
+| `NSGlobalDomain NSFileViewer` | `com.salt.files` | "Show in Finder" / "Reveal in Finder" in other apps (browser downloads, editors, `open -R`) opens Files, with the item selected in its folder |
+| `com.apple.finder CreateDesktop` | `false` | Finder draws no desktop icons |
+| `com.apple.finder QuitMenuItem` | `true` | Finder ▸ Quit Finder exists |
+| LaunchServices `LSHandlers` entry for `public.folder` | `com.salt.files` | Folders opened from other apps (`open ~/Downloads`, Dock folders, Spotlight folder results) open in Files, **after you log out and back in** |
+
+Files quits Finder when it changes Finder's settings. Finder only reads
+them at launch. It stays quit until something asks for it (its Dock icon,
+the Dock's Trash, AirDrop, and so on), and then runs without desktop icons.
+Files also turns Archive Utility's "reveal in Finder" off by default
+(View ▸ Show Finder After Archive Operations).
+
+Files records each setting's original value (or that it was not set)
+before changing it. Every launch re-checks the settings and puts back any
+that something else reset.
+
+macOS refuses to change the default app for folders through its API.
+Files therefore writes the LaunchServices setting directly, the way
+ForkLift does (the `com.apple.launchservices.secure` preferences).
+LaunchServices reads it only at login. After logging back in, check it
+with:
+
+```sh
+swift -e 'import AppKit; print(NSWorkspace.shared.urlForApplication(toOpen: .folder)!)'
+```
+
+The result should end in `files.app/`. If it still shows Finder, this
+macOS version ignores the setting. Everything else keeps working, and
+folders keep opening in Finder.
+
+A revealed folder opens to show its contents. macOS sends reveals as plain
+"open" requests, so Files can't tell them apart. Hidden items are only
+selected while hidden files are shown.
+
+Some things still go to Finder, because macOS gives other apps no way to
+take them:
+- double-clicking a folder inside a Finder window
+- the Finder and Trash icons in the Dock
+- AirDrop and Connect to Server
+- AppleScripts that name Finder
+
+### Uninstalling
+
+Before removing Files, choose **File ▸ Restore Finder as Default File
+Viewer…**. Files writes every recorded setting back exactly as it was,
+turns Archive Utility's reveal back on, and relaunches Finder. Then quit
+Files, delete `~/Applications/files.app`, and log out and back in so
+LaunchServices sends folders to Finder again. The same menu item reads
+**Make Files the Default File Viewer** after a restore, to switch back.
 
 ## Keyboard shortcuts
 
