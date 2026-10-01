@@ -58,7 +58,8 @@ static void *first_responder_ctx = &first_responder_ctx;
 @property (nonatomic, weak)   NSSearchField         *search_field;  /* toolbar search field */
 @property (nonatomic, strong) FilesBookmarksBar     *bookmarks_bar;
 @property (nonatomic, strong) NSView                *browser_area; /* everything below the bar */
-@property (nonatomic, strong) NSSplitView           *pane_split;   /* holds 1 or 2 panes */
+@property (nonatomic, strong) NSSplitViewController *pane_split_vc;  /* holds 1 or 2 panes */
+@property (nonatomic, strong) NSSplitViewItem       *secondary_item; /* second pane's item; nil = single-pane */
 @property (nonatomic, strong) NSSplitViewController *content_split_vc;
 @property (nonatomic, strong) NSSplitViewItem       *sidebar_item;
 @property (nonatomic, strong) FilesInfoSidebar      *info_sidebar;
@@ -67,6 +68,7 @@ static void *first_responder_ctx = &first_responder_ctx;
 @property (nonatomic, strong) FilesBrowserView *primary_browser;
 @property (nonatomic, strong) FilesBrowserView *secondary_browser; /* nil = single-pane */
 @property (nonatomic)         NSInteger         active_pane_index; /* 0 or 1 */
+@property (nonatomic)         BOOL              panes_animating;   /* second pane sliding in or out */
 
 /* Status bar (full-width, below the split) and the floating action button,
  * which is Empty Trash in the Trash and Unmount at an unmountable volume's
@@ -274,21 +276,24 @@ build_layout
     status_sep.autoresizingMask = NSViewWidthSizable | NSViewMaxYMargin;
     [area addSubview:status_sep];
 
-    /* Browser side: pane_split permanently owns the pane(s); single-pane mode
-     * is pane_split with one child, so primary_pane is never reparented. */
+    /* Browser side: pane_split_vc permanently owns the pane(s); single-pane
+     * mode is pane_split_vc with one item, so primary_pane is never
+     * reparented. A split view controller, like the info sidebar's, so the
+     * second pane slides in and out with the same animation. */
     CGFloat split_h = area.bounds.size.height - status_h - 1.0;
     NSView *browser_container = [[NSView alloc]
         initWithFrame:NSMakeRect(0, 0, w, split_h)];
     browser_container.wantsLayer = YES;
 
-    self.pane_split = [[NSSplitView alloc] initWithFrame:browser_container.bounds];
-    self.pane_split.vertical         = YES;
-    self.pane_split.dividerStyle     = NSSplitViewDividerStyleThin;
-    self.pane_split.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    [browser_container addSubview:self.pane_split];
+    self.pane_split_vc = [[NSSplitViewController alloc] init];
+    self.pane_split_vc.splitView.dividerStyle = NSSplitViewDividerStyleThin;
+    NSView *panes = self.pane_split_vc.view;
+    panes.frame            = browser_container.bounds;
+    panes.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [browser_container addSubview:panes];
 
-    self.primary_browser = [self new_browser_with_frame:self.pane_split.bounds];
-    [self.pane_split addSubview:self.primary_browser];
+    self.primary_browser = [self new_browser_with_frame:browser_container.bounds];
+    [self.pane_split_vc addSplitViewItem:[self pane_item:self.primary_browser]];
 
     /* Sidebar side. */
     self.info_sidebar = [[FilesInfoSidebar alloc]
@@ -296,6 +301,7 @@ build_layout
 
     NSViewController *browser_vc = [[NSViewController alloc] init];
     browser_vc.view = browser_container;
+    [browser_vc addChildViewController:self.pane_split_vc];
     NSViewController *sidebar_vc = [[NSViewController alloc] init];
     sidebar_vc.view = self.info_sidebar;
 
@@ -657,8 +663,28 @@ fit_address_bar
 /* ── Dual pane ───────────────────────────────────────────────────────────── */
 
 /*
+ * pane_item: — a split view item for one browser pane of pane_split_vc.
+ *
+ * Inputs:
+ *   browser — the pane's browser view
+ *
+ * Output: new split view item.
+ */
+- (NSSplitViewItem *)
+pane_item:(FilesBrowserView *)browser
+{
+    NSViewController *vc = [[NSViewController alloc] init];
+    vc.view = browser;
+    return [NSSplitViewItem splitViewItemWithViewController:vc];
+}
+
+/*
  * toggle_dual_pane: — switches between single-pane and dual-pane mode. The
- * second pane opens on the same folder as the first.
+ * second pane slides in from the right edge, or back out to it, with the
+ * split view collapse animation the info sidebar uses: it is added
+ * collapsed at half the width, then expanded; on close it is collapsed,
+ * then removed. It opens on the same folder as the first. Ignored while a
+ * slide is under way.
  *
  * Inputs:
  *   sender — menu item or toolbar item (unused)
@@ -666,20 +692,43 @@ fit_address_bar
 - (IBAction)
 toggle_dual_pane:(id)sender
 {
+    if (self.panes_animating) return;
+    self.panes_animating = YES;
+    __weak FilesMainWindow *ws = self;
+
     if (self.secondary_browser) {
+        /* Single-pane from now on; the closing pane only slides out. */
+        NSSplitViewItem *item = self.secondary_item;
         [self.secondary_browser shut_down];
-        [self.secondary_browser removeFromSuperview];
         self.secondary_browser = nil;
+        self.secondary_item    = nil;
         [self set_active_pane:0];
         [self.window makeFirstResponder:self.primary_browser];
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
+            item.animator.collapsed = YES;
+        } completionHandler:^{
+            [ws.pane_split_vc removeSplitViewItem:item];
+            ws.panes_animating = NO;
+        }];
     } else {
-        CGFloat split_w = self.pane_split.bounds.size.width;
+        NSSize size = self.pane_split_vc.view.bounds.size;
         self.secondary_browser = [self new_browser_with_frame:
-            NSMakeRect(0, 0, split_w / 2, self.pane_split.bounds.size.height)];
-        [self.pane_split addSubview:self.secondary_browser];
-        [self.pane_split setPosition:split_w / 2 ofDividerAtIndex:0];
+            NSMakeRect(0, 0, floor(size.width / 2), size.height)];
+        NSSplitViewItem *item = [self pane_item:self.secondary_browser];
+        item.canCollapse = YES;
+        item.collapsed   = YES;
+        [self.pane_split_vc addSplitViewItem:item];
+        self.secondary_item = item;
         [self set_active_pane:0];
         [self.secondary_browser navigate_to:self.primary_browser.current_url];
+        /* Expand on the next pass, once the item is laid out collapsed. */
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
+                item.animator.collapsed = NO;
+            } completionHandler:^{
+                ws.panes_animating = NO;
+            }];
+        });
     }
     [self.window.toolbar validateVisibleItems];
 }

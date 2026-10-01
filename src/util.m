@@ -12,7 +12,6 @@ NSString * const files_pref_hash_validation = @"files.copy.hash_validation";
 NSString * const files_pref_show_hashes     = @"files.show_hashes";
 NSString * const files_pref_large_rows      = @"files.large_rows";
 NSString * const files_pref_simple_copies   = @"files.simple_copies";
-NSString * const files_pref_archive_reveal  = @"files.archive_reveal";
 NSString * const files_pref_default_viewer  = @"files.default_viewer";
 NSString * const files_pref_keep_running    = @"files.keep_running";
 NSString * const files_pref_hidden_columns  = @"files.hidden_columns";
@@ -188,78 +187,100 @@ files_background_queue(void)
 static NSString * const defaults_tool = @"/usr/bin/defaults";
 
 /*
- * sync_prefs_cf — files_sync_prefs for a domain CFPreferences can reach:
- * reads each key from exactly that domain (current user, any host),
- * changes the ones that differ and synchronizes once.
+ * cf_app — the CFPreferences application ID for a domain name.
  *
  * Inputs:
- *   domain   — preferences domain; @"NSGlobalDomain" for the global one
- *   values   — key → wrapped wanted value
- *   previous — if non-nil, receives key → wrapped prior value per change
+ *   domain — preferences domain; @"NSGlobalDomain" for the global one
  *
- * Output: YES if every key now has its wanted value.
+ * Output: kCFPreferencesAnyApplication or the domain itself.
  */
-static BOOL
-sync_prefs_cf(NSString *domain, NSDictionary<NSString *, NSArray *> *values,
-              NSMutableDictionary<NSString *, NSArray *> *previous)
+static CFStringRef
+cf_app(NSString *domain)
 {
-    CFStringRef app = [domain isEqualToString:@"NSGlobalDomain"]
-                      ? kCFPreferencesAnyApplication : (__bridge CFStringRef)domain;
-    NSMutableDictionary<NSString *, NSArray *> *changed = [NSMutableDictionary dictionary];
-    for (NSString *key in values) {
-        id want = values[key].firstObject;  /* nil: remove the key */
-        id have = CFBridgingRelease(CFPreferencesCopyValue((__bridge CFStringRef)key, app,
-                                    kCFPreferencesCurrentUser, kCFPreferencesAnyHost));
-        if (want ? [have isEqual:want] : have == nil) continue;
-        CFPreferencesSetValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)want, app,
-                              kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
-        changed[key] = have ? @[have] : @[];
-    }
-    if (changed.count == 0) return YES;
-    if (!CFPreferencesSynchronize(app, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)) {
-        return NO;
-    }
-    [previous addEntriesFromDictionary:changed];
-    return YES;
+    return [domain isEqualToString:@"NSGlobalDomain"]
+           ? kCFPreferencesAnyApplication : (__bridge CFStringRef)domain;
 }
 
 /*
- * files_sync_prefs — read once, write only differences: CFPreferences, or
- * the defaults tool for a sandboxed app's container.
+ * is_container_domain — whether a domain belongs to a sandboxed app, whose
+ * settings live in its container and are reached through the defaults
+ * tool. Only a container known to be absent means an ordinary domain:
+ * without Full Disk Access the check itself can be refused (EPERM), and a
+ * sandboxed app's settings must not be written beside its container.
+ *
+ * Inputs:
+ *   domain — preferences domain
+ *
+ * Output: YES unless ~/Library/Containers/<domain> is known not to exist.
+ */
+static BOOL
+is_container_domain(NSString *domain)
+{
+    NSString *container = [NSString stringWithFormat:@"%@/Library/Containers/%@",
+                           NSHomeDirectory(), domain];
+    struct stat st;
+    return !(lstat(container.fileSystemRepresentation, &st) != 0 && errno == ENOENT);
+}
+
+/*
+ * files_read_prefs — current values, CFPreferences or `defaults export`.
+ * Inputs/output are documented in util.h.
+ */
+NSDictionary<NSString *, NSArray *> *
+files_read_prefs(NSString *domain, NSArray<NSString *> *keys)
+{
+    NSMutableDictionary<NSString *, NSArray *> *found = [NSMutableDictionary dictionary];
+    if (!is_container_domain(domain)) {
+        for (NSString *key in keys) {
+            id have = CFBridgingRelease(CFPreferencesCopyValue((__bridge CFStringRef)key,
+                                        cf_app(domain), kCFPreferencesCurrentUser,
+                                        kCFPreferencesAnyHost));
+            found[key] = have ? @[have] : @[];
+        }
+        return found;
+    }
+
+    NSData *data = nil;
+    if (!files_run_tool(defaults_tool, @[@"export", domain, @"-"], FILES_TOOL_TIMEOUT, &data)) {
+        return nil;
+    }
+    NSDictionary *current = [NSPropertyListSerialization propertyListWithData:data
+                                                                      options:0
+                                                                       format:NULL
+                                                                        error:nil];
+    if (![current isKindOfClass:NSDictionary.class]) return nil;
+    for (NSString *key in keys) {
+        found[key] = current[key] ? @[current[key]] : @[];
+    }
+    return found;
+}
+
+/*
+ * files_sync_prefs — read once (files_read_prefs), write only differences:
+ * CFPreferences, or the defaults tool for a sandboxed app's container.
  * Inputs/output are documented in util.h.
  */
 BOOL
 files_sync_prefs(NSString *domain, NSDictionary<NSString *, NSArray *> *values,
                  NSMutableDictionary<NSString *, NSArray *> *previous)
 {
-    /* Only a container known to be absent means an ordinary domain: without
-     * Full Disk Access the check itself can be refused (EPERM), and a
-     * sandboxed app's settings must not be written beside its container. */
-    NSString *container = [NSString stringWithFormat:@"%@/Library/Containers/%@",
-                           NSHomeDirectory(), domain];
-    struct stat st;
-    if (lstat(container.fileSystemRepresentation, &st) != 0 && errno == ENOENT) {
-        return sync_prefs_cf(domain, values, previous);
-    }
+    NSDictionary<NSString *, NSArray *> *current = files_read_prefs(domain, values.allKeys);
+    if (!current) return NO;
+    BOOL cf = !is_container_domain(domain);
 
-    NSData *data = nil;
-    if (!files_run_tool(defaults_tool, @[@"export", domain, @"-"], FILES_TOOL_TIMEOUT, &data)) {
-        return NO;
-    }
-    NSDictionary *current = [NSPropertyListSerialization propertyListWithData:data
-                                                                      options:0
-                                                                       format:NULL
-                                                                        error:nil];
-    if (![current isKindOfClass:NSDictionary.class]) return NO;
-
+    NSMutableDictionary<NSString *, NSArray *> *changed = [NSMutableDictionary dictionary];
     BOOL ok = YES;
     for (NSString *key in values) {
         id want = values[key].firstObject;  /* nil: remove the key */
-        id have = current[key];
+        id have = current[key].firstObject;
         if (want ? [have isEqual:want] : have == nil) continue;
 
-        BOOL wrote;
-        if (want) {
+        BOOL wrote = YES;
+        if (cf) {
+            CFPreferencesSetValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)want,
+                                  cf_app(domain), kCFPreferencesCurrentUser,
+                                  kCFPreferencesAnyHost);
+        } else if (want) {
             /* `defaults write` parses a value starting with "<" as a property
              * list, so any type (string, bool, number, …) round-trips. */
             NSData *xml = [NSPropertyListSerialization dataWithPropertyList:want
@@ -274,9 +295,15 @@ files_sync_prefs(NSString *domain, NSDictionary<NSString *, NSArray *> *values,
             wrote = files_run_tool(defaults_tool, @[@"delete", domain, key],
                                    FILES_TOOL_TIMEOUT, NULL);
         }
-        if (wrote && previous) previous[key] = have ? @[have] : @[];
+        if (wrote) changed[key] = current[key];
         ok = wrote && ok;
     }
+    /* CFPreferences changes are kept only once synchronized. */
+    if (cf && changed.count > 0 &&
+        !CFPreferencesSynchronize(cf_app(domain), kCFPreferencesCurrentUser, kCFPreferencesAnyHost)) {
+        return NO;
+    }
+    [previous addEntriesFromDictionary:changed];
     return ok;
 }
 

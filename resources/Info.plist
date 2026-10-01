@@ -3,13 +3,14 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>files</string>
+    <string>Files</string>
     <key>CFBundleDisplayName</key>
     <string>Files</string>
     <key>CFBundleIdentifier</key>
-    <string>com.salt.files</string>
-    <!-- CFBundleShortVersionString and CFBundleVersion (from VERSION) and
-         FilesBuildDate (UTC, ISO 8601) are added by the Makefile. -->
+    <string>com.cambio.files</string>
+    <!-- CFBundleExecutable (the Makefile's APP), CFBundleShortVersionString
+         and CFBundleVersion (from VERSION) and FilesBuildDate (UTC,
+         ISO 8601) are added by the Makefile. -->
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleSignature</key>

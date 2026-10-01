@@ -72,10 +72,11 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   read (no permission, a disconnected server) says so in the status bar.
   Folders are listed in the background, so a slow or unresponsive network
   folder never freezes the window
-- View ▸ Show Finder After Archive Operations (off by default) keeps
-  Archive Utility's archive-reveal-after / dearchive-reveal-after in step
-  with the menu (checked at every launch, including the first), so by
-  default expanding or creating an archive does not pop open a Finder window
+- While Files is the default file browser, expanding or creating an
+  archive does not pop open a Finder window: Archive Utility's
+  archive-reveal-after / dearchive-reveal-after are off (checked at every
+  launch, including the first) and come back on with Set default file
+  browser to Finder
 - Mounts menu: mounted volumes, then cloud storage (iCloud Drive and
   File Provider accounts such as Google Drive); Go menu: Home, Desktop,
   Downloads, Documents and Trash
@@ -86,12 +87,12 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   (and the apps using them) and the volume unmounts automatically once
   they are closed
 - Default file viewer in place of Finder: "Show in Finder" from other apps
-  opens Files; setting Preferences ▸ Default file browser to Finder undoes
+  opens Files; Preferences ▸ Set default file browser to Finder undoes
   every change (see Replacing Finder)
 - Preferences window (Files ▸ Preferences…, ⌘,): View has the View-menu
-  preferences; Integration has the default file browser (Files or
-  Finder), Keep Files running for faster startup (see Keeping Files
-  running) and Show Finder After Archive Operations
+  preferences; Integration has the default file browser (Set default
+  file browser to Files / to Finder — each opens a change log) and Keep
+  Files running for faster startup (see Keeping Files running)
 - About Files shows the version (from the `VERSION` file), build date,
   and links to camb.io and the license
 - Address bar (accepts `~` and relative paths), back/forward/up, Open in
@@ -108,7 +109,7 @@ A minimalist macOS file manager written in Objective-C + AppKit.
 make install
 ```
 
-This builds the app bundle and copies it to `~/Applications/files.app` (per-user; no `sudo` needed). Re-running `make install` replaces the previous copy.
+This builds the app bundle and copies it to `~/Applications/Files.app` (per-user; no `sudo` needed). Re-running `make install` replaces the previous copy.
 
 To check a build first, `make test` runs the copy-engine tests (see BUILD.md).
 
@@ -117,7 +118,7 @@ To check a build first, `make test` runs the copy-engine tests (see BUILD.md).
 Files expects Full Disk Access (to show protected folders such as the Trash
 and to change Archive Utility's settings). On launch it checks, and if access
 is missing it explains how to grant it: System Settings ▸ Privacy & Security ▸
-Full Disk Access, turn on Files (or add `~/Applications/files.app` with +),
+Full Disk Access, turn on Files (or add `~/Applications/Files.app` with +),
 then Quit & Reopen.
 
 The build signs with your first "Apple Development" certificate if you have
@@ -136,26 +137,25 @@ make install CODESIGN_IDENTITY="Apple Development: Your Name (TEAMID)"
 make run
 ```
 
-Or double-click `files.app` in `~/Applications` after installing.
+Or double-click `Files.app` in `~/Applications` after installing.
 
 ## Replacing Finder
 
 On first launch Files makes itself the default file viewer. It does not
-replace or disable Finder, which macOS still needs. Instead it changes four
+replace or disable Finder, which macOS still needs. Instead it changes these
 settings:
 
 | Setting | Files sets | Effect |
 |---------|------------|--------|
-| `NSGlobalDomain NSFileViewer` | `com.salt.files` | "Show in Finder" / "Reveal in Finder" in other apps (browser downloads, editors, `open -R`) opens Files, with the item selected in its folder |
+| `NSGlobalDomain NSFileViewer` | `com.cambio.files` | "Show in Finder" / "Reveal in Finder" in other apps (browser downloads, editors, `open -R`) opens Files, with the item selected in its folder |
 | `com.apple.finder CreateDesktop` | `false` | Finder draws no desktop icons |
 | `com.apple.finder QuitMenuItem` | `true` | Finder ▸ Quit Finder exists |
-| LaunchServices `LSHandlers` entry for `public.folder` | `com.salt.files` | Folders opened from other apps (`open ~/Downloads`, Dock folders, Spotlight folder results) open in Files, **after you log out and back in** |
+| LaunchServices `LSHandlers` entry for `public.folder` | `com.cambio.files` | Folders opened from other apps (`open ~/Downloads`, Dock folders, Spotlight folder results) open in Files, **after you log out and back in** |
+| `com.apple.archiveutility dearchive-reveal-after`, `archive-reveal-after` | `false` | Archive Utility opens no Finder window on what it expands or creates (needs Full Disk Access; set back to `true`, Archive Utility's default, when Finder is made the default again) |
 
 Files quits Finder when it changes Finder's settings. Finder only reads
 them at launch. It stays quit until something asks for it (its Dock icon,
 the Dock's Trash, AirDrop, and so on), and then runs without desktop icons.
-Files also turns Archive Utility's "reveal in Finder" off by default
-(View ▸ Show Finder After Archive Operations).
 
 Files records each setting's original value (or that it was not set)
 before changing it. Every launch re-checks the settings and puts back any
@@ -171,7 +171,7 @@ with:
 swift -e 'import AppKit; print(NSWorkspace.shared.urlForApplication(toOpen: .folder)!)'
 ```
 
-The result should end in `files.app/`. If it still shows Finder, this
+The result should end in `Files.app/`. If it still shows Finder, this
 macOS version ignores the setting. Everything else keeps working, and
 folders keep opening in Finder.
 
@@ -188,13 +188,23 @@ take them:
 
 ### Uninstalling
 
-Before removing Files, open **Files ▸ Preferences…**, set **Default file
-browser** to **Finder**, and turn off **Keep Files running for faster
+Before removing Files, open **Files ▸ Preferences…**, click **Set default
+file browser to Finder**, and turn off **Keep Files running for faster
 startup** so it is no longer a login item. Files writes every recorded setting back exactly as it was,
 turns Archive Utility's reveal back on, and relaunches Finder. Then quit
-Files, delete `~/Applications/files.app`, and log out and back in so
-LaunchServices sends folders to Finder again. Setting Default file browser
-back to Files switches back.
+Files, delete `~/Applications/Files.app`, and log out and back in so
+LaunchServices sends folders to Finder again. **Set default file browser
+to Files** switches back.
+
+Either button opens a change log (in Console, from
+`~/Library/Logs/Files/default-file-browser-<date>.log`) listing every
+setting it checked or changed: its value before and after, the Terminal
+command that makes the same change (`defaults write …`, or PlistBuddy and
+`defaults … -array-add` for the LaunchServices folder handler), and
+whether the new value was confirmed by reading it back. The summary at
+the end lists each check with the `defaults read` command that shows it.
+Clicking the button for the current choice re-checks and repairs every
+setting.
 
 ## Keeping Files running
 
@@ -216,7 +226,7 @@ behave like Finder:
 Only opening windows gets faster; browsing within a window is the same.
 Turning the option off removes the login item. The login item points at
 the copy of Files that was running when you turned the option on, so turn
-it on from `~/Applications/files.app`, not from a build in the project
+it on from `~/Applications/Files.app`, not from a build in the project
 folder.
 
 ## Keyboard shortcuts

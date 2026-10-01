@@ -15,7 +15,6 @@ extern NSString * const files_pref_hash_validation; /* SHA-256 verify copies */
 extern NSString * const files_pref_show_hashes;     /* hashes in Get Info */
 extern NSString * const files_pref_large_rows;      /* double-height file rows */
 extern NSString * const files_pref_simple_copies;   /* copy/move without the progress panel */
-extern NSString * const files_pref_archive_reveal;  /* Archive Utility reveals results in Finder */
 extern NSString * const files_pref_default_viewer;  /* Files replaces Finder as file viewer (default on) */
 extern NSString * const files_pref_keep_running;    /* stay running with no windows; open at login */
 extern NSString * const files_pref_search_this_mac; /* search the whole Mac, not the current folder */
@@ -162,6 +161,23 @@ BOOL files_has_full_disk_access(void);
  */
 BOOL files_sync_prefs(NSString *domain, NSDictionary<NSString *, NSArray *> *values,
                       NSMutableDictionary<NSString *, NSArray *> *previous);
+
+/*
+ * files_read_prefs — reads keys from another app's (or the global)
+ * preferences domain the way files_sync_prefs does (CFPreferences, or
+ * `defaults export` for a sandboxed app's container). Blocks; call off
+ * the main thread.
+ *
+ * Inputs:
+ *   domain — preferences domain, as for files_sync_prefs
+ *   keys   — keys to read
+ *
+ * Output: key → wrapped current value (@[value], or @[] if absent) for
+ *         every key; nil if the domain could not be read (typically: no
+ *         Full Disk Access).
+ */
+NSDictionary<NSString *, NSArray *> *files_read_prefs(NSString *domain, NSArray<NSString *> *keys);
+
 
 /*
  * files_format_bytes — formats a byte count the way Finder does

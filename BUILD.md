@@ -39,11 +39,11 @@ are part of libSystem and need no extra linking.
 
 | Target          | Command         | Description                            |
 |-----------------|-----------------|----------------------------------------|
-| Build (default) | `make`          | Compiles and assembles `files.app`     |
+| Build (default) | `make`          | Compiles and assembles `Files.app`     |
 | Run             | `make run`      | Builds then opens the app with `open`  |
-| Install         | `make install`  | Replaces `~/Applications/files.app` with the new build |
+| Install         | `make install`  | Replaces `~/Applications/Files.app` with the new build |
 | Test            | `make test`     | Builds and runs the copy-engine tests (`tests/`) |
-| Clean           | `make clean`    | Removes `build/` and `files.app`       |
+| Clean           | `make clean`    | Removes `build/` and `Files.app`       |
 
 `make test` links each `tests/*_test.m` against the app's objects (all but
 `main.o`) and runs it. `file_ops_test` exercises the copy engine on a scratch
@@ -57,14 +57,14 @@ signing identity.
 
 ## Output
 
-The build produces `files.app/` in the project root:
+The build produces `Files.app/` in the project root:
 
 ```
-files.app/
+Files.app/
 └── Contents/
     ├── Info.plist
     ├── MacOS/
-    │   └── files          ← compiled binary
+    │   └── Files          ← compiled binary
     └── Resources/
         └── folder.png, documents.png, ribbon.png, git96.png  ← git badge
 ```

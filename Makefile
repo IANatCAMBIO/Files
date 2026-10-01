@@ -1,4 +1,4 @@
-APP      = files
+APP      = Files
 BUNDLE   = $(APP).app
 CONTENTS = $(BUNDLE)/Contents
 MACOS    = $(CONTENTS)/MacOS
@@ -54,8 +54,9 @@ DEPS     = $(OBJS:.o=.d)
 
 all: $(BUNDLE)
 
-# Info.plist gets the version from VERSION and the time the bundle was
-# assembled as FilesBuildDate (UTC), both shown in the About panel.
+# Info.plist gets the executable's name from APP, the version from VERSION
+# and the time the bundle was assembled as FilesBuildDate (UTC), both shown
+# in the About panel.
 # Every image in images/ (.png, .icns) is copied into Contents/Resources,
 # where the app loads it by name.
 IMAGES   = $(wildcard images/*.png images/*.icns)
@@ -63,6 +64,7 @@ IMAGES   = $(wildcard images/*.png images/*.icns)
 $(BUNDLE): $(MACOS)/$(APP) resources/Info.plist VERSION $(IMAGES)
 	@rm -rf $(RSRC) && mkdir -p $(RSRC)  # fresh, so removed images do not linger
 	@cp resources/Info.plist $(CONTENTS)/Info.plist
+	@plutil -replace CFBundleExecutable -string "$(APP)" $(CONTENTS)/Info.plist
 	@plutil -replace CFBundleShortVersionString -string "$(VERSION)" $(CONTENTS)/Info.plist
 	@plutil -replace CFBundleVersion -string "$(VERSION)" $(CONTENTS)/Info.plist
 	@plutil -replace FilesBuildDate -string "$$(date -u +%Y-%m-%dT%H:%M:%SZ)" $(CONTENTS)/Info.plist

@@ -14,6 +14,12 @@
  *   LaunchServices LSHandlers public.folder → Files — folders opened from
  *                                    other apps (`open ~/Downloads`, Dock
  *                                    folders, Spotlight) open in Files
+ *   com.apple.archiveutility dearchive-reveal-after, archive-reveal-after
+ *                                  = NO — Archive Utility opens no Finder
+ *                                    window on what it creates or expands
+ *                                    (set back to YES, its own default,
+ *                                    rather than recorded; needs Full Disk
+ *                                    Access, as Archive Utility is sandboxed)
  * The LaunchServices API rejects public.folder (paramErr), so the
  * LSHandlers entry is written directly, as ForkLift does; LaunchServices
  * reads it at login, so it (and its removal) takes effect after logging
@@ -42,19 +48,24 @@ void files_default_viewer_sync(void (^done)(BOOL ok));
 
 /*
  * files_default_viewer_choose — makes Files (files = YES) or Finder the
- * default file viewer, for Preferences ▸ Integration ▸ Default file
- * browser. Choosing Finder asks for confirmation, then turns
+ * default file viewer, for the Preferences ▸ Integration "Set default file
+ * browser to …" buttons. Choosing Finder asks for confirmation, then turns
  * files_pref_default_viewer off (which writes back every setting Files
- * replaced) and turns
- * files_pref_archive_reveal on (Archive Utility's own default); choosing
- * Files reverses both. The outcome is reported in an alert: after a
- * restore, Files can be uninstalled. Does nothing but call finished when
- * the choice is already in effect. Main thread only.
+ * replaced and turns Archive Utility's reveal-in-Finder back on); choosing
+ * Files reverses it. Runs even when the choice is
+ * already in effect, re-checking and repairing every setting.
+ *
+ * Every step is logged — the setting, its value before and after, the
+ * equivalent Terminal command (or that none was needed), and whether the
+ * value read back as wanted — to
+ * ~/Library/Logs/Files/default-file-browser-<date>.log, which is then
+ * opened; a summary at the end lists every check with the command that
+ * shows it. If a check failed an alert also says so. Main thread only.
  *
  * Inputs:
  *   files    — YES for Files, NO for Finder
  *   window   — window for the alert sheets; nil = app-modal alerts
  *   finished — called on the main queue once the choice was applied (its
- *              result alert shown) or cancelled; may be nil
+ *              log opened) or cancelled; may be nil
  */
 void files_default_viewer_choose(BOOL files, NSWindow *window, void (^finished)(void));

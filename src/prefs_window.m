@@ -5,9 +5,6 @@
 /* Width of wrapped explanatory text under a control. */
 static const CGFloat note_width = 320.0;
 
-/* Default file browser pop-up item tags. */
-enum { browser_files = 0, browser_finder = 1 };
-
 /*
  * files_view_pref_groups — the View menu's preference items.
  * Inputs/output are documented in prefs_window.h.
@@ -21,9 +18,8 @@ files_view_pref_groups(void)
            @[@"Large Rows",       files_pref_large_rows],
            @[@"Show Folder Sizes", files_pref_folder_sizes],
            @[@"Show Used Disk Space", files_pref_show_used_space] ],
-        @[ @[@"Simple Copies",                        files_pref_simple_copies],
-           @[@"Validate Copies with SHA-256",         files_pref_hash_validation],
-           @[@"Show Finder After Archive Operations", files_pref_archive_reveal] ],
+        @[ @[@"Simple Copies",                files_pref_simple_copies],
+           @[@"Validate Copies with SHA-256", files_pref_hash_validation] ],
     ];
 }
 
@@ -64,7 +60,9 @@ note_label(NSString *text)
 
 @interface FilesPrefsWindow ()
 @property (nonatomic, strong) NSMutableArray<NSButton *> *pref_boxes;  /* identifier = pref key */
-@property (nonatomic, strong) NSPopUpButton              *browser_popup;
+@property (nonatomic, strong) NSTextField                *browser_label;  /* current choice */
+@property (nonatomic, strong) NSButton                   *files_button;
+@property (nonatomic, strong) NSButton                   *finder_button;
 @end
 
 @implementation FilesPrefsWindow
@@ -146,9 +144,7 @@ pref_box:(NSString *)title key:(NSString *)key
 
 /*
  * build_content — lays out the View and Integration sections in a
- * vertical stack and sizes the window to fit. Integration also holds Show
- * Finder After Archive Operations, which the View menu lists with the
- * view preferences.
+ * vertical stack and sizes the window to fit.
  */
 - (void)
 build_content
@@ -157,42 +153,36 @@ build_content
     NSTextField *view_heading        = section_label(@"View");
     NSTextField *integration_heading = section_label(@"Integration");
 
-    /* The View menu's items, except Show Finder After Archive Operations,
-     * which changes another app and so is listed under Integration. */
-    NSString *archive_title = nil;
     [rows addObject:view_heading];
     for (NSArray<NSArray<NSString *> *> *group in files_view_pref_groups()) {
         for (NSArray<NSString *> *item in group) {
-            if ([item[1] isEqualToString:files_pref_archive_reveal]) {
-                archive_title = item[0];
-                continue;
-            }
             [rows addObject:[self pref_box:item[0] key:item[1]]];
         }
     }
 
     [rows addObject:integration_heading];
-    self.browser_popup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    [self.browser_popup addItemsWithTitles:@[@"Files", @"Finder"]];
-    [self.browser_popup itemAtIndex:0].tag = browser_files;
-    [self.browser_popup itemAtIndex:1].tag = browser_finder;
-    self.browser_popup.target = self;
-    self.browser_popup.action = @selector(choose_browser:);
-    NSStackView *browser_row = [NSStackView stackViewWithViews:@[
-        [NSTextField labelWithString:@"Default file browser:"], self.browser_popup]];
-    [rows addObject:browser_row];
+    self.browser_label = [NSTextField labelWithString:@""];
+    self.files_button  = [NSButton buttonWithTitle:@"Set default file browser to Files"
+                                            target:self
+                                            action:@selector(choose_browser:)];
+    self.finder_button = [NSButton buttonWithTitle:@"Set default file browser to Finder"
+                                            target:self
+                                            action:@selector(choose_browser:)];
+    [rows addObject:self.browser_label];
+    [rows addObject:self.files_button];
+    [rows addObject:self.finder_button];
     [rows addObject:note_label(@"\"Show in Finder\" and folders opened from other apps "
-                                "go to this app. Folders switch over after you log out "
-                                "and back in.")];
+                                "go to the default file browser, and Archive Utility opens "
+                                "a Finder window on what it creates or expands only while "
+                                "Finder is the default. Folders switch over after "
+                                "you log out and back in. Each button opens a log of every "
+                                "setting it checked or changed, the matching Terminal "
+                                "command, and whether the change took effect.")];
 
     [rows addObject:[self pref_box:@"Keep Files running for faster startup"
                                key:files_pref_keep_running]];
     [rows addObject:note_label(@"Files opens at login and stays open when its last window "
                                 "closes, so new windows appear instantly.")];
-
-    [rows addObject:[self pref_box:archive_title key:files_pref_archive_reveal]];
-    [rows addObject:note_label(@"Archive Utility opens a Finder window on what it creates "
-                                "or expands. Changing it needs Full Disk Access.")];
 
     NSStackView *stack = [NSStackView stackViewWithViews:rows];
     stack.orientation = NSUserInterfaceLayoutOrientationVertical;
@@ -220,8 +210,8 @@ refresh
         box.state = [ud boolForKey:box.identifier] ? NSControlStateValueOn
                                                    : NSControlStateValueOff;
     }
-    [self.browser_popup selectItemWithTag:[ud boolForKey:files_pref_default_viewer]
-                                          ? browser_files : browser_finder];
+    self.browser_label.stringValue = [NSString stringWithFormat:@"Default file browser: %@",
+                                      [ud boolForKey:files_pref_default_viewer] ? @"Files" : @"Finder"];
 }
 
 /*
@@ -239,19 +229,23 @@ toggle_pref_box:(NSButton *)sender
 }
 
 /*
- * choose_browser: — makes the chosen app the default file browser through
- * files_default_viewer_choose (confirming a switch to Finder); the pop-up
- * is reset from the preference afterwards, so a cancelled switch shows the
- * unchanged choice.
+ * choose_browser: — makes the clicked button's app the default file
+ * browser through files_default_viewer_choose (confirming a switch to
+ * Finder; the change log opens when it is done). Both buttons are disabled
+ * until it finishes, so changes never overlap.
  *
  * Inputs:
- *   sender — the default file browser pop-up
+ *   sender — files_button or finder_button
  */
 - (void)
-choose_browser:(NSPopUpButton *)sender
+choose_browser:(NSButton *)sender
 {
+    self.files_button.enabled  = NO;
+    self.finder_button.enabled = NO;
     __weak FilesPrefsWindow *ws = self;
-    files_default_viewer_choose(sender.selectedTag == browser_files, self.window, ^{
+    files_default_viewer_choose(sender == self.files_button, self.window, ^{
+        ws.files_button.enabled  = YES;
+        ws.finder_button.enabled = YES;
         [ws refresh];
     });
 }

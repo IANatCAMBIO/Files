@@ -10,17 +10,11 @@
 
 @interface FilesAppDelegate () <NSMenuDelegate, NSMenuItemValidation>
 @property (nonatomic, strong) NSMutableArray<FilesMainWindow *> *windows;  /* open browser windows */
-@property (nonatomic, strong) NSNumber *archive_reveal_attempted;  /* value tried this session */
 @property (nonatomic, strong) NSNumber *keep_running_applied;      /* login item state applied */
 @property (nonatomic, assign) BOOL launched;  /* applicationDidFinishLaunching: has run */
 @property (nonatomic, assign) BOOL synced;    /* sync_integrations has run */
 @property (nonatomic, assign) BOOL fda_asked; /* the launch Full Disk Access prompt was shown */
 @end
-
-/* Archive Utility's preferences domain and the "reveal in Finder after
- * archiving / expanding" keys View ▸ Show Finder After Archive Operations
- * controls. */
-static NSString * const archive_utility_domain = @"com.apple.archiveutility";
 
 @implementation FilesAppDelegate
 
@@ -142,18 +136,16 @@ run_checks
 
 /*
  * sync_integrations — silently brings the settings Files manages outside
- * itself in line with its preferences, re-reading each one: Archive
- * Utility (sync_archive_utility_reporting:), Finder / default file viewer
- * (files_default_viewer_sync; the first launch takes over from Finder, as
- * files_pref_default_viewer is on by default, and later ones repair or
- * keep restored), and the login item (sync_keep_running_reporting:).
+ * itself in line with its preferences, re-reading each one: Finder /
+ * default file viewer and Archive Utility (files_default_viewer_sync; the
+ * first launch takes over from Finder, as files_pref_default_viewer is on
+ * by default, and later ones repair or keep restored), and the login item
+ * (sync_keep_running_reporting:).
  */
 - (void)
 sync_integrations
 {
-    self.archive_reveal_attempted = nil;
-    self.keep_running_applied     = nil;
-    [self sync_archive_utility_reporting:NO];
+    self.keep_running_applied = nil;
     files_default_viewer_sync(nil);
     [self sync_keep_running_reporting:NO];
     self.synced = YES;
@@ -172,7 +164,6 @@ sync_integrations
 prefs_changed
 {
     if (!self.synced) return;
-    [self sync_archive_utility_reporting:YES];
     [self sync_keep_running_reporting:YES];
 }
 
@@ -242,48 +233,6 @@ ask_login_item_approval
     [alert addButtonWithTitle:@"Not Now"];
     files_present_alert(alert, [self front_window].window, ^(NSModalResponse resp) {
         if (resp == NSAlertFirstButtonReturn) [SMAppService openSystemSettingsLoginItems];
-    });
-}
-
-/*
- * sync_archive_utility_reporting: — makes Archive Utility's
- * dearchive-reveal-after and archive-reveal-after equal
- * files_pref_archive_reveal (off by default), so the View menu item always
- * describes what Archive Utility will actually do. Runs with
- * sync_integrations — at every launch, including the first, which applies
- * the default — and whenever the preference changes. files_sync_prefs
- * reads Archive Utility's real values and writes only what differs
- * (missing keys included), on files_background_queue(); nothing is
- * cached, so values changed or reset elsewhere are corrected at the next
- * sync_integrations. This needs Full Disk Access (Archive Utility is
- * sandboxed), which run_checks prompts for.
- *
- * Each value is attempted at most once until sync_integrations re-checks,
- * so the frequent defaults notifications never re-run (or re-alert) it.
- *
- * Inputs:
- *   report — YES to prompt for Full Disk Access if it fails (the user
- *            toggled the option); NO from sync_integrations, where
- *            run_checks has already prompted
- */
-- (void)
-sync_archive_utility_reporting:(BOOL)report
-{
-    BOOL want = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_archive_reveal];
-    if (self.archive_reveal_attempted && self.archive_reveal_attempted.boolValue == want) return;
-    self.archive_reveal_attempted = @(want);
-
-    dispatch_async(files_background_queue(), ^{
-        BOOL ok = files_sync_prefs(archive_utility_domain,
-                                   @{ @"dearchive-reveal-after": @[@(want)],
-                                      @"archive-reveal-after":   @[@(want)] },
-                                   nil);
-        if (ok || !report) return;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self prompt_full_disk_access:
-                @"Files could not change Archive Utility's setting. Changing another "
-                 "app's settings requires Full Disk Access."];
-        });
     });
 }
 

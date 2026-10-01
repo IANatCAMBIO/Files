@@ -12,7 +12,7 @@
 #include <fts.h>
 
 /* Custom pasteboard type used to record whether the copy was a cut. */
-static NSString * const cut_flag_type = @"com.salt.files.cut-flag";
+static NSString * const cut_flag_type = @"com.cambio.files.cut-flag";
 
 /* ── C helpers ──────────────────────────────────────────────────────────── */
 
