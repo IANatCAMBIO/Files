@@ -1,5 +1,4 @@
 #import "info_sidebar.h"
-#import "git_info.h"
 #import "util.h"
 #import <QuickLookThumbnailing/QuickLookThumbnailing.h>
 
@@ -217,9 +216,10 @@ request_thumbnail:(NSURL *)url
 
 /*
  * show_url: — shows the QL thumbnail and metadata for a single item.
- * Immediately sets the item's icon as a placeholder, then replaces it with
- * the QL thumbnail when the system cache delivers it (git working trees
- * keep the git-badged icon).
+ * Immediately sets the item's icon, then, for files and packages, replaces
+ * it with the QL thumbnail when the system cache delivers it. A plain
+ * folder keeps its icon: its thumbnail would be that icon anyway (minus
+ * the git badge of a working tree).
  *
  * Inputs:
  *   url — file-system URL of the item to inspect
@@ -232,7 +232,8 @@ show_url:(NSURL *)url
     NSDictionary<NSURLResourceKey, id> *res =
         [url resourceValuesForKeys:@[
             NSURLNameKey, NSURLLocalizedTypeDescriptionKey, NSURLIsDirectoryKey,
-            NSURLFileSizeKey, NSURLCreationDateKey, NSURLContentModificationDateKey,
+            NSURLIsPackageKey, NSURLFileSizeKey, NSURLCreationDateKey,
+            NSURLContentModificationDateKey,
         ] error:nil];
 
     _name_label.stringValue = res[NSURLNameKey] ?: url.lastPathComponent ?: @"";
@@ -248,10 +249,9 @@ show_url:(NSURL *)url
     _row_vals[row_modified].stringValue =
         files_format_date(res[NSURLContentModificationDateKey], NSDateFormatterMediumStyle);
 
-    /* ── Immediate placeholder icon, then async QL thumbnail — except for a
-     * git working tree, whose Quick Look thumbnail lacks the git badge. ── */
     _preview_view.image = files_icon_for_url(url, 128);
-    if (!files_is_git_repo(url)) [self request_thumbnail:url];
+    BOOL plain_folder = [res[NSURLIsDirectoryKey] boolValue] && ![res[NSURLIsPackageKey] boolValue];
+    if (!plain_folder) [self request_thumbnail:url];
 }
 
 /*

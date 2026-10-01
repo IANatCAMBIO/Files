@@ -8,26 +8,10 @@
 #include <stdatomic.h>
 
 /* ── layout constants ────────────────────────────────────────────────── */
-static const CGFloat panel_width    = 360.0;
-static const CGFloat row_h          = 22.0;
-static const CGFloat label_w        = 110.0;
-static const CGFloat margin         = 16.0;
-static const CGFloat icon_size      = 64.0;
-static const CGFloat small_label_h  = 11.0; /* height of per-popup sub-labels */
-static const CGFloat copy_w         = 30.0; /* width of "copy" link button */
-static const CGFloat copy_gap       =  4.0; /* gap between hash field and copy btn */
-static const CGFloat git_sep_gap    =  8.0; /* space for the separator above Git rows */
-
-/* Indices into the row_keys table built in -init. The Git section (a
- * header, then its rows) comes last, below the checkboxes, so shrinking
- * the panel hides it. */
-enum {
-    row_kind, row_size, row_where, row_created, row_modified,
-    row_permissions, row_owner, row_group, row_sha256, row_md5,
-    row_git_header, row_branch, row_pushed, row_remote,
-    row_count
-};
-static const NSUInteger git_row_count = row_count - row_git_header;
+static const CGFloat panel_width = 360.0;
+static const CGFloat label_w     = 110.0;
+static const CGFloat margin      = 16.0;
+static const CGFloat icon_size   = 64.0;
 
 /* Tags on the two "copy" buttons; copy_hash_action: selects the field by tag. */
 enum {
@@ -38,48 +22,36 @@ enum {
 /* ── row builder helpers ─────────────────────────────────────────────── */
 
 /*
- * make_label — creates a right-aligned, bold label for the key column.
+ * make_label — the key-column label of a row: small, bold, secondary.
  *
  * Inputs:
- *   text  — label text
- *   frame — frame rect
+ *   text — label text
  *
  * Output: configured NSTextField.
  */
 static NSTextField *
-make_label(NSString *text, NSRect frame)
+make_label(NSString *text)
 {
-    NSTextField *tf = [[NSTextField alloc] initWithFrame:frame];
-    tf.stringValue       = text;
-    tf.editable          = NO;
-    tf.bordered          = NO;
-    tf.drawsBackground   = NO;
-    tf.alignment         = NSTextAlignmentRight;
-    tf.font              = [NSFont boldSystemFontOfSize:NSFont.smallSystemFontSize];
-    tf.textColor         = NSColor.secondaryLabelColor;
-    tf.lineBreakMode     = NSLineBreakByClipping;
+    NSTextField *tf = [NSTextField labelWithString:text];
+    tf.font         = [NSFont boldSystemFontOfSize:NSFont.smallSystemFontSize];
+    tf.textColor    = NSColor.secondaryLabelColor;
     return tf;
 }
 
 /*
- * make_value — creates a left-aligned value text field.
- *
- * Inputs:
- *   frame — frame rect
+ * make_value — a row's value field: small text, middle-truncated, and
+ * willing to shrink to the panel's width rather than widen it.
  *
  * Output: configured NSTextField.
  */
 static NSTextField *
-make_value(NSRect frame)
+make_value(void)
 {
-    NSTextField *tf = [[NSTextField alloc] initWithFrame:frame];
-    tf.stringValue       = @"";
-    tf.editable          = NO;
-    tf.bordered          = NO;
-    tf.drawsBackground   = NO;
-    tf.alignment         = NSTextAlignmentLeft;
-    tf.font              = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
-    tf.lineBreakMode     = NSLineBreakByTruncatingMiddle;
+    NSTextField *tf  = [NSTextField labelWithString:@""];
+    tf.font          = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
+    tf.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    [tf setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                 forOrientation:NSLayoutConstraintOrientationHorizontal];
     return tf;
 }
 
@@ -89,7 +61,6 @@ make_value(NSRect frame)
  * make_copy_btn — creates a borderless link-styled "copy" button.
  *
  * Inputs:
- *   frame  — button frame
  *   target — action target
  *   action — selector to call on click
  *   tag    — button tag the action uses to tell the buttons apart
@@ -97,9 +68,9 @@ make_value(NSRect frame)
  * Output: configured NSButton.
  */
 static NSButton *
-make_copy_btn(NSRect frame, id target, SEL action, NSInteger tag)
+make_copy_btn(id target, SEL action, NSInteger tag)
 {
-    NSButton *btn  = [[NSButton alloc] initWithFrame:frame];
+    NSButton *btn  = [[NSButton alloc] init];
     btn.buttonType = NSButtonTypeMomentaryPushIn;
     btn.bordered   = NO;
     NSMutableAttributedString *t =
@@ -112,6 +83,8 @@ make_copy_btn(NSRect frame, id target, SEL action, NSInteger tag)
     btn.target = target;
     btn.action = action;
     btn.tag    = tag;
+    [btn setContentHuggingPriority:NSLayoutPriorityRequired
+                    forOrientation:NSLayoutConstraintOrientationHorizontal];
     return btn;
 }
 
@@ -126,78 +99,38 @@ static NSString * const perm_items[] = {
     @"r--", @"r-x", @"rw-", @"rwx",
 };
 
-/* ── FilesVCenterCell — NSTextFieldCell that vertically centers text ─── */
-
-@interface FilesVCenterCell : NSTextFieldCell
-@end
-
-@implementation FilesVCenterCell {
-    /* YES while the field editor is being placed: its frame arrives already
-     * centered, so drawingRectForBounds: must not center it again. */
-    BOOL _placing_editor;
-}
-
 /*
- * drawingRectForBounds: — shrinks the drawing rect to the natural text height
- * and centers it vertically within bounds.
+ * make_perm_popup — one rwx popup with a small caption below it.
  *
  * Inputs:
- *   bounds — full cell bounds
+ *   caption — "Owner", "Group" or "Other"
+ *   target  — action target (perms_popup_changed:)
+ *   popup   — receives the popup
  *
- * Output: adjusted rect for text drawing.
+ * Output: vertical stack holding the popup and its caption.
  */
-- (NSRect)
-drawingRectForBounds:(NSRect)bounds
+static NSStackView *
+make_perm_popup(NSString *caption, id target, NSPopUpButton **popup)
 {
-    NSRect r = [super drawingRectForBounds:bounds];
-    if (_placing_editor) return r;
-    NSSize  sz = [super cellSizeForBounds:bounds];
-    CGFloat dy = floor((r.size.height - sz.height) / 2.0);
-    if (dy > 0) {
-        r.origin.y    += dy;
-        r.size.height -= dy * 2.0;
+    NSPopUpButton *btn = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    btn.font    = [NSFont monospacedSystemFontOfSize:11.0 weight:NSFontWeightRegular];
+    btn.toolTip = caption;
+    for (NSInteger t = 0; t < 8; t++) {
+        [btn addItemWithTitle:perm_items[t]];
+        [btn itemAtIndex:t].tag = t;
     }
-    return r;
-}
+    btn.target = target;
+    btn.action = @selector(perms_popup_changed:);
+    *popup = btn;
 
-/*
- * editWithFrame:inView:editor:delegate:event: — places the field editor in
- * the same vertically centered rect the text is drawn in, so the text does
- * not jump when editing starts.
- *
- * Inputs:
- *   frame, view, editor, delegate, event — as for NSCell
- */
-- (void)
-editWithFrame:(NSRect)frame inView:(NSView *)view editor:(NSText *)editor
-     delegate:(id)delegate event:(NSEvent *)event
-{
-    NSRect centered = [self drawingRectForBounds:frame];
-    _placing_editor = YES;
-    [super editWithFrame:centered inView:view editor:editor delegate:delegate event:event];
-    _placing_editor = NO;
+    NSTextField *label = [NSTextField labelWithString:caption];
+    label.font         = [NSFont systemFontOfSize:9.0];
+    label.textColor    = NSColor.tertiaryLabelColor;
+    NSStackView *stack = [NSStackView stackViewWithViews:@[btn, label]];
+    stack.orientation  = NSUserInterfaceLayoutOrientationVertical;
+    stack.spacing      = 2.0;
+    return stack;
 }
-
-/*
- * selectWithFrame:inView:editor:delegate:start:length: — as
- * editWithFrame:…, for editing that begins with a selection (tabbing or
- * clicking into the field).
- *
- * Inputs:
- *   frame, view, editor, delegate, start, length — as for NSCell
- */
-- (void)
-selectWithFrame:(NSRect)frame inView:(NSView *)view editor:(NSText *)editor
-       delegate:(id)delegate start:(NSInteger)start length:(NSInteger)length
-{
-    NSRect centered = [self drawingRectForBounds:frame];
-    _placing_editor = YES;
-    [super selectWithFrame:centered inView:view editor:editor delegate:delegate
-                     start:start length:length];
-    _placing_editor = NO;
-}
-
-@end
 
 /* ── FilesHashJob — cancel flag shared with one background hash pass ──── */
 
@@ -242,6 +175,7 @@ cancel
 @interface FilesInfoPanel () <NSTextFieldDelegate, NSWindowDelegate>
 
 @property (nonatomic, strong) NSURL       *current_url;
+@property (nonatomic, assign) BOOL         current_is_dir;
 @property (nonatomic, strong) NSImageView *icon_view;
 @property (nonatomic, strong) NSTextField *name_field;
 @property (nonatomic, strong) NSTextField *kind_value;
@@ -263,9 +197,7 @@ cancel
 @property (nonatomic, strong) NSTextField *pushed_value;
 @property (nonatomic, strong) NSTextField *remote_value;
 @property (nonatomic, assign) NSUInteger   git_generation; /* stale guard for git reads */
-@property (nonatomic, assign) CGFloat      git_section_h;  /* height the Git rows add */
-@property (nonatomic, assign) BOOL         git_section_shown;
-@property (nonatomic, strong) NSArray<NSView *> *git_views; /* separator, header, rows */
+@property (nonatomic, strong) NSArray<NSGridRow *> *git_rows; /* separator, header, rows */
 
 @end
 
@@ -288,50 +220,27 @@ shared
 }
 
 /*
- * init — creates the panel window and all subviews programmatically.
+ * init — creates the panel: the icon and an editable name field on top,
+ * a separator, then an NSGridView of labelled rows (Kind … MD5, the Locked
+ * and Show Hashes checkboxes, and a Git section that is hidden except for
+ * the top folder of a working tree). The panel is a fixed width and its
+ * height follows the visible rows (fit_window).
  *
  * Output: self, or nil if the window controller could not be initialised.
  */
 - (instancetype)
 init
 {
-    NSString * const row_keys[row_count] = {
-        [row_kind]        = @"Kind:",
-        [row_size]        = @"Size:",
-        [row_where]       = @"Where:",
-        [row_created]     = @"Created:",
-        [row_modified]    = @"Modified:",
-        [row_permissions] = @"Permissions:",
-        [row_owner]       = @"Owner:",
-        [row_group]       = @"Group:",
-        [row_sha256]      = @"SHA-256:",
-        [row_md5]         = @"MD5:",
-        [row_git_header]  = @"Git",
-        [row_branch]      = @"Current Branch:",
-        [row_pushed]      = @"Pushed:",
-        [row_remote]      = @"Remote URL:",
-    };
-    CGFloat git_section_h = git_sep_gap + git_row_count * (row_h + 4);
-    CGFloat content_h    = margin                  /* top margin */
-                         + icon_size + margin      /* icon row */
-                         + (row_count * (row_h + 4)) /* attribute rows */
-                         + small_label_h + 2.0     /* extra for perm sub-labels */
-                         + (row_h + 4) * 2         /* lock + hash checkboxes */
-                         + git_sep_gap             /* separator above Git rows */
-                         + margin;                 /* bottom margin */
-
-    NSRect win_rect = NSMakeRect(0, 0, panel_width, content_h);
-    NSPanel *panel  = [[NSPanel alloc]
-                           initWithContentRect:win_rect
-                                     styleMask:NSWindowStyleMaskTitled
-                                              | NSWindowStyleMaskClosable
-                                              | NSWindowStyleMaskUtilityWindow
-                                       backing:NSBackingStoreBuffered
-                                         defer:NO];
-    panel.title            = @"Info";
+    NSPanel *panel = [[NSPanel alloc]
+                         initWithContentRect:NSMakeRect(0, 0, panel_width, 400)
+                                   styleMask:NSWindowStyleMaskTitled
+                                            | NSWindowStyleMaskClosable
+                                            | NSWindowStyleMaskUtilityWindow
+                                     backing:NSBackingStoreBuffered
+                                       defer:NO];
+    panel.title              = @"Info";
     panel.releasedWhenClosed = NO;
-    panel.level            = NSFloatingWindowLevel;
-    [panel setContentSize:NSMakeSize(panel_width, content_h)];
+    panel.level              = NSFloatingWindowLevel;
 
     self = [super initWithWindow:panel];
     if (!self) {
@@ -339,190 +248,155 @@ init
     }
     panel.delegate = self;
 
-    NSView *cv = panel.contentView;
-    CGFloat x_label = margin;
-    CGFloat x_value = margin + label_w + 8.0;
-    CGFloat w_value = panel_width - x_value - margin;
+    /* Icon + name at top. A rounded-bezel field centres its text itself. */
+    self.icon_view = [NSImageView imageViewWithImage:[[NSImage alloc] init]];
+    self.icon_view.imageScaling = NSImageScaleProportionallyUpOrDown;
+    [NSLayoutConstraint activateConstraints:@[
+        [self.icon_view.widthAnchor  constraintEqualToConstant:icon_size],
+        [self.icon_view.heightAnchor constraintEqualToConstant:icon_size],
+    ]];
+    self.name_field               = [NSTextField textFieldWithString:@""];
+    self.name_field.bezelStyle    = NSTextFieldRoundedBezel;
+    self.name_field.font          = [NSFont boldSystemFontOfSize:13.0];
+    self.name_field.delegate      = self;
+    self.name_field.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    [self.name_field setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                              forOrientation:NSLayoutConstraintOrientationHorizontal];
+    NSStackView *top = [NSStackView stackViewWithViews:@[self.icon_view, self.name_field]];
+    top.spacing      = 12.0;
 
-    /* Icon + name at top. */
-    CGFloat icon_y = content_h - margin - icon_size;
-    NSRect icon_rect = NSMakeRect(margin, icon_y, icon_size, icon_size);
-    self.icon_view                    = [[NSImageView alloc] initWithFrame:icon_rect];
-    self.icon_view.imageScaling       = NSImageScaleProportionallyUpOrDown;
-    [cv addSubview:self.icon_view];
+    NSGridView *grid = [NSGridView gridViewWithNumberOfColumns:2 rows:0];
+    grid.rowSpacing    = 6.0;
+    grid.columnSpacing = 8.0;
+    [grid columnAtIndex:0].width      = label_w;
+    [grid columnAtIndex:0].xPlacement = NSGridCellPlacementTrailing;
+    NSGridRow *(^row)(NSString *, NSView *) = ^NSGridRow *(NSString *label, NSView *value) {
+        NSGridRow *r = [grid addRowWithViews:@[label ? make_label(label)
+                                                     : NSGridCell.emptyContentView, value]];
+        r.rowAlignment = NSGridRowAlignmentFirstBaseline;
+        return r;
+    };
 
-    CGFloat name_x = margin + icon_size + 12.0;
-    CGFloat name_w = panel_width - name_x - margin;
-    CGFloat name_y = icon_y + (icon_size - row_h) / 2.0;
-    NSRect name_box_rect = NSMakeRect(name_x, name_y, name_w, row_h);
+    self.kind_value     = make_value();
+    self.size_value     = make_value();
+    self.where_value    = make_value();
+    self.created_value  = make_value();
+    self.modified_value = make_value();
+    row(@"Kind:",     self.kind_value);
+    row(@"Size:",     self.size_value);
+    row(@"Where:",    self.where_value);
+    row(@"Created:",  self.created_value);
+    row(@"Modified:", self.modified_value);
 
-    /* Rounded container — NSBoxCustom adapts its colors to dark/light mode. */
-    NSBox *name_box         = [[NSBox alloc] initWithFrame:name_box_rect];
-    name_box.boxType        = NSBoxCustom;
-    name_box.cornerRadius   = 6.0;
-    name_box.borderWidth    = 0.5;
-    name_box.borderColor    = NSColor.separatorColor;
-    name_box.fillColor      = NSColor.controlBackgroundColor;
-    name_box.contentViewMargins = NSZeroSize;
-    [cv addSubview:name_box];
+    NSPopUpButton *owner = nil, *group = nil, *other = nil;
+    NSStackView *perms = [NSStackView stackViewWithViews:@[
+        make_perm_popup(@"Owner", self, &owner),
+        make_perm_popup(@"Group", self, &group),
+        make_perm_popup(@"Other", self, &other),
+    ]];
+    perms.distribution = NSStackViewDistributionFillEqually;
+    perms.spacing      = 6.0;
+    self.owner_perms_popup = owner;
+    self.group_perms_popup = group;
+    self.other_perms_popup = other;
+    /* The popups' captions sit below them: align the label with the popups'
+     * tops, not a baseline. */
+    NSGridRow *perm_row  = row(@"Permissions:", perms);
+    perm_row.rowAlignment = NSGridRowAlignmentNone;
+    perm_row.yPlacement   = NSGridCellPlacementTop;
 
-    NSRect name_rect = NSMakeRect(5.0, 1.0, name_w - 10.0, row_h - 2.0);
-    self.name_field                   = [[NSTextField alloc] initWithFrame:name_rect];
-    /* Swap in the centering cell before setting any cell-derived properties. */
-    FilesVCenterCell *name_cell       = [[FilesVCenterCell alloc] init];
-    name_cell.editable                = YES;
-    name_cell.selectable              = YES;
-    [self.name_field setCell:name_cell];
-    self.name_field.font              = [NSFont boldSystemFontOfSize:13.0];
-    self.name_field.bordered          = NO;
-    self.name_field.drawsBackground   = NO;
-    self.name_field.focusRingType     = NSFocusRingTypeNone;
-    self.name_field.delegate          = self;
-    self.name_field.lineBreakMode     = NSLineBreakByTruncatingMiddle;
-    [name_box addSubview:self.name_field];
+    self.owner_value = make_value();
+    self.group_value = make_value();
+    row(@"Owner:", self.owner_value);
+    row(@"Group:", self.group_value);
 
-    /* Attribute rows; fields[i] is the value field of row i (nil for the
-     * permissions row, which uses popups instead). */
-    NSTextField *fields[row_count] = { nil };
-    NSMutableArray<NSView *> *git_views = [NSMutableArray array];
-    CGFloat row_y = icon_y - margin;
-
-    for (NSUInteger i = 0; i < row_count; i++) {
-        if (i == row_git_header) {
-            /* Lock and Show Hashes checkboxes, then a separator, between the
-             * file rows and the Git section. */
-            row_y -= (row_h + 4.0);
-            NSRect lock_rect = NSMakeRect(x_value, row_y, w_value, row_h);
-            self.lock_check = [NSButton checkboxWithTitle:@"Locked" target:self
-                                                   action:@selector(lock_toggled:)];
-            self.lock_check.frame = lock_rect;
-            [cv addSubview:self.lock_check];
-
-            row_y -= (row_h + 4.0);
-            NSRect hash_rect = NSMakeRect(x_value, row_y, w_value, row_h);
-            self.hash_check = [NSButton checkboxWithTitle:@"Show Hashes (SHA-256 / MD5)"
-                                                   target:self
-                                                   action:@selector(hash_check_toggled:)];
-            self.hash_check.frame = hash_rect;
-            self.hash_check.state = [NSUserDefaults.standardUserDefaults
-                                        boolForKey:files_pref_show_hashes]
-                                    ? NSControlStateValueOn : NSControlStateValueOff;
-            [cv addSubview:self.hash_check];
-
-            row_y -= git_sep_gap;
-            NSBox *git_sep  = [[NSBox alloc] initWithFrame:NSMakeRect(margin, row_y + git_sep_gap / 2.0,
-                                                                      panel_width - margin * 2.0, 1.0)];
-            git_sep.boxType = NSBoxSeparator;
-            [cv addSubview:git_sep];
-            [git_views addObject:git_sep];
-
-            /* Section header: the section's title across the panel. */
-            row_y -= (row_h + 4.0);
-            NSTextField *header = [NSTextField labelWithString:row_keys[i]];
-            header.frame        = NSMakeRect(margin, row_y, panel_width - margin * 2.0, row_h);
-            header.font         = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
-            [cv addSubview:header];
-            [git_views addObject:header];
-            continue;
-        }
-
-        row_y -= (row_h + 4.0);
-        NSRect lr = NSMakeRect(x_label, row_y, label_w, row_h);
-        NSTextField *label = make_label(row_keys[i], lr);
-        [cv addSubview:label];
-
-        if (i == row_permissions) {
-            /* Three side-by-side NSPopUpButton controls: owner | group | other.
-             * Each takes one third of the value column width with a small gap. */
-            CGFloat gap         = 6.0;
-            CGFloat pop_w       = (w_value - 2.0 * gap) / 3.0;
-            NSString * const tips[3] = { @"Owner", @"Group", @"Other" };
-            NSPopUpButton *btns[3];
-            for (int p = 0; p < 3; p++) {
-                CGFloat px    = x_value + p * (pop_w + gap);
-                NSRect pr     = NSMakeRect(px, row_y, pop_w, row_h);
-                NSPopUpButton *btn = [[NSPopUpButton alloc] initWithFrame:pr pullsDown:NO];
-                btn.font    = [NSFont monospacedSystemFontOfSize:11.0
-                                                         weight:NSFontWeightRegular];
-                btn.toolTip = tips[p];
-                for (NSUInteger t = 0; t < 8; t++) {
-                    [btn addItemWithTitle:perm_items[t]];
-                    [[btn itemAtIndex:(NSInteger)t] setTag:(NSInteger)t];
-                }
-                btn.target = self;
-                btn.action = @selector(perms_popup_changed:);
-                [cv addSubview:btn];
-                btns[p] = btn;
-            }
-            self.owner_perms_popup = btns[0];
-            self.group_perms_popup = btns[1];
-            self.other_perms_popup = btns[2];
-
-            /* Small centered labels below each popup. */
-            row_y -= (small_label_h + 2.0);
-            for (int p = 0; p < 3; p++) {
-                CGFloat px  = x_value + p * (pop_w + gap);
-                NSRect slr  = NSMakeRect(px, row_y, pop_w, small_label_h);
-                NSTextField *sl = [NSTextField labelWithString:tips[p]];
-                sl.frame       = slr;
-                sl.alignment   = NSTextAlignmentCenter;
-                sl.font        = [NSFont systemFontOfSize:9.0];
-                sl.textColor   = NSColor.tertiaryLabelColor;
-                [cv addSubview:sl];
-            }
-            continue;
-        }
-
-        BOOL is_hash = (i == row_sha256 || i == row_md5);
-        CGFloat fw = is_hash ? (w_value - copy_w - copy_gap) : w_value;
-        NSRect vr = NSMakeRect(x_value, row_y, fw, row_h);
-        fields[i] = make_value(vr);
-        [cv addSubview:fields[i]];
-        if (i > row_git_header) [git_views addObjectsFromArray:@[label, fields[i]]];
-
-        if (is_hash) {
-            NSRect br = NSMakeRect(x_value + fw + copy_gap, row_y, copy_w, row_h);
-            NSInteger tag = (i == row_sha256) ? copy_tag_sha256 : copy_tag_md5;
-            [cv addSubview:make_copy_btn(br, self, @selector(copy_hash_action:), tag)];
-        }
-    }
-
-    self.kind_value      = fields[row_kind];
-    self.size_value      = fields[row_size];
-    self.where_value     = fields[row_where];
-    self.created_value   = fields[row_created];
-    self.modified_value  = fields[row_modified];
-    self.owner_value     = fields[row_owner];
-    self.group_value     = fields[row_group];
-    self.sha256_value    = fields[row_sha256];
-    self.md5_value       = fields[row_md5];
-    self.branch_value    = fields[row_branch];
-    self.pushed_value    = fields[row_pushed];
-    self.remote_value    = fields[row_remote];
-    self.remote_value.selectable = YES;  /* so the URL can be copied */
-
-    /* Hash value fields: monospaced, tail-truncated with "…", selectable to copy. */
+    /* Hash fields: monospaced, tail-truncated with "…", selectable to copy. */
+    self.sha256_value = make_value();
+    self.md5_value    = make_value();
     NSFont *hash_font = [NSFont monospacedSystemFontOfSize:9.0 weight:NSFontWeightRegular];
+    NSInteger tag = copy_tag_sha256;
     for (NSTextField *hf in @[self.sha256_value, self.md5_value]) {
         hf.font          = hash_font;
         hf.selectable    = YES;
         hf.lineBreakMode = NSLineBreakByTruncatingTail;
+        NSStackView *line = [NSStackView stackViewWithViews:@[
+            hf, make_copy_btn(self, @selector(copy_hash_action:), tag)]];
+        line.spacing = 4.0;
+        row(tag == copy_tag_sha256 ? @"SHA-256:" : @"MD5:", line);
+        tag = copy_tag_md5;
     }
 
-    /* Separator below icon. */
-    NSBox *sep        = [[NSBox alloc] initWithFrame:NSMakeRect(margin, icon_y - 8.0, panel_width - margin * 2.0, 1.0)];
-    sep.boxType       = NSBoxSeparator;
-    [cv addSubview:sep];
+    self.lock_check = [NSButton checkboxWithTitle:@"Locked" target:self
+                                           action:@selector(lock_toggled:)];
+    self.hash_check = [NSButton checkboxWithTitle:@"Show Hashes (SHA-256 / MD5)" target:self
+                                           action:@selector(hash_check_toggled:)];
+    self.hash_check.state = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_show_hashes]
+                            ? NSControlStateValueOn : NSControlStateValueOff;
+    row(nil, self.lock_check);
+    row(nil, self.hash_check);
 
-    /* Pin everything to the top edge so the panel can grow and shrink at the
-     * bottom, where the Git section sits; it starts hidden. */
-    for (NSView *v in cv.subviews) v.autoresizingMask = NSViewMinYMargin;
-    for (NSView *v in git_views) v.hidden = YES;
-    self.git_views     = git_views;
-    self.git_section_h = git_section_h;
-    [panel setContentSize:NSMakeSize(panel_width, content_h - git_section_h)];
+    /* Git section: a separator and a title across both columns, then rows. */
+    NSBox *git_sep = [[NSBox alloc] init];
+    git_sep.boxType = NSBoxSeparator;
+    NSTextField *git_title = [NSTextField labelWithString:@"Git"];
+    git_title.font = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
+    NSMutableArray<NSGridRow *> *git_rows = [NSMutableArray array];
+    for (NSView *v in @[git_sep, git_title]) {
+        NSGridRow *r = [grid addRowWithViews:@[v]];
+        [grid mergeCellsInHorizontalRange:NSMakeRange(0, 2)
+                            verticalRange:NSMakeRange((NSUInteger)[grid indexOfRow:r], 1)];
+        [r cellAtIndex:0].xPlacement = NSGridCellPlacementFill;
+        [git_rows addObject:r];
+    }
+    self.branch_value = make_value();
+    self.pushed_value = make_value();
+    self.remote_value = make_value();
+    self.remote_value.selectable = YES;  /* so the URL can be copied */
+    [git_rows addObject:row(@"Current Branch:", self.branch_value)];
+    [git_rows addObject:row(@"Pushed:",         self.pushed_value)];
+    [git_rows addObject:row(@"Remote URL:",     self.remote_value)];
+    for (NSGridRow *r in git_rows) r.hidden = YES;
+    self.git_rows = git_rows;
 
+    NSBox *sep = [[NSBox alloc] init];
+    sep.boxType = NSBoxSeparator;
+    NSStackView *all = [NSStackView stackViewWithViews:@[top, sep, grid]];
+    all.orientation = NSUserInterfaceLayoutOrientationVertical;
+    all.alignment   = NSLayoutAttributeLeading;
+    all.spacing     = 10.0;
+    all.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSView *cv = panel.contentView;
+    [cv addSubview:all];
+    [NSLayoutConstraint activateConstraints:@[
+        [all.topAnchor      constraintEqualToAnchor:cv.topAnchor constant:margin],
+        [all.leadingAnchor  constraintEqualToAnchor:cv.leadingAnchor constant:margin],
+        [all.trailingAnchor constraintEqualToAnchor:cv.trailingAnchor constant:-margin],
+        [all.bottomAnchor   constraintEqualToAnchor:cv.bottomAnchor constant:-margin],
+        [cv.widthAnchor     constraintEqualToConstant:panel_width],
+        [top.widthAnchor    constraintEqualToAnchor:all.widthAnchor],
+        [sep.widthAnchor    constraintEqualToAnchor:all.widthAnchor],
+        [grid.widthAnchor   constraintEqualToAnchor:all.widthAnchor],
+    ]];
+    [self fit_window];
     return self;
+}
+
+/*
+ * fit_window — sizes the panel to its visible rows, keeping its top edge
+ * in place.
+ */
+- (void)
+fit_window
+{
+    NSWindow *w = self.window;
+    [w.contentView layoutSubtreeIfNeeded];
+    NSSize fit = w.contentView.fittingSize;
+    NSRect c   = [w contentRectForFrameRect:w.frame];
+    CGFloat top = NSMaxY(c);
+    c.size      = NSMakeSize(panel_width, fit.height);
+    c.origin.y  = top - fit.height;
+    [w setFrame:[w frameRectForContentRect:c] display:YES];
 }
 
 /*
@@ -609,21 +483,22 @@ populate_fields:(NSURL *)url
         NSURLIsUserImmutableKey
     ];
     /* url often comes from the browser listing with values cached at list
-     * time; drop them so the panel shows the item's current state. */
-    [url removeAllCachedResourceValues];
+     * time; read a fresh URL so the panel shows the item's current state
+     * without clearing the browser row's cache. */
+    NSURL *fresh = [NSURL fileURLWithPath:url.path];
     NSDictionary<NSURLResourceKey, id> *res =
-        [url resourceValuesForKeys:keys error:nil];
+        [fresh resourceValuesForKeys:keys error:nil];
 
     /* Icon */
-    self.icon_view.image = files_icon_for_url(url, icon_size);
+    self.icon_view.image = files_icon_for_url(fresh, icon_size);
 
     /* Name */
     self.name_field.stringValue = res[NSURLNameKey] ?: url.lastPathComponent;
 
-    /* Kind */
+    /* Kind: "Folder" for folders, "Application" for apps and so on. */
     BOOL is_dir = [res[NSURLIsDirectoryKey] boolValue];
-    self.kind_value.stringValue = is_dir ? @"Folder"
-                                         : (res[NSURLLocalizedTypeDescriptionKey] ?: @"—");
+    self.current_is_dir = is_dir;
+    self.kind_value.stringValue = res[NSURLLocalizedTypeDescriptionKey] ?: @"—";
 
     /* Size */
     NSNumber *sz       = res[NSURLFileSizeKey];
@@ -675,13 +550,7 @@ populate_fields:(NSURL *)url
 
     /* Hashes — computed asynchronously when enabled and item is a file. The
      * tooltip doubles as "a real digest is present" for copy_hash_action:. */
-    self.sha256_value.stringValue = @"—";
-    self.md5_value.stringValue    = @"—";
-    self.sha256_value.toolTip     = nil;
-    self.md5_value.toolTip        = nil;
-    if (!is_dir && [NSUserDefaults.standardUserDefaults boolForKey:files_pref_show_hashes]) {
-        [self start_hash_job:url];
-    }
+    [self update_hashes];
 
     /* Git — shown only for the top folder of a git working tree. */
     self.git_generation++;
@@ -691,10 +560,8 @@ populate_fields:(NSURL *)url
 }
 
 /*
- * set_git_section_visible: — grows or shrinks the panel at the bottom to
- * show or hide the Git rows, keeping its top edge in place. The rows are
- * also hidden, since the top of the section would otherwise show in the
- * bottom margin.
+ * set_git_section_visible: — shows or hides the Git rows and refits the
+ * panel to them (fit_window), keeping its top edge in place.
  *
  * Inputs:
  *   visible — YES to show the Git rows
@@ -702,15 +569,29 @@ populate_fields:(NSURL *)url
 - (void)
 set_git_section_visible:(BOOL)visible
 {
-    if (visible == self.git_section_shown) return;
-    self.git_section_shown = visible;
-    for (NSView *v in self.git_views) v.hidden = !visible;
-    NSWindow *w  = self.window;
-    NSRect   c   = [w contentRectForFrameRect:w.frame];
-    CGFloat  dh  = visible ? self.git_section_h : -self.git_section_h;
-    c.size.height += dh;
-    c.origin.y    -= dh;
-    [w setFrame:[w frameRectForContentRect:c] display:YES];
+    if (visible == !self.git_rows.firstObject.hidden) return;
+    for (NSGridRow *r in self.git_rows) r.hidden = !visible;
+    [self fit_window];
+}
+
+/*
+ * update_hashes — fills the hash rows for the current item: starts a hash
+ * job for a file while Show Hashes is on, otherwise shows "—" (and stops
+ * any job still running). The tooltip doubles as "a real digest is
+ * present" for copy_hash_action:.
+ */
+- (void)
+update_hashes
+{
+    [self cancel_hash_job];
+    self.sha256_value.stringValue = @"—";
+    self.md5_value.stringValue    = @"—";
+    self.sha256_value.toolTip     = nil;
+    self.md5_value.toolTip        = nil;
+    if (self.current_url && !self.current_is_dir &&
+        [NSUserDefaults.standardUserDefaults boolForKey:files_pref_show_hashes]) {
+        [self start_hash_job:self.current_url];
+    }
 }
 
 /*
@@ -812,8 +693,8 @@ copy_hash_action:(NSButton *)sender
 }
 
 /*
- * hash_check_toggled: — saves the show-hashes preference and refreshes the
- * hash fields for the currently displayed file.
+ * hash_check_toggled: — saves the show-hashes preference and starts or
+ * stops hashing the current item (update_hashes); nothing else is re-read.
  *
  * Inputs:
  *   sender — the "Show Hashes" checkbox
@@ -823,7 +704,7 @@ hash_check_toggled:(NSButton *)sender
 {
     BOOL on = (sender.state == NSControlStateValueOn);
     [NSUserDefaults.standardUserDefaults setBool:on forKey:files_pref_show_hashes];
-    if (self.current_url) [self populate_fields:self.current_url];
+    [self update_hashes];
 }
 
 /*
@@ -852,7 +733,9 @@ lock_toggled:(NSButton *)sender
 
 /*
  * controlTextDidEndEditing: — renames the file when the name field loses focus.
- * On failure shows an error sheet and restores the old name.
+ * On failure shows an error sheet and restores the old name. The rename
+ * finishes asynchronously; if the panel has moved on to another item by
+ * then, its result is not applied to that item.
  *
  * Inputs:
  *   obj — notification from the name text field
@@ -862,15 +745,17 @@ controlTextDidEndEditing:(NSNotification *)obj
 {
     if (obj.object != self.name_field) return;
     NSString *new_name = self.name_field.stringValue;
-    if (!self.current_url || new_name.length == 0) return;
-    if ([new_name isEqualToString:self.current_url.lastPathComponent]) return;
+    NSURL *old_url     = self.current_url;
+    if (!old_url || new_name.length == 0) return;
+    if ([new_name isEqualToString:old_url.lastPathComponent]) return;
 
-    [FilesFileOps rename_url:self.current_url
+    [FilesFileOps rename_url:old_url
                           to:new_name
                   completion:^(NSURL *new_url, NSError *err) {
+        if (err) files_show_error(@"Rename failed", err, self.window);
+        if (![self.current_url isEqual:old_url]) return;  /* showing another item */
         if (err) {
-            files_show_error(@"Rename failed", err, self.window);
-            self.name_field.stringValue = self.current_url.lastPathComponent;
+            self.name_field.stringValue = old_url.lastPathComponent;
         } else {
             self.current_url = new_url;
         }

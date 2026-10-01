@@ -23,7 +23,9 @@ BOOL files_is_git_repo(NSURL *url);
 /*
  * files_git_work_tree — the git working tree dir is in: the nearest of dir
  * and its ancestors that contains a .git entry. A folder inside .git is in
- * no working tree. A few stats; safe on any thread.
+ * no working tree, and nothing is while git is not installed (Xcode or the
+ * Command Line Tools). A few stats (the first call also asks xcode-select
+ * where git is); safe on any thread, but call off the main thread.
  *
  * Inputs:
  *   dir — folder URL

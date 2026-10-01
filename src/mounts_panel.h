@@ -4,8 +4,10 @@
  * FilesMountsPanel — utility panel listing all currently mounted filesystems.
  * Shows device name, mount point, filesystem type, mount options, capacity,
  * free space, and whether the volume can be unmounted, with Unmount and
- * Refresh buttons. Uses getmntinfo(3) for the raw mount table and
- * FilesVolumeManager for volume details and unmounting.
+ * Refresh buttons. Reads the raw mount table (getmntinfo_r_np) and volume
+ * capacities on a background queue, so an unresponsive network volume
+ * cannot hang the app; FilesVolumeManager supplies volume rules and
+ * unmounting.
  */
 @interface FilesMountsPanel : NSWindowController
 

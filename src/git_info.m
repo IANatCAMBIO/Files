@@ -7,6 +7,30 @@
 static NSString * const git_tool = @"/usr/bin/git";
 
 /*
+ * git_available — whether /usr/bin/git can run. It is a shim for the git
+ * in Xcode or the Command Line Tools; without either, every run would
+ * make macOS offer to install the tools. Checked once per process:
+ * `xcode-select -p` names the developer folder, which must hold git.
+ *
+ * Output: YES if git is installed.
+ */
+static BOOL
+git_available(void)
+{
+    static BOOL available;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSData *data = nil;
+        if (!files_run_tool(@"/usr/bin/xcode-select", @[@"-p"], FILES_TOOL_TIMEOUT, &data)) return;
+        NSString *dev = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]
+                            stringByTrimmingCharactersInSet:NSCharacterSet.newlineCharacterSet];
+        NSString *git = [dev stringByAppendingPathComponent:@"usr/bin/git"];
+        available = dev.length > 0 && access(git.fileSystemRepresentation, X_OK) == 0;
+    });
+    return available;
+}
+
+/*
  * files_is_git_repo — directory, not a package, with a .git entry.
  * Inputs/output are documented in git_info.h.
  */
@@ -23,12 +47,13 @@ files_is_git_repo(NSURL *url)
 }
 
 /*
- * files_git_work_tree — walk up from dir to the first folder with .git.
- * Inputs/output are documented in git_info.h.
+ * files_git_work_tree — walk up from dir to the first folder with .git;
+ * nil when git is not installed. Inputs/output are documented in git_info.h.
  */
 NSURL *
 files_git_work_tree(NSURL *dir)
 {
+    if (!git_available()) return nil;
     NSString *path = dir.URLByStandardizingPath.path;
     /* The repository's own .git folder is not part of the working tree. */
     if ([path.pathComponents containsObject:@".git"]) return nil;
@@ -51,7 +76,8 @@ NSSet<NSString *> *
 files_git_tracked_names(NSURL *dir)
 {
     NSData *data = nil;
-    if (!files_run_tool(git_tool, @[@"-C", dir.path, @"ls-files", @"-z"],
+    if (!git_available() ||
+        !files_run_tool(git_tool, @[@"-C", dir.path, @"ls-files", @"-z"],
                         FILES_TOOL_TIMEOUT, &data)) return nil;
 
     /* NUL-separated paths relative to dir; keep the part before the first
@@ -195,7 +221,7 @@ run_git(NSURL *repo, NSArray<NSString *> *args)
 {
     NSData *data = nil;
     NSArray *full = [@[@"-C", repo.path] arrayByAddingObjectsFromArray:args];
-    if (!files_run_tool(git_tool, full, FILES_TOOL_TIMEOUT, &data)) return nil;
+    if (!git_available() || !files_run_tool(git_tool, full, FILES_TOOL_TIMEOUT, &data)) return nil;
     NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     /* Newlines only: a tab can be a meaningful (empty) leading field. */
     return [text stringByTrimmingCharactersInSet:NSCharacterSet.newlineCharacterSet];

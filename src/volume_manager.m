@@ -44,8 +44,10 @@ process_name(pid_t pid, NSString *command)
 
 /*
  * list_open_files — runs `lsof -Fpctn +f -- <volume>` (every open file,
- * folder or working directory on that file system) and turns its field
- * output into de-duplicated, sorted descriptions. Blocks; call off the
+ * folder or working directory on that file system; FILES_TOOL_TIMEOUT, as
+ * lsof itself can stall on a hung mount) and turns its field output into
+ * de-duplicated, sorted descriptions. lsof exits 1 when it finds nothing,
+ * so its output is used whatever the exit status. Blocks; call off the
  * main thread.
  *
  * Inputs:
@@ -56,15 +58,10 @@ process_name(pid_t pid, NSString *command)
 static NSArray<NSString *> *
 list_open_files(NSURL *volume)
 {
-    NSTask *task        = [[NSTask alloc] init];
-    task.executableURL  = [NSURL fileURLWithPath:@"/usr/sbin/lsof"];
-    task.arguments      = @[@"-Fpctn", @"+f", @"--", volume.path];
-    task.standardError  = NSFileHandle.fileHandleWithNullDevice;
-    NSPipe *out         = [NSPipe pipe];
-    task.standardOutput = out;
-    if (![task launchAndReturnError:nil]) return @[];
-    NSData *data = [out.fileHandleForReading readDataToEndOfFile];
-    [task waitUntilExit];
+    NSData *data = nil;
+    files_run_tool(@"/usr/sbin/lsof", @[@"-Fpctn", @"+f", @"--", volume.path],
+                   FILES_TOOL_TIMEOUT, &data);
+    if (!data) return @[];
 
     NSString *root = volume.path;
     NSMutableOrderedSet<NSString *> *items = [NSMutableOrderedSet orderedSet];
@@ -94,6 +91,46 @@ list_open_files(NSURL *volume)
 static const int64_t interactive_mount_timeout_sec = 120;
 
 /*
+ * first_mount_point — the first mount point among an hdiutil plist's
+ * system-entities.
+ *
+ * Inputs:
+ *   image_info — one image's dictionary (attach output, or an entry of
+ *                `hdiutil info`'s images)
+ *
+ * Output: volume root URL, or nil if none of its entities is mounted.
+ */
+static NSURL *
+first_mount_point(NSDictionary *image_info)
+{
+    for (NSDictionary *entity in image_info[@"system-entities"]) {
+        NSString *mount_point = entity[@"mount-point"];
+        if (mount_point.length) return [NSURL fileURLWithPath:mount_point isDirectory:YES];
+    }
+    return nil;
+}
+
+/*
+ * hdiutil_plist — runs hdiutil with args and parses its -plist output.
+ *
+ * Inputs:
+ *   args    — hdiutil arguments, including -plist
+ *   timeout — seconds to allow; 0 for no limit (attach may verify a large
+ *             image for minutes)
+ *
+ * Output: the parsed dictionary, or nil if hdiutil failed.
+ */
+static NSDictionary *
+hdiutil_plist(NSArray<NSString *> *args, double timeout)
+{
+    NSData *data = nil;
+    if (!files_run_tool(@"/usr/bin/hdiutil", args, timeout, &data)) return nil;
+    NSDictionary *plist = [NSPropertyListSerialization propertyListWithData:data options:0
+                                                                     format:NULL error:nil];
+    return [plist isKindOfClass:NSDictionary.class] ? plist : nil;
+}
+
+/*
  * attach_disk_image — runs `hdiutil attach -plist -noautoopen` on image with
  * stdin at /dev/null (so password or license prompts fail instead of
  * hanging) and returns the first mount point in its plist output. Blocks;
@@ -107,27 +144,31 @@ static const int64_t interactive_mount_timeout_sec = 120;
 static NSURL *
 attach_disk_image(NSURL *image)
 {
-    NSTask *task       = [[NSTask alloc] init];
-    task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/hdiutil"];
-    task.arguments     = @[@"attach", @"-plist", @"-noautoopen", image.path];
-    task.standardInput = NSFileHandle.fileHandleWithNullDevice;
-    task.standardError = NSFileHandle.fileHandleWithNullDevice;
-    NSPipe *out        = [NSPipe pipe];
-    task.standardOutput = out;
-    if (![task launchAndReturnError:nil]) return nil;
+    return first_mount_point(hdiutil_plist(@[@"attach", @"-plist", @"-noautoopen", image.path], 0));
+}
 
-    NSData *data = [out.fileHandleForReading readDataToEndOfFile];
-    [task waitUntilExit];
-    if (task.terminationStatus != 0) return nil;
-
-    NSDictionary *plist = [NSPropertyListSerialization propertyListWithData:data
-                                                                    options:0
-                                                                     format:NULL
-                                                                      error:nil];
-    if (![plist isKindOfClass:NSDictionary.class]) return nil;
-    for (NSDictionary *entity in plist[@"system-entities"]) {
-        NSString *mount_point = entity[@"mount-point"];
-        if (mount_point.length) return [NSURL fileURLWithPath:mount_point isDirectory:YES];
+/*
+ * attached_volume — the volume of image if it is already attached, from
+ * `hdiutil info` (which changes nothing, unlike attach). Blocks; call off
+ * the main thread.
+ *
+ * Inputs:
+ *   image — disk image file URL
+ *
+ * Output: mounted volume root URL, or nil if the image is not mounted.
+ */
+static NSURL *
+attached_volume(NSURL *image)
+{
+    NSString *want = image.URLByResolvingSymlinksInPath.path;
+    NSDictionary *info = hdiutil_plist(@[@"info", @"-plist"], FILES_TOOL_TIMEOUT);
+    for (NSDictionary *img in info[@"images"]) {
+        NSString *path = img[@"image-path"];
+        if (!path || ![[NSURL fileURLWithPath:path].URLByResolvingSymlinksInPath.path
+                          isEqualToString:want]) continue;
+        /* An image can be attached more than once, not every time mounted. */
+        NSURL *volume = first_mount_point(img);
+        if (volume) return volume;
     }
     return nil;
 }
@@ -349,9 +390,9 @@ mount_disk_image:(NSURL *)image
 /*
  * mount_interactively:completion: — opens image with the system's handler
  * (DiskImageMounter, which prompts for passwords and license agreements),
- * then, each time a volume mounts, re-runs attach_disk_image — which for an
- * already-attached image just reports its volume without prompting — until
- * the image's volume appears or interactive_mount_timeout_sec passes.
+ * then, each time a volume mounts, asks `hdiutil info` whether the image
+ * is now attached (attached_volume) until its volume appears or
+ * interactive_mount_timeout_sec passes.
  *
  * Inputs:
  *   image      — disk image file URL
@@ -383,7 +424,7 @@ mount_interactively:(NSURL *)image
                      queue:NSOperationQueue.mainQueue
                 usingBlock:^(NSNotification *note) {
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            NSURL *volume = attach_disk_image(image);
+            NSURL *volume = attached_volume(image);
             if (volume) dispatch_async(dispatch_get_main_queue(), ^{ finish(volume); });
         });
     }];

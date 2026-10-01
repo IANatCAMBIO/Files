@@ -90,6 +90,7 @@ make_col(NSString *ident, NSString *title, CGFloat width, BOOL resizable)
 @property (nonatomic, strong) NSTableView                        *table;
 @property (nonatomic, strong) NSMutableArray<FilesMountRecord *> *records;
 @property (nonatomic, strong) NSButton                           *unmount_btn;
+@property (nonatomic, assign) NSUInteger                          load_generation;
 @end
 
 @implementation FilesMountsPanel
@@ -264,28 +265,30 @@ build_toolbar_row
 /* ── Data ────────────────────────────────────────────────────────────────── */
 
 /*
- * load_mounts — rebuilds self.records from the kernel mount table
- * (getmntinfo). Rows matching a FilesVolumeManager volume take total and free
+ * read_mounts — one record per entry in the kernel mount table
+ * (getmntinfo_r_np, MNT_NOWAIT: no file system is asked to refresh, so a
+ * dead network server cannot stall it). Browsable mounts — the volumes
+ * Finder shows, i.e. those without MNT_DONTBROWSE — take total and free
  * space from NSURLVolumeTotalCapacityKey and
  * NSURLVolumeAvailableCapacityForImportantUsageKey (counts APFS purgeable
- * space, as Finder does) and get can_unmount; pseudo mounts (devfs, autofs, …)
- * use statfs block counts.
+ * space, as Finder does) and get can_unmount; pseudo and hidden mounts
+ * (devfs, autofs, system volumes, …) use statfs block counts. These
+ * queries can be slow (purgeable space) or hang on an unreachable server,
+ * so this runs off the main thread.
  *
- * Output: none; self.records is replaced (empty if getmntinfo fails).
+ * Output: array of records, empty if the mount table cannot be read.
  */
-- (void)
-load_mounts
+static NSArray<FilesMountRecord *> *
+read_mounts(void)
 {
-    [self.records removeAllObjects];
-
     struct statfs *buf = NULL;
-    int count = getmntinfo(&buf, MNT_NOWAIT);
-    if (count <= 0) return;
+    int count = getmntinfo_r_np(&buf, MNT_NOWAIT);
+    if (count <= 0) return @[];
 
     FilesVolumeManager *vm = FilesVolumeManager.shared;
-    NSArray<NSURL *> *volumes = [vm mounted_volumes];
     NSArray<NSURLResourceKey> *capacity_keys =
         @[NSURLVolumeTotalCapacityKey, NSURLVolumeAvailableCapacityForImportantUsageKey];
+    NSMutableArray<FilesMountRecord *> *records = [NSMutableArray arrayWithCapacity:(NSUInteger)count];
 
     for (int i = 0; i < count; i++) {
         FilesMountRecord *rec = [[FilesMountRecord alloc] init];
@@ -294,18 +297,13 @@ load_mounts
         rec.fs_type     = [NSString stringWithUTF8String:buf[i].f_fstypename];
         rec.options     = format_mount_flags((uint32_t)buf[i].f_flags);
 
-        NSURL *mount_url = [NSURL fileURLWithPath:rec.mount_point isDirectory:YES];
-        for (NSURL *vol in volumes) {
-            if (files_same_path(vol, mount_url)) {
-                rec.volume_url  = vol;
-                rec.can_unmount = [vm can_unmount_volume:vol];
-                break;
-            }
+        NSDictionary<NSURLResourceKey, id> *cap = nil;
+        if (!(buf[i].f_flags & MNT_DONTBROWSE)) {
+            rec.volume_url  = [NSURL fileURLWithPath:rec.mount_point isDirectory:YES];
+            rec.can_unmount = [vm can_unmount_volume:rec.volume_url];
+            cap = [rec.volume_url resourceValuesForKeys:capacity_keys error:nil];
         }
-
-        if (rec.volume_url) {
-            NSDictionary<NSURLResourceKey, id> *cap =
-                [rec.volume_url resourceValuesForKeys:capacity_keys error:nil];
+        if (cap) {
             rec.total_bytes = [cap[NSURLVolumeTotalCapacityKey] longLongValue];
             rec.free_bytes  =
                 [cap[NSURLVolumeAvailableCapacityForImportantUsageKey] longLongValue];
@@ -313,9 +311,10 @@ load_mounts
             rec.total_bytes = (int64_t)buf[i].f_blocks * (int64_t)buf[i].f_bsize;
             rec.free_bytes  = (int64_t)buf[i].f_bavail * (int64_t)buf[i].f_bsize;
         }
-
-        [self.records addObject:rec];
+        [records addObject:rec];
     }
+    free(buf);
+    return records;
 }
 
 /*
@@ -380,21 +379,34 @@ fit_columns
 }
 
 /*
- * reload_table — the one reload path: reloads the mount records, applies the
- * table's current sort descriptors, reloads the table, refits the columns and
- * clears the selection (which disables Unmount via
- * tableViewSelectionDidChange:).
+ * reload_table_then: — the one reload path: reads the mount records on a
+ * background queue (read_mounts), then on the main queue applies the
+ * table's current sort descriptors, reloads the table, refits the columns
+ * and clears the selection (which disables Unmount via
+ * tableViewSelectionDidChange:). A newer reload supersedes an older one.
  *
- * Output: none.
+ * Inputs:
+ *   done — called on the main queue once the table shows the new records;
+ *          not called if superseded. May be nil.
  */
 - (void)
-reload_table
+reload_table_then:(void (^)(void))done
 {
-    [self load_mounts];
-    [self.records sortUsingDescriptors:self.table.sortDescriptors];
-    [self.table reloadData];
-    [self fit_columns];
-    [self.table deselectAll:nil];
+    NSUInteger generation = ++self.load_generation;
+    __weak FilesMountsPanel *ws = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSArray<FilesMountRecord *> *records = read_mounts();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            FilesMountsPanel *s = ws;
+            if (!s || generation != s.load_generation) return;
+            s.records = [records mutableCopy];
+            [s.records sortUsingDescriptors:s.table.sortDescriptors];
+            [s.table reloadData];
+            [s fit_columns];
+            [s.table deselectAll:nil];
+            if (done) done();
+        });
+    });
 }
 
 /*
@@ -438,18 +450,20 @@ resize_to_fit
 /* ── Actions ─────────────────────────────────────────────────────────────── */
 
 /*
- * show_panel — reloads the table, sizes the window to fit, scrolls to the top
- * and brings the panel forward.
+ * show_panel — brings the panel forward, then reloads the table and, once
+ * the mounts are read, sizes the window to fit and scrolls to the top.
  *
  * Output: none.
  */
 - (void)
 show_panel
 {
-    [self reload_table];
-    [self resize_to_fit];
-    [self.table scrollRowToVisible:0];
     [self showWindow:nil];
+    __weak FilesMountsPanel *ws = self;
+    [self reload_table_then:^{
+        [ws resize_to_fit];
+        [ws.table scrollRowToVisible:0];
+    }];
 }
 
 /*
@@ -463,7 +477,7 @@ show_panel
 - (IBAction)
 refresh_clicked:(id)sender
 {
-    [self reload_table];
+    [self reload_table_then:nil];
 }
 
 /*
@@ -505,7 +519,7 @@ unmount_clicked:(id)sender
 volumes_changed:(NSNotification *)note
 {
     if (self.window.isVisible) {
-        [self reload_table];
+        [self reload_table_then:nil];
     }
 }
 
