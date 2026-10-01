@@ -81,9 +81,10 @@ A minimalist macOS file manager written in Objective-C + AppKit.
 - Default file viewer in place of Finder: "Show in Finder" from other apps
   opens Files; setting Preferences ▸ Default file browser to Finder undoes
   every change (see Replacing Finder)
-- Preferences window (Files ▸ Preferences…, ⌘,): every View-menu
-  preference, the default file browser (Files or Finder), and Keep Files
-  running for faster startup (see Keeping Files running)
+- Preferences window (Files ▸ Preferences…, ⌘,): View has the View-menu
+  preferences; Integration has the default file browser (Files or
+  Finder), Keep Files running for faster startup (see Keeping Files
+  running) and Show Finder After Archive Operations
 - About Files shows the version (from the `VERSION` file), build date,
   and links to camb.io and the license
 - Address bar (accepts `~` and relative paths), back/forward/up, Open in

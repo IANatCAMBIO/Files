@@ -145,7 +145,9 @@ pref_box:(NSString *)title key:(NSString *)key
 
 /*
  * build_content — lays out the View and Integration sections in a
- * vertical stack and sizes the window to fit.
+ * vertical stack and sizes the window to fit. Integration also holds Show
+ * Finder After Archive Operations, which the View menu lists with the
+ * view preferences.
  */
 - (void)
 build_content
@@ -154,9 +156,16 @@ build_content
     NSTextField *view_heading        = section_label(@"View");
     NSTextField *integration_heading = section_label(@"Integration");
 
+    /* The View menu's items, except Show Finder After Archive Operations,
+     * which changes another app and so is listed under Integration. */
+    NSString *archive_title = nil;
     [rows addObject:view_heading];
     for (NSArray<NSArray<NSString *> *> *group in files_view_pref_groups()) {
         for (NSArray<NSString *> *item in group) {
+            if ([item[1] isEqualToString:files_pref_archive_reveal]) {
+                archive_title = item[0];
+                continue;
+            }
             [rows addObject:[self pref_box:item[0] key:item[1]]];
         }
     }
@@ -179,6 +188,10 @@ build_content
                                key:files_pref_keep_running]];
     [rows addObject:note_label(@"Files opens at login and stays open when its last window "
                                 "closes, so new windows appear instantly.")];
+
+    [rows addObject:[self pref_box:archive_title key:files_pref_archive_reveal]];
+    [rows addObject:note_label(@"Archive Utility opens a Finder window on what it creates "
+                                "or expands. Changing it needs Full Disk Access.")];
 
     NSStackView *stack = [NSStackView stackViewWithViews:rows];
     stack.orientation = NSUserInterfaceLayoutOrientationVertical;
