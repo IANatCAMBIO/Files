@@ -249,7 +249,7 @@ show_url:(NSURL *)url
     _row_vals[row_modified].stringValue =
         files_format_date(res[NSURLContentModificationDateKey], NSDateFormatterMediumStyle);
 
-    _preview_view.image = files_icon_for_url(url, 128);
+    _preview_view.image = files_icon_for_url(url, 128, NO);
     BOOL plain_folder = [res[NSURLIsDirectoryKey] boolValue] && ![res[NSURLIsPackageKey] boolValue];
     if (!plain_folder) [self request_thumbnail:url];
 }

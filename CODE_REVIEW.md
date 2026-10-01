@@ -274,9 +274,24 @@ implemented on branch `optimizations`, except where noted.
   removed); hashes toggle alone; rename race fixed; fresh URL instead of
   clearing the browser's cached values; Kind for packages.
 - Info sidebar: no Quick Look request for plain folders.
-- `files_icon_for_url` caches app-wide.
+- `files_icon_for_url` caches app-wide for list rows and bookmarks; Get Info and
+  the sidebar read the item's own current icon (custom icons included).
 
 ## Build
 - `VERSION :=`; `make clean` / `make test` skip the signing-identity lookup.
 - `-Wno-unused-parameter` kept on purpose: every remaining unused parameter is
   required by a callback signature (documented in the Makefile and BUILD.md).
+
+## Follow-up from reviewing this branch
+- The Git cache keeps its own tracked set (only a successful git run sets it),
+  so a listing abandoned mid-git can no longer leave a folder showing nothing
+  tracked; a failed or timed-out `git ls-files` is not cached.
+- Table reloads (late git results while sorted by Git, Show Hidden Files,
+  search updates) wait for an inline rename to end.
+- Items to select after a create or rename are only taken for the folder
+  still shown, outside a search; navigation clears them.
+- After `shut_down` a browser lists and watches nothing.
+- A copy that cannot be re-locked is logged.
+- `files_sync_prefs` treats only ENOENT as "no container", so a refused check
+  without Full Disk Access never writes a sandboxed app's settings to the
+  wrong place.

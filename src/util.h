@@ -72,18 +72,21 @@ BOOL files_same_path(NSURL *a, NSURL *b);
 
 /*
  * files_icon_for_url — the icon Files shows for an item at a given size:
- * the Workspace icon (custom icons included), with the git badge centered
- * on it for the top folder of a git working tree. Cached app-wide (one per
- * file type, one per folder or package path), so it is cheap to call per
- * table cell. Main thread.
+ * the Workspace icon, with the git badge centered on it for the top folder
+ * of a git working tree. Cached, it is cheap enough per table cell: one
+ * icon per file type (custom icons on individual files are not shown) and
+ * one per folder or package path. Uncached, it reads the item's own
+ * current icon, custom icons included, for the one item Get Info or the
+ * sidebar shows. Main thread.
  *
  * Inputs:
- *   url  — file URL of the item (listing resource values used if prefetched)
- *   size — edge length in points
+ *   url    — file URL of the item (listing resource values used if prefetched)
+ *   size   — edge length in points
+ *   cached — YES for list rows and bookmarks, NO for a single inspected item
  *
- * Output: shared NSImage of size×size (never nil); do not modify it.
+ * Output: NSImage of size×size (never nil); do not modify it.
  */
-NSImage *files_icon_for_url(NSURL *url, CGFloat size);
+NSImage *files_icon_for_url(NSURL *url, CGFloat size, BOOL cached);
 
 /* Timeout for quick helper tools (git, defaults, lsof), in seconds. */
 #define FILES_TOOL_TIMEOUT 15.0

@@ -490,7 +490,7 @@ populate_fields:(NSURL *)url
         [fresh resourceValuesForKeys:keys error:nil];
 
     /* Icon */
-    self.icon_view.image = files_icon_for_url(fresh, icon_size);
+    self.icon_view.image = files_icon_for_url(fresh, icon_size, NO);
 
     /* Name */
     self.name_field.stringValue = res[NSURLNameKey] ?: url.lastPathComponent;

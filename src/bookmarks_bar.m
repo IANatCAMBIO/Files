@@ -317,7 +317,7 @@ rebuild_buttons
             icon = [[NSImage imageNamed:NSImageNameTrashEmpty] copy];
             icon.size = NSMakeSize(14, 14);
         } else {
-            icon = files_icon_for_url(url, 14);
+            icon = files_icon_for_url(url, 14, YES);
         }
 
         NSButton *btn = [[NSButton alloc] init];

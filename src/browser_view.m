@@ -264,10 +264,14 @@ listing_rows(NSArray<NSURL *> *items, NSString *sort_key, BOOL ascending,
  * repo and for Spotlight results, which hides the column. */
 @property (nonatomic, copy, readonly) NSSet<NSString *> *git_tracked; /* set_git_tracked: */
 @property (nonatomic, assign) BOOL                     reload_scheduled;
-/* The folder and index state git_tracked was last read for by git, so
- * reloads that leave the index alone do not run git again. */
+/* What git last reported (git_cache_tracked) and for which folder and
+ * index state, so reloads that leave the index alone do not run git
+ * again. Only a successful git run sets them. */
 @property (nonatomic, copy)   NSString                *git_cache_dir;
 @property (nonatomic, copy)   NSString                *git_cache_stamp;
+@property (nonatomic, copy)   NSSet<NSString *>       *git_cache_tracked;
+/* Set by shut_down: nothing is listed or watched afterwards. */
+@property (nonatomic, assign) BOOL                     is_shut_down;
 
 /* Counters that discard results a newer listing or search has superseded. */
 @property (nonatomic, assign) NSUInteger               list_generation;
@@ -583,6 +587,7 @@ build_context_menu
 - (void)
 watch:(NSURL *)dir git_index:(NSString *)git_index
 {
+    if (self.is_shut_down) return;
     /* FSEvents reports resolved paths (/private/var, not /var). */
     NSString *path = dir.URLByResolvingSymlinksInPath.path;
     if (self.fs_stream && [path isEqualToString:self.watched_path] &&
@@ -659,6 +664,7 @@ shut_down
         [NSNotificationCenter.defaultCenter removeObserver:self.defaults_observer];
         self.defaults_observer = nil;
     }
+    self.is_shut_down = YES;
     [self stop_watching];
     [self stop_search_query];
     ++self.list_generation;  /* drop any listing still in flight */
@@ -760,6 +766,8 @@ load_location:(NSURL *)url
     [self stop_search_query];
     self.current_dir      = url;
     self.auto_fit_pending = YES;
+    self.pending_names    = nil;
+    self.pending_rename   = NO;
     [self reload_directory];
 
     if (self.navigation_handler) self.navigation_handler(url);
@@ -981,7 +989,7 @@ row_order
 reload_directory
 {
     NSURL *dir = self.current_dir;
-    if (!dir || self.search_active) return;
+    if (!dir || self.search_active || self.is_shut_down) return;
     if (self.rename_url) {             /* reloading now would end the edit */
         self.reload_deferred = YES;
         return;
@@ -994,7 +1002,7 @@ reload_directory
     BOOL show_hidden      = [self shows_hidden_items];
     BOOL same_dir         = [self.git_cache_dir isEqualToString:dir.path];
     NSString *cache_stamp = same_dir ? self.git_cache_stamp : nil;
-    NSSet<NSString *> *cache_tracked = same_dir ? self.git_tracked : nil;
+    NSSet<NSString *> *cache_tracked = same_dir ? self.git_cache_tracked : nil;
     __weak FilesBrowserView *ws = self;
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -1025,13 +1033,18 @@ reload_directory
         });
         if (!work_tree || git_current) return;
 
-        NSSet<NSString *> *fresh = files_git_tracked_names(dir) ?: [NSSet set];
+        /* nil: git failed or timed out; show nothing tracked, but do not
+         * cache that, so the next reload asks again. */
+        NSSet<NSString *> *fresh = files_git_tracked_names(dir);
         dispatch_async(dispatch_get_main_queue(), ^{
             FilesBrowserView *s = ws;
             if (!s || generation != s.list_generation || s.search_active) return;
-            s.git_cache_dir   = dir.path;
-            s.git_cache_stamp = stamp;
-            [s set_git_tracked:fresh];
+            if (fresh) {
+                s.git_cache_dir     = dir.path;
+                s.git_cache_stamp   = stamp;
+                s.git_cache_tracked = fresh;
+            }
+            [s set_git_tracked:fresh ?: [NSSet set]];
             if ([s.sort_key isEqualToString:col_git]) {
                 [s resort_revealing:NO];
             } else {
@@ -1078,7 +1091,8 @@ selected_paths
  * selects the rows whose paths are in paths (AppKit keeps selected row
  * numbers across reloadData, which point at other items once rows are
  * reordered or rebuilt), updates the status and runs a pending auto-fit
- * (for a search, only once it has results).
+ * (for a search, only once it has results). During an inline rename the
+ * table is left alone and a reload is run when the rename ends.
  *
  * Inputs:
  *   rows   — items to show, already filtered and sorted
@@ -1088,6 +1102,10 @@ selected_paths
 - (void)
 show_rows:(NSArray<NSURL *> *)rows selecting:(NSSet<NSString *> *)paths reveal:(BOOL)reveal
 {
+    if (self.rename_url) {             /* reloading the table would end the edit */
+        self.reload_deferred = YES;
+        return;
+    }
     self.filtered_items = rows;
     [self.table reloadData];
     NSIndexSet *sel = [rows indexesOfObjectsPassingTest:
@@ -1648,7 +1666,7 @@ viewForTableColumn:(NSTableColumn *)col
     }
 
     cell.textField.stringValue = [self cell_text_for_column:ident url:url];
-    if ([ident isEqualToString:col_name]) cell.imageView.image = files_icon_for_url(url, icon_sz);
+    if ([ident isEqualToString:col_name]) cell.imageView.image = files_icon_for_url(url, icon_sz, YES);
     return cell;
 }
 
@@ -2122,10 +2140,28 @@ create_and_rename:(BOOL)folder
                              err, s.window);
             return;
         }
-        s.pending_names  = [NSSet setWithObject:new_url.lastPathComponent];
-        s.pending_rename = YES;
+        [s select_after_listing:new_url rename:YES];
         [s reload_directory];
     }];
+}
+
+/*
+ * select_after_listing:rename: — has the next listing select url (and,
+ * with rename, rename it in place), provided it is in the folder shown
+ * now: a create or rename that finishes after the user moved on, or
+ * while Spotlight results are shown, selects nothing.
+ *
+ * Inputs:
+ *   url    — item to select
+ *   rename — YES to start an inline rename of it
+ */
+- (void)
+select_after_listing:(NSURL *)url rename:(BOOL)rename
+{
+    if (self.search_active ||
+        !files_same_path(url.URLByDeletingLastPathComponent, self.current_dir)) return;
+    self.pending_names  = [NSSet setWithObject:url.lastPathComponent];
+    self.pending_rename = rename;
 }
 
 /*
@@ -2295,7 +2331,7 @@ controlTextDidEndEditing:(NSNotification *)note
         if (err) {
             files_show_error(@"Rename failed", err, s.window);
         } else {
-            s.pending_names = [NSSet setWithObject:new_url.lastPathComponent];
+            [s select_after_listing:new_url rename:NO];
         }
         [s reload_directory];
     }];

@@ -609,7 +609,10 @@ commit_item(NSURL *staged, NSURL *dst, BOOL replace, BOOL hidden, copy_ctx_t *c)
     }
     log_line(c, @"Renamed \"%@\" to \"%@\"", staged.path, dst.path);
     match_hidden_flag(dst, hidden, c);
-    if (lock && lstat(dst_p, &st) == 0) lchflags(dst_p, st.st_flags | lock);
+    if (lock && (lstat(dst_p, &st) != 0 || lchflags(dst_p, st.st_flags | lock) != 0)) {
+        log_line(c, @"✗ Could not lock \"%@\" again as its original is (%s)",
+                 dst.path, strerror(errno));
+    }
 
     /* The new item is in place; a failed cleanup only leaves a hidden
      * ".<name>.files-old-*" item behind, never data loss. */

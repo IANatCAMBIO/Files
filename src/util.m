@@ -3,6 +3,8 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <errno.h>
 
 NSString * const files_pref_show_hidden     = @"files.show_hidden_files";
 NSString * const files_pref_auto_fit        = @"files.auto_fit_columns";
@@ -75,15 +77,16 @@ files_same_path(NSURL *a, NSURL *b)
 }
 
 /*
- * files_icon_for_url — Workspace icon, git-badged for working trees,
- * cached: plain files share one icon per type (keyed by UTI) so a folder
- * of 10,000 JPEGs costs one image; folders and packages can carry custom
- * icons (or be git working trees), so they are cached per path. The cache
- * is bounded and evictable under memory pressure.
+ * files_icon_for_url — Workspace icon, git-badged for working trees. With
+ * cached, plain files share one icon per type (keyed by UTI) so a folder
+ * of 10,000 JPEGs costs one image, and folders and packages (which can
+ * carry custom icons or be git working trees) are cached per path; the
+ * cache is bounded and evictable under memory pressure. Without, the
+ * item's own current icon is read and the cache is left alone.
  * Inputs/output are documented in util.h.
  */
 NSImage *
-files_icon_for_url(NSURL *url, CGFloat size)
+files_icon_for_url(NSURL *url, CGFloat size, BOOL cached)
 {
     static NSCache<NSString *, NSImage *> *cache;
     static dispatch_once_t once;
@@ -92,16 +95,21 @@ files_icon_for_url(NSURL *url, CGFloat size)
         cache.countLimit = 4096;
     });
 
-    NSNumber *is_dir = nil;
-    NSString *uti    = nil;
-    [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
-    [url getResourceValue:&uti forKey:NSURLTypeIdentifierKey error:nil];
-    BOOL by_type = !is_dir.boolValue && uti.length > 0;
-    NSString *key = [NSString stringWithFormat:@"%g:%@", size, by_type ? uti : url.path];
+    NSString *key = nil;
+    UTType *type  = nil;
+    if (cached) {
+        NSNumber *is_dir = nil;
+        NSString *uti    = nil;
+        [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
+        [url getResourceValue:&uti forKey:NSURLTypeIdentifierKey error:nil];
+        BOOL by_type = !is_dir.boolValue && uti.length > 0;
+        key  = [NSString stringWithFormat:@"%g:%@", size, by_type ? uti : url.path];
+        type = by_type ? [UTType typeWithIdentifier:uti] : nil;
+        NSImage *icon = [cache objectForKey:key];
+        if (icon) return icon;
+    }
 
-    NSImage *icon = [cache objectForKey:key];
-    if (icon) return icon;
-    UTType *type = by_type ? [UTType typeWithIdentifier:uti] : nil;
+    NSImage *icon;
     if (type) {
         icon = [[NSWorkspace.sharedWorkspace iconForContentType:type] copy];
         icon.size = NSMakeSize(size, size);
@@ -110,7 +118,7 @@ files_icon_for_url(NSURL *url, CGFloat size)
         icon.size = NSMakeSize(size, size);
         if (files_is_git_repo(url)) icon = files_git_badged_icon(icon);
     }
-    [cache setObject:icon forKey:key];
+    if (key) [cache setObject:icon forKey:key];
     return icon;
 }
 
@@ -220,9 +228,13 @@ BOOL
 files_sync_prefs(NSString *domain, NSDictionary<NSString *, NSArray *> *values,
                  NSMutableDictionary<NSString *, NSArray *> *previous)
 {
+    /* Only a container known to be absent means an ordinary domain: without
+     * Full Disk Access the check itself can be refused (EPERM), and a
+     * sandboxed app's settings must not be written beside its container. */
     NSString *container = [NSString stringWithFormat:@"%@/Library/Containers/%@",
                            NSHomeDirectory(), domain];
-    if (access(container.fileSystemRepresentation, F_OK) != 0) {
+    struct stat st;
+    if (lstat(container.fileSystemRepresentation, &st) != 0 && errno == ENOENT) {
         return sync_prefs_cf(domain, values, previous);
     }
 
