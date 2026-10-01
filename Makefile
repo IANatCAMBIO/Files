@@ -7,7 +7,7 @@ RSRC     = $(CONTENTS)/Resources
 CC       = clang
 
 # The version shown in the About panel; edit VERSION to change it.
-VERSION  = $(strip $(shell cat VERSION))
+VERSION := $(strip $(shell cat VERSION))
 
 # Code-signing identity. macOS ties privacy grants such as Full Disk Access
 # to the app's signature: for an ad-hoc ("-") signature that is the exact
@@ -15,6 +15,11 @@ VERSION  = $(strip $(shell cat VERSION))
 # ID plus certificate, which rebuilds keep. Defaults to the first
 # "Apple Development" identity in the keychain, else ad hoc. Override with
 #   make CODESIGN_IDENTITY="…"   (list: security find-identity -v -p codesigning)
+#
+# Only goals that build the bundle look the identity up: `make clean` and
+# `make test` do not sign anything, so they skip the keychain query.
+SIGNING_GOALS := $(if $(MAKECMDGOALS),$(filter-out clean test,$(MAKECMDGOALS)),all)
+ifneq ($(SIGNING_GOALS),)
 ifeq ($(origin CODESIGN_IDENTITY),undefined)
 CODESIGN_IDENTITY := $(or $(shell security find-identity -v -p codesigning 2>/dev/null \
     | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -n 1),-)
@@ -27,11 +32,15 @@ endif
 $(shell mkdir -p build && (echo '$(CODESIGN_IDENTITY)' | cmp -s - build/codesign.id \
     || { echo '$(CODESIGN_IDENTITY)' > build/codesign.id; \
          [ -d $(BUNDLE) ] && touch -t 200001010000 $(BUNDLE); true; }))
+endif
 # -Werror=unguarded-availability: calling an API newer than the deployment
 # target without an @available check is a build error. (Clang cannot check
 # messages to __kindof receivers such as NSApp or +sharedApplication.)
 # -MMD -MP: emit build/*.d header-dependency files so editing a header
 # rebuilds every object that includes it.
+# -Wno-unused-parameter: the parameters left unused are ones callback
+# signatures require (blocks, FSEvents and notification handlers), which
+# would otherwise each need a (void) cast.
 CFLAGS   = -fobjc-arc -O2 -Wall -Wextra -Wno-unused-parameter \
            -Werror=unguarded-availability \
            -mmacosx-version-min=14.0 -I src -MMD -MP

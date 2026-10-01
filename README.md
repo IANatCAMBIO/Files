@@ -23,7 +23,9 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   a Git column that reads "tracked" for every file git tracks (including
   newly added ones) and every folder containing one, and is blank for
   untracked and ignored items; it updates when the index changes (add, rm,
-  commit, checkout). The repository's Get Info
+  commit, checkout) and is filled in just after the list appears, so large
+  repositories never hold up a folder. Git features need Xcode or the
+  Command Line Tools and are off without them. The repository's Get Info
   panel adds a Git section: the current branch, whether it is pushed
   (compared with its upstream as of the last fetch — commits
   ahead/behind, no upstream, detached HEAD), and the remote URL (the
@@ -34,8 +36,11 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   Validate Copies with SHA-256). View ▸ Simple Copies (off by default)
   skips the panel: transfers run silently, keeping both on name clashes,
   and only errors are shown. Copies use APFS clones when possible and
-  keep extended attributes, tags, ACLs and dates; nothing at the
-  destination is replaced until the new copy is complete
+  keep extended attributes, tags, ACLs, the Locked flag and dates; nothing
+  at the destination is replaced until the new copy is complete. With
+  validation on, each file is checked as soon as it is copied and the copy
+  stops at the first mismatch; APFS clones share the original's data, so
+  they are not re-read
 - Move to Trash, Empty Trash, New Folder and New File (File menu, right-click,
   or the toolbar's + button), inline rename (Return; the name
   without its extension is selected, ready to type)
@@ -46,8 +51,12 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   system's DiskImageMounter to ask, then open the same way
 - Spotlight search by name, in the current folder and its subfolders or
   across the whole Mac (the search field's magnifying-glass menu: This
-  Folder / This Mac; the empty field shows which)
-- Live updates when the current folder changes
+  Folder / This Mac; the empty field shows which); the first 5,000 matches
+  are shown, and the status bar says when there are more
+- Live updates when the current folder changes; a folder that cannot be
+  read (no permission, a disconnected server) says so in the status bar.
+  Folders are listed in the background, so a slow or unresponsive network
+  folder never freezes the window
 - View ▸ Show Finder After Archive Operations (off by default) keeps
   Archive Utility's archive-reveal-after / dearchive-reveal-after in step
   with the menu (checked at every launch, including the first), so by
@@ -84,6 +93,8 @@ make install
 ```
 
 This builds the app bundle and copies it to `~/Applications/files.app` (per-user; no `sudo` needed). Re-running `make install` replaces the previous copy.
+
+To check a build first, `make test` runs the copy-engine tests (see BUILD.md).
 
 ## Full Disk Access
 

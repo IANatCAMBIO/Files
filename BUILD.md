@@ -25,8 +25,12 @@ No third-party libraries. All dependencies are Apple system frameworks:
 | UniformTypeIdentifiers | Per-file-type icon lookup (icon cache) |
 | ServiceManagement | Login item for Keep Files running (`SMAppService`) |
 
-At run time Get Info runs `/usr/bin/git` (Command Line Tools) to read the
-branch and push state of git folders; nothing else needs it.
+At run time Files runs `/usr/bin/git` (Xcode or the Command Line Tools) for
+the Git column and Get Info's branch and push state. Without either, the git
+features are simply off: Files checks once with `xcode-select -p` and never
+runs git, so macOS does not offer to install the tools. It also runs `lsof`
+(what keeps a volume busy), `hdiutil` (disk images) and, for Archive
+Utility's sandboxed settings only, `defaults`.
 
 The C library's `copyfile(3)`, `renamex_np(2)` and CommonCrypto (SHA-256 / MD5)
 are part of libSystem and need no extra linking.
@@ -38,7 +42,18 @@ are part of libSystem and need no extra linking.
 | Build (default) | `make`          | Compiles and assembles `files.app`     |
 | Run             | `make run`      | Builds then opens the app with `open`  |
 | Install         | `make install`  | Replaces `~/Applications/files.app` with the new build |
+| Test            | `make test`     | Builds and runs the copy-engine tests (`tests/`) |
 | Clean           | `make clean`    | Removes `build/` and `files.app`       |
+
+`make test` links each `tests/*_test.m` against the app's objects (all but
+`main.o`) and runs it. `file_ops_test` exercises the copy engine on a scratch
+folder in `$TMPDIR` and on a small HFS+ disk image it creates and mounts
+(`hdiutil`): locked files and folders, Keep Both, Replace, duplicate in
+place, copy into itself, same-volume and cross-volume moves, and SHA-256
+validation (APFS clones are not hashed; copies to another volume are). It
+cleans up after itself, prints one line per check and exits non-zero on a
+failure. `make clean` and `make test` skip the keychain lookup for the
+signing identity.
 
 ## Output
 
@@ -85,6 +100,8 @@ a no-op `make`.
   than the deployment target (macOS 14.0) without an `@available` check.
   Clang cannot check messages sent to `__kindof` receivers (for example
   `NSApp` or `+[NSApplication sharedApplication]`), so review those by hand.
+- `-Wno-unused-parameter`: the only unused parameters are ones callback
+  signatures require (blocks, FSEvents callbacks, notification handlers).
 
 ## Source layout
 
@@ -93,12 +110,16 @@ src/
 ├── main.m                  — entry point
 ├── app_delegate.h/.m       — app lifecycle (incl. Keep Files running and
 │                             its login item), menu bar, Mounts menu
-├── main_window.h/.m        — window controller: toolbar, split views, pane
-│                             switching, Go-menu and view-preference actions
-├── browser_pane.h/.m       — one pane: browser view + per-pane state
-├── browser_view.h/.m       — file list (NSTableView), background listing,
-│                             FSEvents watcher, Spotlight search, history
-├── bookmarks_bar.h/.m      — bookmarks strip above the browser
+├── main_window.h/.m        — window controller: toolbar, split views, one or
+│                             two browser panes, Go-menu and view-preference
+│                             actions
+├── browser_view.h/.m       — file list (NSTableView): listing, filtering and
+│                             sorting off the main thread, FSEvents watcher,
+│                             Git column, Spotlight search, history
+├── bookmarks_bar.h/.m      — bookmarks strip above the browser, shared by
+│                             every window; app-wide Trash watcher
+├── git_info.h/.m           — git working trees: tracked names, branch and
+│                             push state, the git folder badge
 ├── info_sidebar.h/.m       — collapsible Quick Look / details sidebar
 ├── info_panel.h/.m         — Get Info panel (permissions, lock, hashes)
 ├── file_ops.h/.m           — pasteboard, copy/move engine (copyfile +
@@ -106,16 +127,21 @@ src/
 ├── copy_progress.h/.m      — copy progress panel and conflict prompts
 ├── speed_graph.h/.m        — bounded transfer-speed graph
 ├── file_hash.h/.m          — single-pass, cancellable SHA-256 / MD5
-├── mounts_panel.h/.m       — All Mounts panel (per-volume unmount)
-├── volume_manager.h/.m     — mounted-volume list and unmount
+├── mounts_panel.h/.m       — All Mounts panel (mount table read off the
+│                             main thread; per-volume unmount)
+├── volume_manager.h/.m     — mounted-volume list, unmount, disk images
 ├── default_viewer.h/.m     — takes over from Finder as default file viewer
 │                             (NSFileViewer, Finder settings) and restores
 │                             the recorded originals
 ├── prefs_window.h/.m       — Preferences window; the View-menu preference
 │                             list both it and the menu are built from
 └── util.h/.m               — shared helpers: preference keys, other apps'
-                              preferences (`defaults`), standard folder
-                              URLs, size/date formatting, error alerts
+                              preferences (CFPreferences, or `defaults` for
+                              sandboxed apps), running tools with a timeout,
+                              the background queue, standard folder URLs,
+                              the icon cache, size/date formatting, alerts
+tests/
+└── file_ops_test.m         — copy-engine tests (`make test`)
 ```
 
 ## Code signing

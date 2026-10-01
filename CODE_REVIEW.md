@@ -198,3 +198,85 @@ target folder, and a broken link reports an error.
 5. Browser performance: static formatters, VNODE watcher, background listing, icon cache, auto-fit on visible rows.
 6. AppKit replacements (split view controller, toolbar items, table-native rename).
 7. Docs pass: README/BUILD.md refresh, fix the wrong comments, fill missing blocks.
+
+---
+
+# Optimization pass — 2026-10-01
+
+Scope: all of `src/` at commit c2bac09, reviewed for (1) simplicity,
+(2) reliability, (3) speed, (4) resource use. Every finding below was
+implemented on branch `optimizations`, except where noted.
+
+## Copy engine (`file_ops`, `copy_progress`, `file_hash`)
+- **Locked items could not be copied** (copyfile copies `uchg`, so the commit
+  rename failed with EPERM and cleanup left hidden `.files-tmp-*` items).
+  Folders are unlocked while copyfile fills them (it re-locks them in its
+  cleanup pass) and the staged item while it is renamed into place; all
+  cleanup uses `remove_tree`.
+- SHA-256 validation runs in the copyfile callback as each file lands and
+  stops at the first mismatch; APFS clones (`COPYFILE_STATE_WAS_CLONED`) are
+  not hashed. `verify_copy` and the `hash_results` dictionary are gone.
+  Source and copy are hashed in parallel when on different devices.
+- Same-volume moves are one `renamex_np(RENAME_EXCL)`; staging only for Replace.
+  (Replace via `RENAME_SWAP` was not adopted: it needs a fallback for volumes
+  without swap support, for little gain.)
+- Failed rollback renames report where the hidden item now is.
+- Into-itself / same-folder checks use `realpath` (case, symlinks).
+- `unique_dest_url` uses `lstat` like the rest of the engine.
+- Progress and log lines are recorded on the copy thread and picked up by the
+  panel's 0.25 s timer (no main-queue hop per file or line).
+- `file_digests` sizes its buffer to the file; log arguments are formatted
+  only when there is a log.
+- `make test` (`tests/file_ops_test.m`) covers the engine.
+
+## Browser (`browser_view`, `main_window`, `bookmarks_bar`)
+- Listing, filtering and sorting run on a global queue (the per-pane serial
+  queue let one hung network folder block later navigation).
+- The Git column is filled in after the listing shows; `git ls-files` reruns
+  only when the folder or its index (mtime + size) changed, and its output
+  makes one string per child. (Computing "is a git repo" per child in the
+  background was not needed once folder icons are cached app-wide.)
+- Spotlight results are built, prefetched, filtered and sorted off the main
+  thread, capped at 5,000.
+- Unreadable folders say so in the status bar.
+- Folder-level FSEvents with WatchRoot (one stream per navigation).
+- `pending_names` / `pending_rename` replace `reload_directory_then:`.
+- One `show_rows` / `resort` path; Show Hidden Files applies to every pane in
+  every window; strmode(3); Kind uses the localized type.
+- `FilesBrowserPane` removed; `shut_down` on window close.
+- One app-wide Trash watcher drives every bar's Trash icon; bookmark bars
+  reload when another window saves the list.
+
+## App lifecycle (`app_delegate`, `default_viewer`, `util`)
+- `prefs_changed` waits for the first `sync_integrations` (no double syncs or
+  stacked Full Disk Access prompts at first launch).
+- `run_checks` runs after the first window draws; the Full Disk Access prompt
+  appears at most once per run.
+- SMAppService, Archive Utility and default-viewer work share one
+  utility-QoS serial queue (`files_background_queue`).
+- `files_sync_prefs` uses CFPreferences for ordinary domains; the `defaults`
+  tool only for sandboxed containers (Archive Utility).
+- `files_run_tool` has a timeout.
+- Every NSUserDefaultsDidChangeNotification observer runs on the main queue.
+  (`default_viewer` still saves its records from the background queue; with
+  main-queue observers that is harmless, so it was left as is.)
+- The Mounts menu opens a window when none is open.
+- Login launches are logged (`[launch] started as a login item`) to confirm
+  keyAELaunchedAsLogInItem arrives for the SMAppService login item.
+
+## Panels and helpers
+- All Mounts reads the mount table and capacities off the main thread
+  (`getmntinfo_r_np`, MNT_DONTBROWSE for volumes).
+- lsof / hdiutil via `files_run_tool`; interactive mounts are detected with
+  `hdiutil info` instead of re-running attach.
+- git is skipped when neither Xcode nor the Command Line Tools is installed.
+- Info panel: NSGridView layout (FilesVCenterCell, the name box and frame math
+  removed); hashes toggle alone; rename race fixed; fresh URL instead of
+  clearing the browser's cached values; Kind for packages.
+- Info sidebar: no Quick Look request for plain folders.
+- `files_icon_for_url` caches app-wide.
+
+## Build
+- `VERSION :=`; `make clean` / `make test` skip the signing-identity lookup.
+- `-Wno-unused-parameter` kept on purpose: every remaining unused parameter is
+  required by a callback signature (documented in the Makefile and BUILD.md).
