@@ -13,7 +13,8 @@ A minimalist macOS file manager written in Objective-C + AppKit.
 - Bookmarks bar (Home, Desktop, Downloads, Documents, Applications, Trash);
   ⌘D or the ★ button adds the current folder, and right-click ▸ Add to
   Bookmarks on a folder in the list adds that folder (before Trash, which
-  is always last); right-click a bookmark to remove it
+  is always last); right-click a bookmark to remove it. View ▸ Show
+  Bookmarks Bar (on by default) hides or shows it in every window
 - Quick Look: Space previews the selection (Space or Esc closes it; the
   arrow keys move through the list and the preview follows)
 - Collapsible info sidebar with a Quick Look thumbnail and file details

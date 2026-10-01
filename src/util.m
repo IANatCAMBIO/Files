@@ -17,6 +17,7 @@ NSString * const files_pref_default_viewer  = @"files.default_viewer";
 NSString * const files_pref_keep_running    = @"files.keep_running";
 NSString * const files_pref_hidden_columns  = @"files.hidden_columns";
 NSString * const files_pref_search_this_mac = @"files.search_this_mac";
+NSString * const files_pref_show_bookmarks  = @"files.show_bookmarks";
 
 /*
  * files_register_defaults — registers non-NO preference defaults.
@@ -28,6 +29,7 @@ files_register_defaults(void)
     [NSUserDefaults.standardUserDefaults registerDefaults:@{
         files_pref_auto_fit:       @YES,
         files_pref_default_viewer: @YES,
+        files_pref_show_bookmarks: @YES,
     }];
 }
 

@@ -57,6 +57,7 @@ static void *first_responder_ctx = &first_responder_ctx;
 /* Layout */
 @property (nonatomic, weak)   NSSearchField         *search_field;  /* toolbar search field */
 @property (nonatomic, strong) FilesBookmarksBar     *bookmarks_bar;
+@property (nonatomic, strong) NSView                *browser_area; /* everything below the bar */
 @property (nonatomic, strong) NSSplitView           *pane_split;   /* holds 1 or 2 panes */
 @property (nonatomic, strong) NSSplitViewController *content_split_vc;
 @property (nonatomic, strong) NSSplitViewItem       *sidebar_item;
@@ -135,7 +136,11 @@ init_with_url:(NSURL *)url
     self.defaults_observer = [NSNotificationCenter.defaultCenter
         addObserverForName:NSUserDefaultsDidChangeNotification object:nil
                      queue:NSOperationQueue.mainQueue
-                usingBlock:^(NSNotification *n) { [ws update_search_placeholder]; }];
+                usingBlock:^(NSNotification *n) {
+        [ws update_search_placeholder];
+        [ws apply_bookmarks_bar_pref];
+    }];
+    [self apply_bookmarks_bar_pref];
 
     self.bookmarks_bar.selection_handler = ^(NSURL *url) {
         [[ws active_browser] navigate_to:url];
@@ -214,6 +219,7 @@ build_layout
     NSView *area = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, w, h - bookmarks_bar_h)];
     area.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     [content addSubview:area];
+    self.browser_area = area;
 
     /* Status bar and its separator at the bottom of area. */
     NSView *status_container = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, w, status_h)];
@@ -297,6 +303,23 @@ build_layout
     self.floating_btn.autoresizingMask = NSViewMinXMargin | NSViewMaxYMargin;
     self.floating_btn.hidden           = YES;
     [area addSubview:self.floating_btn positioned:NSWindowAbove relativeTo:nil];
+}
+
+/*
+ * apply_bookmarks_bar_pref — shows or hides the bookmarks bar to match
+ * files_pref_show_bookmarks (View ▸ Show Bookmarks Bar); when hidden, the
+ * browser area takes its height. Cheap when nothing changed, so it runs on
+ * every defaults change.
+ */
+- (void)
+apply_bookmarks_bar_pref
+{
+    BOOL show = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_show_bookmarks];
+    if (self.bookmarks_bar.hidden == !show) return;
+    self.bookmarks_bar.hidden = !show;
+    NSRect bounds = self.window.contentView.bounds;
+    self.browser_area.frame = NSMakeRect(0, 0, NSWidth(bounds),
+                                         NSHeight(bounds) - (show ? bookmarks_bar_h : 0.0));
 }
 
 /* ── Panes ───────────────────────────────────────────────────────────────── */

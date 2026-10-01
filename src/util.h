@@ -18,6 +18,7 @@ extern NSString * const files_pref_archive_reveal;  /* Archive Utility reveals r
 extern NSString * const files_pref_default_viewer;  /* Files replaces Finder as file viewer (default on) */
 extern NSString * const files_pref_keep_running;    /* stay running with no windows; open at login */
 extern NSString * const files_pref_search_this_mac; /* search the whole Mac, not the current folder */
+extern NSString * const files_pref_show_bookmarks;  /* bookmarks bar above the list (default on) */
 
 /* NSUserDefaults key (array of column identifiers): file-list columns the
  * user has hidden from the column-header menu. Absent = all shown. */
