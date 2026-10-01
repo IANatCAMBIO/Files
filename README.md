@@ -49,8 +49,9 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   stops at the first mismatch; APFS clones share the original's data, so
   they are not re-read
 - Move to Trash, Empty Trash, New Folder and New File (File menu, right-click,
-  or the toolbar's + button), inline rename (Return; the name
-  without its extension is selected, ready to type)
+  or the toolbar's + button), inline rename (Return on a file, or
+  right-click ▸ Rename; the name without its extension is selected, ready
+  to type). Return on a folder opens it
 - App bundles open like folders; right-click ▸ Run Application launches one
 - Symbolic links are followed (a link to a folder opens that folder)
 - Opening a disk image (.dmg, .iso, …) mounts it and opens its volume in a
@@ -235,7 +236,8 @@ folder.
 | New Folder     | ⌘⇧N                |
 | Get Info       | ⌘I                 |
 | Select All     | ⌘A                 |
-| Rename         | Return             |
+| Open folder    | Return (on a folder) |
+| Rename         | Return (on a file) |
 | Back           | ⌘[                 |
 | Forward        | ⌘]                 |
 | Home           | ⌘⇧H               |
