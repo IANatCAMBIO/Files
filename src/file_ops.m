@@ -1081,3 +1081,33 @@ empty_trash_with_finder:(void (^)(NSString *error))completion
 }
 
 @end
+
+/*
+ * files_folder_size — fts walk summing regular files' sizes.
+ * Inputs/output are documented in file_ops.h.
+ */
+int64_t
+files_folder_size(const char *path, const atomic_int *cancel)
+{
+    char *const roots[] = { (char *)path, NULL };
+    FTS *fts = fts_open(roots, FTS_PHYSICAL | FTS_NOCHDIR | FTS_XDEV, NULL);
+    if (!fts) return -1;
+
+    int64_t total = 0;
+    FTSENT *e;
+    while ((e = fts_read(fts)) != NULL) {
+        if (cancel && atomic_load(cancel)) {
+            fts_close(fts);
+            return -1;
+        }
+        if (e->fts_level == FTS_ROOTLEVEL &&
+            (e->fts_info == FTS_NS || e->fts_info == FTS_ERR || e->fts_info == FTS_DNR)) {
+            fts_close(fts);     /* the folder itself is missing or unreadable */
+            return -1;
+        }
+        if (e->fts_info == FTS_F) total += e->fts_statp->st_size;
+    }
+    fts_close(fts);
+    return total;
+}
+

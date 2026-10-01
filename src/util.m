@@ -18,6 +18,7 @@ NSString * const files_pref_keep_running    = @"files.keep_running";
 NSString * const files_pref_hidden_columns  = @"files.hidden_columns";
 NSString * const files_pref_search_this_mac = @"files.search_this_mac";
 NSString * const files_pref_show_bookmarks  = @"files.show_bookmarks";
+NSString * const files_pref_folder_sizes    = @"files.folder_sizes";
 
 /*
  * files_register_defaults — registers non-NO preference defaults.
@@ -382,3 +383,27 @@ files_show_error(NSString *title, NSError *err, NSWindow *window)
     alert.informativeText = err.localizedDescription ?: @"Unknown error";
     files_present_alert(alert, window, nil);
 }
+
+@implementation FilesCancelToken {
+    atomic_int _cancel;
+}
+
+/*
+ * cancel_flag — the token's flag. Inputs/output are documented in util.h.
+ */
+- (const atomic_int *)
+cancel_flag
+{
+    return &_cancel;
+}
+
+/*
+ * cancel — sets the flag. Inputs/output are documented in util.h.
+ */
+- (void)
+cancel
+{
+    atomic_store(&_cancel, 1);
+}
+
+@end

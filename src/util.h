@@ -1,4 +1,5 @@
 #import <Cocoa/Cocoa.h>
+#include <stdatomic.h>
 
 /*
  * util — small helpers shared across the app so each exists exactly once:
@@ -19,6 +20,7 @@ extern NSString * const files_pref_default_viewer;  /* Files replaces Finder as 
 extern NSString * const files_pref_keep_running;    /* stay running with no windows; open at login */
 extern NSString * const files_pref_search_this_mac; /* search the whole Mac, not the current folder */
 extern NSString * const files_pref_show_bookmarks;  /* bookmarks bar above the list (default on) */
+extern NSString * const files_pref_folder_sizes;    /* Size column totals folders' contents */
 
 /* NSUserDefaults key (array of column identifiers): file-list columns the
  * user has hidden from the column-header menu. Absent = all shown. */
@@ -234,3 +236,26 @@ void files_present_alert(NSAlert *alert, NSWindow *window, void (^handler)(NSMod
  *   window — window to attach the sheet to; nil = app-modal alert
  */
 void files_show_error(NSString *title, NSError *err, NSWindow *window);
+
+/*
+ * FilesCancelToken — an atomic cancel flag for one piece of background
+ * work (a hash, a folder-size count). The work's block holds a strong
+ * reference, so the flag stays valid for the whole job even after its
+ * owner has moved on and dropped (or replaced) its own reference.
+ */
+@interface FilesCancelToken : NSObject
+
+/*
+ * cancel_flag — the flag for C code to poll (e.g. file_digests).
+ *
+ * Output: pointer valid while the token is alive; non-zero once cancelled.
+ */
+- (const atomic_int *)cancel_flag;
+
+/*
+ * cancel — asks the job to stop at its next check.
+ */
+- (void)cancel;
+
+@end
+

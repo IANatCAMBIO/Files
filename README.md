@@ -55,6 +55,12 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   across the whole Mac (the search field's magnifying-glass menu: This
   Folder / This Mac; the empty field shows which); the first 5,000 matches
   are shown, and the status bar says when there are more
+- View ▸ Show Folder Sizes (off by default; also in Preferences): the Size
+  column shows each folder's total — every file inside it, at any depth,
+  added up (symbolic links not followed, other volumes not entered).
+  Totals are counted in the background, one folder at a time, and fill in
+  as they finish ("…" until then); sorting by Size uses them. They are
+  kept while you stay in the folder; Reload counts them again
 - Live updates when the current folder changes; a folder that cannot be
   read (no permission, a disconnected server) says so in the status bar.
   Folders are listed in the background, so a slow or unresponsive network

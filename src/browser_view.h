@@ -143,6 +143,13 @@
 - (void)reload_directory;
 
 /*
+ * refresh — Reload: re-lists the current folder and, with Show Folder
+ * Sizes on, counts its folders' sizes again (a listing refresh keeps the
+ * totals already counted).
+ */
+- (void)refresh;
+
+/*
  * shut_down — stops the folder watcher, any Spotlight search and
  * preference observing, for a browser whose window is closing. The
  * browser shows nothing new afterwards.

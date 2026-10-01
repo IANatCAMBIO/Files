@@ -218,3 +218,18 @@ typedef FilesConflictResolution (^FilesConflictBlock)(NSURL *src, NSURL *dst);
 + (void)empty_trash_with_finder:(void (^)(NSString *error))completion;
 
 @end
+
+/*
+ * files_folder_size — the total size of every file inside a folder, at
+ * any depth: the sum of their sizes (st_size), as the Size column shows
+ * for a file. Symbolic links are not followed and other volumes mounted
+ * inside the folder are not entered. Items that cannot be read are
+ * skipped. Blocks for as long as the walk takes; call off the main thread.
+ *
+ * Inputs:
+ *   path   — folder (or package) to measure
+ *   cancel — polled during the walk; non-zero stops it. May be NULL.
+ *
+ * Output: total bytes, or -1 if cancelled or the folder cannot be opened.
+ */
+int64_t files_folder_size(const char *path, const atomic_int *cancel);

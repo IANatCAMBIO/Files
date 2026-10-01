@@ -248,6 +248,21 @@ main(void)
             check(NO, @"attach the test disk image");
         }
 
+        /* Folder size: nested files add up; symbolic links are not followed. */
+        NSURL *sized = [root URLByAppendingPathComponent:@"sized"];
+        NSURL *deep  = [sized URLByAppendingPathComponent:@"deep"];
+        [fm createDirectoryAtURL:deep withIntermediateDirectories:YES attributes:nil error:nil];
+        write_file([sized URLByAppendingPathComponent:@"ten"], @"0123456789");
+        write_file([deep URLByAppendingPathComponent:@"five"], @"01234");
+        [fm createSymbolicLinkAtURL:[sized URLByAppendingPathComponent:@"link"]
+                 withDestinationURL:[NSURL fileURLWithPath:@"/System/Library/Kernels/kernel"]
+                              error:nil];
+        int64_t total = files_folder_size(sized.fileSystemRepresentation, NULL);
+        check(total == 15, [NSString stringWithFormat:@"folder size adds nested files, skips links (%lld)",
+                            (long long)total]);
+        check(files_folder_size([root URLByAppendingPathComponent:@"missing"].fileSystemRepresentation,
+                                NULL) == -1, @"folder size of a missing folder is -1");
+
         /* Clean up: unlock everything first. */
         NSDirectoryEnumerator *e = [fm enumeratorAtURL:root includingPropertiesForKeys:nil
                                                options:0 errorHandler:nil];

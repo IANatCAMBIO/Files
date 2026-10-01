@@ -132,44 +132,6 @@ make_perm_popup(NSString *caption, id target, NSPopUpButton **popup)
     return stack;
 }
 
-/* ── FilesHashJob — cancel flag shared with one background hash pass ──── */
-
-/*
- * FilesHashJob — owns the atomic cancel flag polled by file_digests(). The
- * background block holds a strong reference, so the flag stays valid for the
- * whole read even after the panel has moved on and dropped its reference.
- */
-@interface FilesHashJob : NSObject
-- (const atomic_int *)cancel_flag;
-- (void)cancel;
-@end
-
-@implementation FilesHashJob {
-    atomic_int _cancel;
-}
-
-/*
- * cancel_flag — exposes the flag for file_digests() to poll.
- *
- * Output: pointer to the job's cancel flag, valid while the job is alive.
- */
-- (const atomic_int *)
-cancel_flag
-{
-    return &_cancel;
-}
-
-/*
- * cancel — asks the running file_digests() pass to stop at its next read.
- */
-- (void)
-cancel
-{
-    atomic_store(&_cancel, 1);
-}
-
-@end
-
 /* ── FilesInfoPanel ──────────────────────────────────────────────────── */
 
 @interface FilesInfoPanel () <NSTextFieldDelegate, NSWindowDelegate>
@@ -192,7 +154,7 @@ cancel
 @property (nonatomic, strong) NSTextField *md5_value;
 @property (nonatomic, strong) NSButton    *lock_check;
 @property (nonatomic, strong) NSButton    *hash_check;
-@property (nonatomic, strong) FilesHashJob *hash_job; /* in-flight hash; stale guard */
+@property (nonatomic, strong) FilesCancelToken *hash_job; /* in-flight hash; stale guard */
 @property (nonatomic, strong) NSTextField *branch_value;
 @property (nonatomic, strong) NSTextField *pushed_value;
 @property (nonatomic, strong) NSTextField *remote_value;
@@ -438,7 +400,7 @@ cancel_hash_job
 - (void)
 start_hash_job:(NSURL *)url
 {
-    FilesHashJob *job = [[FilesHashJob alloc] init];
+    FilesCancelToken *job = [[FilesCancelToken alloc] init];
     self.hash_job = job;
     self.sha256_value.stringValue = @"Computing…";
     self.md5_value.stringValue    = @"Computing…";

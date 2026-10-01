@@ -182,13 +182,16 @@ git_index_stamp(NSString *index)
  *   sort_key    — column identifier to sort by
  *   ascending   — sort direction
  *   tracked     — git-tracked names (used only when sorting by Git); may be nil
+ *   sizes       — folder sizes by path (Show Folder Sizes), used when
+ *                 sorting by Size; may be nil
  *   show_hidden — YES to keep items whose NSURLIsHiddenKey is set
  *
  * Output: new sorted, filtered array.
  */
 static NSArray<NSURL *> *
 listing_rows(NSArray<NSURL *> *items, NSString *sort_key, BOOL ascending,
-             NSSet<NSString *> *tracked, BOOL show_hidden)
+             NSSet<NSString *> *tracked, NSDictionary<NSString *, NSNumber *> *sizes,
+             BOOL show_hidden)
 {
     NSMutableArray<NSURL *> *rows = [NSMutableArray arrayWithCapacity:items.count];
     for (NSURL *url in items) {
@@ -220,6 +223,10 @@ listing_rows(NSArray<NSURL *> *items, NSString *sort_key, BOOL ascending,
         id av = nil, bv = nil;
         [a getResourceValue:&av forKey:key error:nil];
         [b getResourceValue:&bv forKey:key error:nil];
+        if (sizes && key == NSURLFileSizeKey) {  /* folders have no file size */
+            if (!av) av = sizes[a.path];
+            if (!bv) bv = sizes[b.path];
+        }
 
         NSComparisonResult cmp;
         if (!av || !bv) {
@@ -270,6 +277,16 @@ listing_rows(NSArray<NSURL *> *items, NSString *sort_key, BOOL ascending,
 @property (nonatomic, copy)   NSString                *git_cache_dir;
 @property (nonatomic, copy)   NSString                *git_cache_stamp;
 @property (nonatomic, copy)   NSSet<NSString *>       *git_cache_tracked;
+/* Show Folder Sizes: totals by path for the folder shown (cleared on
+ * navigation and Reload), folders being counted, the token that cancels
+ * their counts, the serial queue they run on, and whether a refresh of
+ * the Size column is already scheduled. */
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *folder_sizes;
+@property (nonatomic, strong) NSMutableSet<NSString *> *sizes_pending;
+@property (nonatomic, strong) FilesCancelToken        *size_token;
+@property (nonatomic, strong) dispatch_queue_t         size_queue;
+@property (nonatomic, assign) BOOL                     size_refresh_scheduled;
+
 /* Set by shut_down: nothing is listed or watched afterwards. */
 @property (nonatomic, assign) BOOL                     is_shut_down;
 
@@ -309,6 +326,7 @@ listing_rows(NSArray<NSURL *> *items, NSString *sort_key, BOOL ascending,
 @property (nonatomic, assign) BOOL                     large_rows;
 @property (nonatomic, assign) BOOL                     auto_fit;
 @property (nonatomic, assign) BOOL                     show_hidden;
+@property (nonatomic, assign) BOOL                     show_folder_sizes;
 
 /* NSUserDefaultsDidChangeNotification observer (main queue). */
 @property (nonatomic, strong) id                       defaults_observer;
@@ -389,6 +407,10 @@ init_with_frame:(NSRect)frame
     self.sort_key       = col_name;
     self.sort_ascending = YES;
     self.show_hidden    = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_show_hidden];
+    self.folder_sizes   = [NSMutableDictionary dictionary];
+    self.sizes_pending  = [NSMutableSet set];
+    self.size_queue     = dispatch_queue_create("files.browser.folder_sizes",
+        dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
 
     [self build_table];
     [self update_sort_indicators];
@@ -666,6 +688,7 @@ shut_down
         self.defaults_observer = nil;
     }
     self.is_shut_down = YES;
+    [self reset_folder_sizes];
     [self stop_watching];
     [self stop_search_query];
     ++self.list_generation;  /* drop any listing still in flight */
@@ -683,7 +706,8 @@ dealloc
 /*
  * apply_view_prefs — applies files_pref_large_rows (normal rows: 20pt,
  * 16pt icons; large rows: twice both), files_pref_auto_fit,
- * files_pref_show_hidden and files_pref_hidden_columns. Cheap when
+ * files_pref_show_hidden, files_pref_folder_sizes and
+ * files_pref_hidden_columns. Cheap when
  * nothing changed, so it runs on every defaults change; otherwise the
  * table is redrawn for a new row height, the rows are re-filtered for
  * Show Hidden Files, and the columns are fitted when auto-fit is on and it
@@ -696,6 +720,7 @@ apply_view_prefs
     BOOL large  = [ud boolForKey:files_pref_large_rows];
     BOOL fit    = [ud boolForKey:files_pref_auto_fit];
     BOOL hidden = [ud boolForKey:files_pref_show_hidden];
+    BOOL sizes  = [ud boolForKey:files_pref_folder_sizes];
     BOOL rows_changed = large != self.large_rows || self.table.rowHeight != [self row_height];
     BOOL fit_turned_on = fit && !self.auto_fit;
     self.auto_fit = fit;
@@ -707,6 +732,12 @@ apply_view_prefs
     if (hidden != self.show_hidden) {
         self.show_hidden = hidden;
         [self resort_revealing:NO];
+    }
+    if (sizes != self.show_folder_sizes) {
+        self.show_folder_sizes = sizes;
+        [self reset_folder_sizes];
+        [self refresh_size_column];
+        [self count_folder_sizes];
     }
     BOOL cols_changed = [self update_column_visibility];
     if (fit && (rows_changed || fit_turned_on || cols_changed)) [self apply_auto_fit];
@@ -769,6 +800,7 @@ load_location:(NSURL *)url
     self.auto_fit_pending = YES;
     self.pending_names    = nil;
     self.pending_rename   = NO;
+    [self reset_folder_sizes];
     [self reload_directory];
 
     if (self.navigation_handler) self.navigation_handler(url);
@@ -1004,6 +1036,7 @@ reload_directory
     BOOL same_dir         = [self.git_cache_dir isEqualToString:dir.path];
     NSString *cache_stamp = same_dir ? self.git_cache_stamp : nil;
     NSSet<NSString *> *cache_tracked = same_dir ? self.git_cache_tracked : nil;
+    NSDictionary<NSString *, NSNumber *> *sizes = [self.folder_sizes copy];
     __weak FilesBrowserView *ws = self;
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -1019,7 +1052,7 @@ reload_directory
         BOOL git_current    = cache_tracked && stamp && [stamp isEqualToString:cache_stamp];
         NSSet<NSString *> *tracked = work_tree ? (cache_tracked ?: [NSSet set]) : nil;
         NSArray<NSURL *> *rows = listing_rows(items ?: @[], sort_key, ascending,
-                                              tracked, show_hidden);
+                                              tracked, sizes, show_hidden);
         NSString *error = items ? nil
             : (err.localizedFailureReason ?: err.localizedDescription ?: @"It cannot be read.");
 
@@ -1121,6 +1154,99 @@ show_rows:(NSArray<NSURL *> *)rows selecting:(NSSet<NSString *> *)paths reveal:(
         self.auto_fit_pending = NO;
         if (self.auto_fit) [self apply_auto_fit];
     }
+    [self count_folder_sizes];
+}
+
+/* ── Folder sizes ────────────────────────────────────────────────────── */
+
+/*
+ * reset_folder_sizes — cancels every folder count still running and
+ * forgets the totals, so the next count starts afresh (navigation,
+ * Reload, Show Folder Sizes turned off or on, shut_down).
+ */
+- (void)
+reset_folder_sizes
+{
+    [self.size_token cancel];
+    self.size_token = nil;
+    [self.folder_sizes removeAllObjects];
+    [self.sizes_pending removeAllObjects];
+}
+
+/*
+ * count_folder_sizes — with Show Folder Sizes on, counts every folder and
+ * package among the rows that has no total yet and is not already being
+ * counted, one at a time on size_queue (files_folder_size), so listing
+ * refreshes never restart a long count. Each total is shown as it
+ * arrives (refresh_size_column); once all are in, rows sorted by Size are
+ * re-sorted.
+ */
+- (void)
+count_folder_sizes
+{
+    if (!self.show_folder_sizes || self.is_shut_down) return;
+    if (!self.size_token) self.size_token = [[FilesCancelToken alloc] init];
+    FilesCancelToken *token = self.size_token;
+    __weak FilesBrowserView *ws = self;
+
+    for (NSURL *url in self.filtered_items) {
+        NSNumber *is_dir = nil;
+        [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
+        NSString *path = url.path;
+        if (!is_dir.boolValue || self.folder_sizes[path] ||
+            [self.sizes_pending containsObject:path]) continue;
+        [self.sizes_pending addObject:path];
+
+        dispatch_async(self.size_queue, ^{
+            if (atomic_load([token cancel_flag])) return;
+            int64_t total = files_folder_size(path.fileSystemRepresentation, [token cancel_flag]);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                FilesBrowserView *s = ws;
+                if (!s || s.size_token != token) return;   /* reset since */
+                [s.sizes_pending removeObject:path];
+                if (total >= 0) s.folder_sizes[path] = @(total);
+                [s refresh_size_column];
+                if (s.sizes_pending.count == 0 && [s.sort_key isEqualToString:col_size]) {
+                    [s resort_revealing:NO];
+                }
+            });
+        });
+    }
+}
+
+/*
+ * refresh_size_column — redraws the Size column, at most every 0.2 s
+ * however many totals arrive meanwhile.
+ */
+- (void)
+refresh_size_column
+{
+    if (self.size_refresh_scheduled) return;
+    self.size_refresh_scheduled = YES;
+    __weak FilesBrowserView *ws = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        FilesBrowserView *s = ws;
+        if (!s) return;
+        s.size_refresh_scheduled = NO;
+        if (s.rename_url) return;   /* would end the edit; the next listing shows them */
+        NSInteger col = [s.table columnWithIdentifier:col_size];
+        if (col < 0 || s.table.numberOfRows == 0) return;
+        [s.table reloadDataForRowIndexes:
+                     [NSIndexSet indexSetWithIndexesInRange:NSMakeRange(0, (NSUInteger)s.table.numberOfRows)]
+                           columnIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)col]];
+    });
+}
+
+/*
+ * refresh — Reload: forgets the folder totals (they are counted again)
+ * and re-lists the folder. Inputs/output are documented in browser_view.h.
+ */
+- (void)
+refresh
+{
+    [self reset_folder_sizes];
+    [self reload_directory];
 }
 
 /*
@@ -1135,7 +1261,7 @@ show_rows:(NSArray<NSURL *> *)rows selecting:(NSSet<NSString *> *)paths reveal:(
 resort_revealing:(BOOL)reveal
 {
     [self show_rows:listing_rows(self.all_items, self.sort_key, self.sort_ascending,
-                                 self.git_tracked, [self shows_hidden_items])
+                                 self.git_tracked, self.folder_sizes, [self shows_hidden_items])
           selecting:[self selected_paths] reveal:reveal];
 }
 
@@ -1167,7 +1293,7 @@ show_listing:(NSArray<NSURL *> *)items rows:(NSArray<NSURL *> *)rows
     self.all_items = items;
     if (!rows) {
         rows = listing_rows(items, self.sort_key, self.sort_ascending,
-                            self.git_tracked, [self shows_hidden_items]);
+                            self.git_tracked, self.folder_sizes, [self shows_hidden_items]);
     }
     [self show_rows:rows selecting:want reveal:reveal];
 
@@ -1300,6 +1426,7 @@ search_results_updated:(NSNotification *)note
     NSString *sort_key    = self.sort_key;
     BOOL ascending        = self.sort_ascending;
     BOOL show_hidden      = [self shows_hidden_items];
+    NSDictionary<NSString *, NSNumber *> *sizes = [self.folder_sizes copy];
     __weak FilesBrowserView *ws = self;
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -1309,7 +1436,7 @@ search_results_updated:(NSNotification *)note
             [url resourceValuesForKeys:listing_keys() error:nil];  /* caches them */
             [items addObject:url];
         }
-        NSArray<NSURL *> *rows = listing_rows(items, sort_key, ascending, nil, show_hidden);
+        NSArray<NSURL *> *rows = listing_rows(items, sort_key, ascending, nil, sizes, show_hidden);
 
         dispatch_async(dispatch_get_main_queue(), ^{
             FilesBrowserView *s = ws;
@@ -1370,9 +1497,14 @@ cell_text_for_column:(NSString *)col_id
     } else if ([col_id isEqualToString:col_size]) {
         NSNumber *is_dir = nil, *sz = nil;
         [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
+        if (is_dir.boolValue) {
+            /* Show Folder Sizes: the total once counted, "…" until then. */
+            if (!self.show_folder_sizes) return @"—";
+            NSNumber *total = self.folder_sizes[url.path];
+            return total ? files_format_bytes(total.longLongValue) : @"…";
+        }
         [url getResourceValue:&sz forKey:NSURLFileSizeKey error:nil];
-        if (is_dir.boolValue || !sz) return @"—";
-        return files_format_bytes(sz.longLongValue);
+        return sz ? files_format_bytes(sz.longLongValue) : @"—";
 
     } else if ([col_id isEqualToString:col_kind]) {
         /* "Folder" for folders, "Application" for apps and so on. */
@@ -1444,6 +1576,11 @@ apply_auto_fit
 
         NSDictionary *attrs = @{ NSFontAttributeName: cell_font_for_column(col_id) };
         CGFloat extra = [col_id isEqualToString:col_name] ? name_extra : cell_extra;
+        /* Folder totals arrive after this runs, so with Show Folder Sizes
+         * the Size column has room for a wide one from the start. */
+        if (self.show_folder_sizes && [col_id isEqualToString:col_size]) {
+            max_w = MAX(max_w, ceil([@"888.8 MB" sizeWithAttributes:attrs].width) + extra);
+        }
         /* The Git column only ever shows "tracked", which may be filled in
          * after this runs, so it is sized for that word. */
         BOOL git = [col_id isEqualToString:col_git];

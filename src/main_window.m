@@ -991,7 +991,8 @@ new_file_action:(id)sender
 }
 
 /*
- * reload_action: — re-reads the active pane's folder.
+ * reload_action: — re-reads the active pane's folder (and recounts its
+ * folder sizes, with Show Folder Sizes on).
  *
  * Inputs:
  *   sender — toolbar item (unused)
@@ -999,7 +1000,7 @@ new_file_action:(id)sender
 - (IBAction)
 reload_action:(id)sender
 {
-    [[self active_browser] reload_directory];
+    [[self active_browser] refresh];
 }
 
 /*
