@@ -2,12 +2,10 @@
 #import "file_ops.h"
 #import "speed_graph.h"
 #import "util.h"
+#include <os/lock.h>
 
-/* Minimum time between progress updates sent to the main queue; the engine
- * reports every 1 MB, far more often on fast disks. */
-static const CFTimeInterval progress_interval = 0.1;
-
-/* The speed graph gets one interval (bytes moved, time taken) this often. */
+/* The panel picks up the engine's progress and log lines, and the speed
+ * graph gets one interval (bytes moved, time taken), this often. */
 static const CFTimeInterval graph_interval = 0.25;
 
 static const CGFloat log_height    = 160.0; /* extra window height for the transfer log */
@@ -42,13 +40,19 @@ static const NSUInteger log_trim_batch = 100;
     NSString          *_ing;          /* "Copying" or "Moving", for the panel's text */
     NSString          *_ed;           /* "Copied" or "Moved" */
     NSString          *_noun;         /* "copy" or "move" */
-    NSString          *_cur_name;     /* file most recently reported by the engine */
+    NSString          *_cur_name;     /* file name shown in the status line */
     int64_t            _total_done;   /* bytes copied so far across all files */
     CFAbsoluteTime     _start_time;   /* set when the copy is started */
     FilesCopyProgress *_self_ref;     /* retains self while window is on screen */
     NSUInteger         _log_lines;    /* lines currently in the transfer log */
-    NSMutableArray<NSString *> *_pending_log; /* engine lines awaiting the next tick */
     BOOL               _log_expanded; /* YES when the transfer log panel is open */
+
+    /* Written by the engine on the copy thread, taken by take_engine_updates
+     * on the main thread; all guarded by _engine_lock. */
+    os_unfair_lock     _engine_lock;
+    NSMutableArray<NSString *> *_engine_log;  /* timestamped lines not yet shown */
+    NSString          *_engine_name;  /* file the engine reported last */
+    int64_t            _engine_done;  /* bytes the engine reported last */
 }
 
 /* ── Panel construction ─────────────────────────────────────────────────── */
@@ -89,6 +93,8 @@ init_with_dest:(NSURL *)dest is_cut:(BOOL)is_cut
     _noun      = is_cut ? @"move"  : @"copy";
     _cur_name  = @"";
     _self_ref  = self;  /* broken in windowWillClose: */
+    _engine_lock = OS_UNFAIR_LOCK_INIT;
+    _engine_log  = [NSMutableArray array];
 
     panel.delegate = self;
     [self build_views];
@@ -307,8 +313,8 @@ append_log_lines:(NSArray<NSString *> *)lines
 }
 
 /*
- * append_log: — append one line to the transfer log now, timestamped.
- * Main thread only.
+ * append_log: — append one line to the transfer log now, timestamped,
+ * after any engine lines still waiting. Main thread only.
  *
  * Inputs:
  *   line — text to append (no trailing newline needed)
@@ -316,53 +322,63 @@ append_log_lines:(NSArray<NSString *> *)lines
 - (void)
 append_log:(NSString *)line
 {
-    [self flush_log];  /* keep engine lines that arrived earlier in order */
+    [self take_engine_updates];  /* keep engine lines that arrived earlier in order */
     [self append_log_lines:@[stamped(line)]];
 }
 
 /*
- * queue_log: — timestamps an engine log line and holds it for the next
- * flush_log, so a copy of thousands of small files costs one text edit per
- * tick instead of one per line. Main thread only.
+ * engine_progress:total_done: — records the engine's latest progress report.
+ * Called on the copy thread for every report; the panel shows it on its
+ * next tick (take_engine_updates).
+ *
+ * Inputs:
+ *   name       — file being copied
+ *   total_done — bytes copied across all files so far
+ */
+- (void)
+engine_progress:(NSString *)name total_done:(int64_t)total_done
+{
+    os_unfair_lock_lock(&_engine_lock);
+    _engine_name = name;
+    _engine_done = total_done;
+    os_unfair_lock_unlock(&_engine_lock);
+}
+
+/*
+ * engine_log: — timestamps an engine log line and holds it for the next
+ * tick, so a copy of thousands of small files costs one text edit per tick
+ * instead of a main-queue hop per line. Called on the copy thread.
  *
  * Inputs:
  *   line — engine log text
  */
 - (void)
-queue_log:(NSString *)line
+engine_log:(NSString *)line
 {
-    if (!_pending_log) _pending_log = [NSMutableArray array];
-    [_pending_log addObject:stamped(line)];
+    NSString *entry = stamped(line);
+    os_unfair_lock_lock(&_engine_lock);
+    [_engine_log addObject:entry];
+    os_unfair_lock_unlock(&_engine_lock);
 }
 
 /*
- * flush_log — appends the queued engine lines to the log. Main thread only.
+ * take_engine_updates — shows what the engine reported since the last
+ * call: appends its log lines, records the byte count (feed_graph reads
+ * it) and updates the status line when the file changed. Main thread only.
  */
 - (void)
-flush_log
+take_engine_updates
 {
-    if (_pending_log.count == 0) return;
-    NSArray<NSString *> *lines = _pending_log;
-    _pending_log = nil;
-    [self append_log_lines:lines];
-}
+    os_unfair_lock_lock(&_engine_lock);
+    NSArray<NSString *> *lines = _engine_log.count ? [_engine_log copy] : nil;
+    [_engine_log removeAllObjects];
+    NSString *name = _engine_name;
+    int64_t   done = _engine_done;
+    os_unfair_lock_unlock(&_engine_lock);
 
-/*
- * show_progress:total_done: — apply one throttled progress
- * report to the panel: records the byte count (feed_graph reads it) and
- * updates the status label when the file name changes (the engine logs
- * each file itself). Main thread only.
- *
- * Inputs:
- *   name       — current file name
- *   total_done — bytes copied across all files so far
- */
-- (void)
-show_progress:(NSString *)name total_done:(int64_t)total_done
-{
-    _total_done = total_done;
-
-    if (![name isEqualToString:_cur_name]) {
+    if (lines) [self append_log_lines:lines];
+    _total_done = done;
+    if (name && ![name isEqualToString:_cur_name]) {
         _cur_name = name;
         self.status_label.stringValue = [NSString stringWithFormat:
             @"%@ \"%@\" to %@", _ing, name, _dest_name];
@@ -370,8 +386,9 @@ show_progress:(NSString *)name total_done:(int64_t)total_done
 }
 
 /*
- * feed_graph — gives the speed graph the interval since it was last fed:
- * the bytes copied in it and its length, and flushes the queued log lines.
+ * feed_graph — takes the engine's updates (take_engine_updates), then gives
+ * the speed graph the interval since it was last fed: the bytes copied in
+ * it and its length.
  * Called every graph_interval while copying, and once more when the copy
  * ends, so the graph's intervals add up to the whole copy and its average
  * line equals total bytes / elapsed.
@@ -379,7 +396,7 @@ show_progress:(NSString *)name total_done:(int64_t)total_done
 - (void)
 feed_graph
 {
-    [self flush_log];
+    [self take_engine_updates];
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     [self.speed_graph add_bytes:_total_done - _graph_bytes seconds:now - _graph_time];
     _graph_bytes = _total_done;
@@ -397,25 +414,20 @@ stop_graph_timer
 }
 
 /*
- * finish_with_error:hash_results: — show the final state after the copy
- * ends: logs the error and per-file hash results, sets the status line,
- * switches the button to "Close", feeds the graph its last interval and
- * shows elapsed time.
+ * finish_with_error: — show the final state after the copy ends: logs the
+ * error, sets the status line, switches the button to "Close", feeds the
+ * graph its last interval and shows elapsed time. (The engine logged each
+ * digest; a failed validation arrives as err.)
  *
  * Inputs:
- *   err          — engine error, or nil on success
- *   hash_results — per-destination-URL hash match flags; may be nil
+ *   err — engine error, or nil on success
  */
 - (void)
 finish_with_error:(NSError *)err
-     hash_results:(NSDictionary<NSURL *, NSNumber *> *)hash_results
 {
     BOOL all_ok = (err == nil);
     if (err) {
         [self append_log:[NSString stringWithFormat:@"✗ %@", err.localizedDescription]];
-    }
-    for (NSURL *url in hash_results) {   /* the engine logged each digest */
-        if (![hash_results[url] boolValue]) all_ok = NO;
     }
     self.status_label.stringValue = all_ok
         ? [NSString stringWithFormat:@"%@ \"%@\" to %@", _ed,
@@ -503,12 +515,9 @@ completion:(void (^)(NSError *))completion
 
 /*
  * start_copy:to:is_cut:hash_validate:completion: — kick off the copy using
- * the FilesFileOps engine, piping throttled progress events into the panel.
- *
- * The progress block runs on the copy thread and forwards a report to the
- * main queue only when a file starts (file_done == 0), a file finishes
- * (file_done >= file_total), or progress_interval has passed since the last
- * forwarded report.
+ * the FilesFileOps engine. Its progress and log blocks run on the copy
+ * thread and only record what they are given (engine_progress:total_done:,
+ * engine_log:); the graph timer shows it every graph_interval.
  *
  * Inputs:
  *   srcs          — source URLs
@@ -524,9 +533,10 @@ start_copy:(NSArray<NSURL *> *)srcs
 hash_validate:(BOOL)hash_validate
 completion:(void (^)(NSError *))completion
 {
-    /* Strong capture keeps self (and so the _cancel ivar whose address the
-     * engine holds) alive until the copy completes. NSWindow.windowController
-     * is unsafe_unretained; without this the panel could be freed mid-copy. */
+    /* The engine's blocks capture self strongly, keeping it (and so the
+     * _cancel ivar whose address the engine holds) alive until the copy
+     * completes. NSWindow.windowController is unsafe_unretained; without
+     * this the panel could be freed mid-copy. */
     FilesCopyProgress *alive = self;
     __weak FilesCopyProgress *weak_self = self;
 
@@ -543,41 +553,26 @@ completion:(void (^)(NSError *))completion
     [self append_log:[NSString stringWithFormat:@"%@ %@ -> %@%@",
         _ing, src_desc, _dest_name, hash_validate ? @" (SHA256)" : @""]];
 
-    __block CFAbsoluteTime last_sent = 0;  /* copy thread only */
     FileCopyProgressBlock progress = ^(NSString *name, int64_t f_done, int64_t f_total,
                                        int64_t t_done)
     {
-        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-        if (f_done != 0 && f_done < f_total && now - last_sent < progress_interval) {
-            return;
-        }
-        last_sent = now;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [weak_self show_progress:name total_done:t_done];
-        });
+        [alive engine_progress:name total_done:t_done];
     };
-
     FileCopyLogBlock log = ^(NSString *line) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [weak_self queue_log:line];
-        });
+        [alive engine_log:line];
     };
 
     [FilesFileOps run_copy_srcs:srcs to:dest is_cut:is_cut
                   hash_validate:hash_validate conflict:[self make_conflict_block]
                     cancel_flag:&_cancel progress:progress log:log
-                     completion:^(NSError *err, NSDictionary<NSURL *, NSNumber *> *hash_results)
+                     completion:^(NSError *err)
     {
-        /* Called on main queue. alive keeps _cancel valid until here. */
-        (void)alive;
-        FilesCopyProgress *p = weak_self;
-        if (p) {
-            if (err.code == NSUserCancelledError &&
-                [err.domain isEqualToString:NSCocoaErrorDomain]) {
-                [p close];
-            } else {
-                [p finish_with_error:err hash_results:hash_results];
-            }
+        /* Called on main queue. */
+        if (err.code == NSUserCancelledError &&
+            [err.domain isEqualToString:NSCocoaErrorDomain]) {
+            [alive close];
+        } else {
+            [alive finish_with_error:err];
         }
         if (completion) completion(err);
     }];

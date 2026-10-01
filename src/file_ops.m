@@ -16,35 +16,8 @@ static NSString * const cut_flag_type = @"com.salt.files.cut-flag";
 
 /* ── C helpers ──────────────────────────────────────────────────────────── */
 
-/*
- * unique_dest_url — returns a non-conflicting destination URL in dir.
- * Appends " copy", " copy 2", etc. until the path is free.
- *
- * Inputs:
- *   name — desired filename
- *   dir  — destination directory URL
- *
- * Output: unique destination URL.
- */
-static NSURL *
-unique_dest_url(NSString *name, NSURL *dir)
-{
-    NSFileManager *fm = NSFileManager.defaultManager;
-    NSString *base    = name.stringByDeletingPathExtension;
-    NSString *ext     = name.pathExtension;
-    NSURL *dest       = [dir URLByAppendingPathComponent:name];
-    if (![fm fileExistsAtPath:dest.path]) return dest;
-    NSString *suffix = @" copy";
-    NSInteger n = 2;
-    while (YES) {
-        NSString *candidate = ext.length > 0
-            ? [NSString stringWithFormat:@"%@%@.%@", base, suffix, ext]
-            : [NSString stringWithFormat:@"%@%@", base, suffix];
-        dest = [dir URLByAppendingPathComponent:candidate];
-        if (![fm fileExistsAtPath:dest.path]) return dest;
-        suffix = [NSString stringWithFormat:@" copy %ld", (long)n++];
-    }
-}
+/* The user lock flags: Finder's "Locked" (uchg) and append-only (uappnd). */
+#define LOCK_FLAGS (UF_IMMUTABLE | UF_APPEND)
 
 /*
  * item_exists — lstat-based existence test that does not follow symlinks,
@@ -60,6 +33,54 @@ item_exists(NSURL *url)
 {
     struct stat st;
     return lstat(url.fileSystemRepresentation, &st) == 0;
+}
+
+/*
+ * unique_dest_url — returns a non-conflicting destination URL in dir.
+ * Appends " copy", " copy 2", etc. until nothing (not even a dangling
+ * symlink) exists at the path.
+ *
+ * Inputs:
+ *   name — desired filename
+ *   dir  — destination directory URL
+ *
+ * Output: unique destination URL.
+ */
+static NSURL *
+unique_dest_url(NSString *name, NSURL *dir)
+{
+    NSString *base = name.stringByDeletingPathExtension;
+    NSString *ext  = name.pathExtension;
+    NSURL *dest    = [dir URLByAppendingPathComponent:name];
+    if (!item_exists(dest)) return dest;
+    NSString *suffix = @" copy";
+    NSInteger n = 2;
+    while (YES) {
+        NSString *candidate = ext.length > 0
+            ? [NSString stringWithFormat:@"%@%@.%@", base, suffix, ext]
+            : [NSString stringWithFormat:@"%@%@", base, suffix];
+        dest = [dir URLByAppendingPathComponent:candidate];
+        if (!item_exists(dest)) return dest;
+        suffix = [NSString stringWithFormat:@" copy %ld", (long)n++];
+    }
+}
+
+/*
+ * real_path — the canonical path of an existing item: symbolic links
+ * resolved and each name in its on-disk case (realpath(3)), so two
+ * spellings of one folder compare equal.
+ *
+ * Inputs:
+ *   url — file URL; should exist
+ *
+ * Output: canonical path, or the standardized path if realpath fails.
+ */
+static NSString *
+real_path(NSURL *url)
+{
+    char buf[PATH_MAX];
+    return realpath(url.fileSystemRepresentation, buf) ? @(buf)
+                                                       : url.URLByStandardizingPath.path;
 }
 
 /*
@@ -110,9 +131,8 @@ remove_tree(const char *path, char *fail, size_t fail_len)
         int err = 0;
         switch (e->fts_info) {
         case FTS_D:         /* folder, before its contents */
-            if (e->fts_statp->st_flags & (UF_IMMUTABLE | UF_APPEND)) {
-                lchflags(e->fts_accpath,
-                         e->fts_statp->st_flags & ~(UF_IMMUTABLE | UF_APPEND));
+            if (e->fts_statp->st_flags & LOCK_FLAGS) {
+                lchflags(e->fts_accpath, e->fts_statp->st_flags & ~LOCK_FLAGS);
             }
             if ((e->fts_statp->st_mode & S_IRWXU) != S_IRWXU) {
                 chmod(e->fts_accpath, (e->fts_statp->st_mode & 07777) | S_IRWXU);
@@ -130,9 +150,8 @@ remove_tree(const char *path, char *fail, size_t fail_len)
         case FTS_DC:        /* cycle: impossible without following links */
             continue;
         default:            /* file, symbolic link, special file */
-            if (e->fts_statp->st_flags & (UF_IMMUTABLE | UF_APPEND)) {
-                lchflags(e->fts_accpath,
-                         e->fts_statp->st_flags & ~(UF_IMMUTABLE | UF_APPEND));
+            if (e->fts_statp->st_flags & LOCK_FLAGS) {
+                lchflags(e->fts_accpath, e->fts_statp->st_flags & ~LOCK_FLAGS);
             }
             rc = unlink(e->fts_accpath);
             break;
@@ -184,19 +203,22 @@ sibling_temp_url(NSURL *dst, NSString *tag)
  * copy_ctx_t — state shared with copy_status_cb for one top-level item.
  */
 typedef struct {
-    FileCopyProgressBlock  progress;    /* may be nil */
-    FileCopyLogBlock       log;         /* may be nil */
-    atomic_int            *cancel;      /* may be NULL */
-    int64_t                total_done;  /* bytes across the whole operation */
-    NSString              *file_name;   /* file currently being copied */
-    int64_t                file_total;  /* its size */
-    int64_t                file_done;   /* bytes of it copied so far */
-    BOOL                   streamed;    /* data events seen: not a clone */
-    int                    err;         /* errno from the first COPYFILE_ERR */
+    FileCopyProgressBlock  progress;      /* may be nil */
+    FileCopyLogBlock       log;           /* may be nil */
+    atomic_int            *cancel;        /* may be NULL */
+    BOOL                   hash_validate; /* SHA-256 verify each file as it lands */
+    int64_t                total_done;    /* bytes across the whole operation */
+    NSString              *file_name;     /* file currently being copied */
+    int64_t                file_total;    /* its size */
+    int64_t                file_done;     /* bytes of it copied so far */
+    BOOL                   is_regular;    /* it is a regular file (has data to hash) */
+    BOOL                   hash_failed;   /* a copy did not match its source */
+    int                    err;           /* errno from the first COPYFILE_ERR */
 } copy_ctx_t;
 
 /*
- * log_line — sends one line to the transfer log, if there is one.
+ * log_line — sends one line to the transfer log, if there is one. Callers
+ * whose arguments are costly to compute test c->log first.
  *
  * Inputs:
  *   c      — copy context
@@ -214,6 +236,30 @@ log_line(copy_ctx_t *c, NSString *format, ...)
     NSString *line = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
     c->log(line);
+}
+
+/*
+ * remove_logged — deletes one of the engine's own items (a partial copy, a
+ * staging item, a replaced item set aside) with remove_tree, so locked
+ * contents go too, and logs the outcome. Does nothing if nothing is there.
+ *
+ * Inputs:
+ *   url  — item to delete
+ *   what — how the log names it, e.g. "the staging item"
+ *   c    — copy context (log)
+ */
+static void
+remove_logged(NSURL *url, NSString *what, copy_ctx_t *c)
+{
+    if (!item_exists(url)) return;
+    char fail[PATH_MAX];
+    int err = remove_tree(url.fileSystemRepresentation, fail, sizeof fail);
+    if (err == 0) {
+        log_line(c, @"Deleted %@ \"%@\"", what, url.path);
+    } else {
+        log_line(c, @"Could not delete %@ \"%@\" (%s at \"%s\")",
+                 what, url.path, strerror(err), fail);
+    }
 }
 
 /*
@@ -259,20 +305,96 @@ report_progress(copy_ctx_t *c, int64_t copied)
 }
 
 /*
+ * logged_sha256 — SHA-256 of one file, logged as two entries: that it is
+ * being computed, then the digest.
+ *
+ * Inputs:
+ *   path   — file to read
+ *   role   — "source" or "destination", for the log
+ *   digest — receives the digest
+ *   c      — copy context (log, cancel flag)
+ *
+ * Output: YES if the file was read in full.
+ */
+static BOOL
+logged_sha256(const char *path, NSString *role, uint8_t digest[FILE_SHA256_LEN],
+              copy_ctx_t *c)
+{
+    log_line(c, @"Computing SHA-256 of %@ \"%s\"…", role, path);
+    int rc = file_digests(path, digest, NULL, c->cancel);
+    if (rc != 0) {
+        if (rc != -2) log_line(c, @"✗ Could not read %@ \"%s\" to hash it", role, path);
+        return NO;  /* -2: cancelled, which the panel reports itself */
+    }
+    if (c->log) {
+        log_line(c, @"%@ SHA-256 of \"%s\": %@", role.capitalizedString, path,
+                 digest_hex(digest, FILE_SHA256_LEN));
+    }
+    return YES;
+}
+
+/*
+ * same_contents — SHA-256 compares a source file with its copy, logging
+ * both digests and the verdict. When the two are on different devices
+ * they are hashed at the same time, since neither read slows the other.
+ *
+ * Inputs:
+ *   src  — source file path
+ *   copy — path of its copy (in the staging item)
+ *   c    — copy context (log, cancel flag)
+ *
+ * Output: YES if both hash successfully and the digests match.
+ */
+static BOOL
+same_contents(const char *src, const char *copy, copy_ctx_t *c)
+{
+    uint8_t ds[FILE_SHA256_LEN], dc[FILE_SHA256_LEN];
+    struct stat src_st, copy_st;
+    BOOL apart = lstat(src, &src_st) == 0 && lstat(copy, &copy_st) == 0
+                 && src_st.st_dev != copy_st.st_dev;
+
+    __block BOOL src_ok;
+    uint8_t *ds_p = ds;
+    dispatch_group_t group = dispatch_group_create();
+    if (apart) {
+        dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            src_ok = logged_sha256(src, @"source", ds_p, c);
+        });
+    } else {
+        src_ok = logged_sha256(src, @"source", ds, c);
+    }
+    BOOL copy_ok = (apart || src_ok) && logged_sha256(copy, @"destination", dc, c);
+    dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
+    if (!src_ok || !copy_ok) return NO;
+
+    BOOL same = memcmp(ds, dc, sizeof ds) == 0;
+    log_line(c, same ? @"✓ SHA-256 match: \"%s\" and \"%s\""
+                     : @"✗ SHA-256 MISMATCH: \"%s\" and \"%s\"", src, copy);
+    return same;
+}
+
+/*
  * copy_status_cb — copyfile(3) status callback. Reports per-file and
  * per-chunk progress, logs each file's start and finish (the bytes written
  * as measured on the copy, and whether it was an APFS clone), honours the
  * cancel flag, and aborts on the first error (copyfile's default is to skip
  * unreadable items and still return success).
  *
+ * With hash validation on, each regular file is SHA-256 compared with its
+ * copy as soon as that copy is complete, and the copy stops at the first
+ * mismatch. APFS clones are not hashed: a clone shares the original's
+ * blocks, so it is identical by construction.
+ *
  * Inputs:
  *   what, stage — copyfile event (COPYFILE_RECURSE_FILE / COPYFILE_COPY_DATA,
  *                 COPYFILE_START / COPYFILE_PROGRESS / COPYFILE_FINISH / COPYFILE_ERR)
- *   state       — copyfile state (queried for COPYFILE_STATE_COPIED)
+ *   state       — copyfile state (queried for COPYFILE_STATE_COPIED and
+ *                 COPYFILE_STATE_WAS_CLONED)
  *   src, dst    — paths of the item being processed
  *   ctx         — copy_ctx_t pointer
  *
- * Output: COPYFILE_CONTINUE, or COPYFILE_QUIT on cancel or error.
+ * Output: COPYFILE_CONTINUE, or COPYFILE_QUIT on cancel, error or a hash
+ *         mismatch (c->hash_failed set).
  */
 static int
 copy_status_cb(int what, int stage, copyfile_state_t state,
@@ -286,28 +408,51 @@ copy_status_cb(int what, int stage, copyfile_state_t state,
         return COPYFILE_QUIT;
     }
 
-    if (what == COPYFILE_RECURSE_FILE && stage == COPYFILE_START) {
+    if (what == COPYFILE_RECURSE_DIR && stage == COPYFILE_FINISH) {
+        /* copyfile locks a copied folder as soon as it creates it, so
+         * nothing could be copied into a locked one. Unlock it for now:
+         * its COPYFILE_RECURSE_DIR_CLEANUP pass locks it again. */
         struct stat st;
+        if (lstat(dst, &st) == 0 && (st.st_flags & LOCK_FLAGS)) {
+            lchflags(dst, st.st_flags & ~LOCK_FLAGS);
+        }
+    } else if (what == COPYFILE_RECURSE_FILE && stage == COPYFILE_START) {
+        struct stat st;
+        BOOL have_st  = lstat(src, &st) == 0;
         c->file_name  = @(src).lastPathComponent;
-        c->file_total = (lstat(src, &st) == 0) ? st.st_size : 0;
+        c->file_total = have_st ? st.st_size : 0;
+        c->is_regular = have_st && S_ISREG(st.st_mode);
         c->file_done  = 0;
-        c->streamed   = NO;
-        log_line(c, @"→ \"%s\" (%@) to \"%s\"", src, byte_count(c->file_total), dst);
+        if (c->log) {
+            log_line(c, @"→ \"%s\" (%@) to \"%s\"", src, byte_count(c->file_total), dst);
+        }
         report_progress(c, 0);
     } else if (what == COPYFILE_COPY_DATA && stage == COPYFILE_PROGRESS) {
         off_t copied = 0;
         copyfile_state_get(state, COPYFILE_STATE_COPIED, &copied);
-        c->streamed = YES;
         report_progress(c, copied);
     } else if (what == COPYFILE_RECURSE_FILE && stage == COPYFILE_FINISH) {
         /* Clones produce no COPY_DATA events; account for the whole file. */
         report_progress(c, c->file_total);
-        struct stat st;
-        int64_t written = (lstat(dst, &st) == 0) ? st.st_size : 0;
-        log_line(c, @"✓ %@ of %@ copied to \"%s\"%@", byte_count(written),
-                 byte_count(c->file_total), dst,
-                 (!c->streamed && c->file_total > 0)
-                     ? @" (APFS clone: shares the original's blocks, no data read)" : @"");
+        bool cloned = false;
+        copyfile_state_get(state, COPYFILE_STATE_WAS_CLONED, &cloned);
+        if (c->log) {
+            struct stat st;
+            int64_t written = (lstat(dst, &st) == 0) ? st.st_size : 0;
+            log_line(c, @"✓ %@ of %@ copied to \"%s\"%@", byte_count(written),
+                     byte_count(c->file_total), dst,
+                     cloned ? @" (APFS clone: shares the original's blocks, no data read)"
+                            : @"");
+        }
+        if (c->hash_validate && c->is_regular) {
+            if (cloned) {
+                log_line(c, @"Not hashing \"%s\": an APFS clone is identical to its "
+                            @"original by construction", dst);
+            } else if (!same_contents(src, dst, c)) {
+                c->hash_failed = YES;
+                return COPYFILE_QUIT;
+            }
+        }
     }
     return COPYFILE_CONTINUE;
 }
@@ -316,12 +461,13 @@ copy_status_cb(int what, int stage, copyfile_state_t state,
  * copy_tree — copies src (file, directory tree, or symlink) to dst, which
  * must not exist. Uses copyfile(3) so APFS clones are used where possible and
  * xattrs, ACLs, Finder info, flags and timestamps are preserved; symlinks are
- * copied as links. A partial dst is removed on failure.
+ * copied as links. Hash validation, if on, happens file by file as the copy
+ * goes (copy_status_cb). A partial dst is removed on failure.
  *
  * Inputs:
  *   src — source URL
  *   dst — destination URL (must not exist)
- *   c   — copy context (progress, cancel flag)
+ *   c   — copy context (progress, cancel flag, hash validation)
  *
  * Output: nil on success; NSUserCancelledError on cancel; otherwise an error.
  */
@@ -332,7 +478,8 @@ copy_tree(NSURL *src, NSURL *dst, copy_ctx_t *c)
     copyfile_state_set(state, COPYFILE_STATE_STATUS_CB, (const void *)&copy_status_cb);
     copyfile_state_set(state, COPYFILE_STATE_STATUS_CTX, c);
 
-    c->err = 0;
+    c->err         = 0;
+    c->hash_failed = NO;
     int rc = copyfile(src.fileSystemRepresentation, dst.fileSystemRepresentation,
                       state,
                       COPYFILE_ALL | COPYFILE_RECURSIVE | COPYFILE_CLONE
@@ -342,103 +489,17 @@ copy_tree(NSURL *src, NSURL *dst, copy_ctx_t *c)
 
     if (rc == 0) return nil;
 
-    [NSFileManager.defaultManager removeItemAtURL:dst error:nil];
-    log_line(c, @"Deleted the partial copy \"%@\"", dst.path);
+    remove_logged(dst, @"the partial copy", c);
     if (c->cancel && atomic_load(c->cancel)) {
         return [NSError errorWithDomain:NSCocoaErrorDomain
                                    code:NSUserCancelledError userInfo:nil];
     }
+    if (c->hash_failed) {
+        return described_error([NSString stringWithFormat:
+            @"SHA-256 validation failed for \"%@\". Nothing was replaced and "
+             "the source was kept.", src.lastPathComponent]);
+    }
     return posix_error(c->err ? c->err : saved_errno, src);
-}
-
-/*
- * logged_sha256 — SHA-256 of one file, logged as two entries: that it is
- * being computed, then the digest.
- *
- * Inputs:
- *   url    — file to read
- *   role   — "source" or "destination", for the log
- *   path   — full path to log the file by
- *   digest — receives the digest
- *   c      — copy context (log, cancel flag)
- *
- * Output: YES if the file was read in full.
- */
-static BOOL
-logged_sha256(NSURL *url, NSString *role, NSString *path,
-              uint8_t digest[FILE_SHA256_LEN], copy_ctx_t *c)
-{
-    log_line(c, @"Computing SHA-256 of %@ \"%@\"…", role, path);
-    int rc = file_digests(url.fileSystemRepresentation, digest, NULL, c->cancel);
-    if (rc != 0) {
-        if (rc != -2) log_line(c, @"✗ Could not read %@ \"%@\" to hash it", role, path);
-        return NO;  /* -2: cancelled, which the panel reports itself */
-    }
-    log_line(c, @"%@ SHA-256 of \"%@\": %@", role.capitalizedString, path,
-             digest_hex(digest, FILE_SHA256_LEN));
-    return YES;
-}
-
-/*
- * same_contents — SHA-256 compares a source file with its copy, logging
- * both digests and the verdict.
- *
- * Inputs:
- *   src  — source file
- *   copy — its copy (in the staging item)
- *   c    — copy context (log, cancel flag)
- *
- * Output: YES if both hash successfully and the digests match.
- */
-static BOOL
-same_contents(NSURL *src, NSURL *copy, copy_ctx_t *c)
-{
-    uint8_t ds[FILE_SHA256_LEN], dc[FILE_SHA256_LEN];
-    if (!logged_sha256(src, @"source", src.path, ds, c))         return NO;
-    if (!logged_sha256(copy, @"destination", copy.path, dc, c))  return NO;
-    BOOL same = memcmp(ds, dc, sizeof ds) == 0;
-    log_line(c, same ? @"✓ SHA-256 match: \"%@\" and \"%@\""
-                     : @"✗ SHA-256 MISMATCH: \"%@\" and \"%@\"", src.path, copy.path);
-    return same;
-}
-
-/*
- * verify_copy — SHA-256 compares every regular file under src with its
- * counterpart under copy, logging each digest, and records one result per
- * file keyed by the file's final URL under dst.
- *
- * Inputs:
- *   src          — original item (file or directory)
- *   copy         — staged copy of src (same relative layout)
- *   dst          — URL the copy will be committed to (used for result keys)
- *   hash_results — receives dst-relative URL -> @YES / @NO
- *   c            — copy context (log, cancel flag)
- *
- * Output: YES if every file matched.
- */
-static BOOL
-verify_copy(NSURL *src, NSURL *copy, NSURL *dst, NSMutableDictionary *hash_results,
-            copy_ctx_t *c)
-{
-    struct stat st;
-    if (lstat(src.fileSystemRepresentation, &st) != 0) return NO;
-    if (S_ISREG(st.st_mode)) {
-        BOOL ok = same_contents(src, copy, c);
-        hash_results[dst] = @(ok);
-        return ok;
-    }
-    if (!S_ISDIR(st.st_mode)) return YES;  /* symlinks etc. carry no data */
-
-    BOOL all_ok = YES;
-    NSDirectoryEnumerator *e = [NSFileManager.defaultManager enumeratorAtPath:src.path];
-    for (NSString *rel in e) {
-        if (![e.fileAttributes[NSFileType] isEqualToString:NSFileTypeRegular]) continue;
-        BOOL ok = same_contents([src URLByAppendingPathComponent:rel],
-                                [copy URLByAppendingPathComponent:rel], c);
-        hash_results[[dst URLByAppendingPathComponent:rel]] = @(ok);
-        if (!ok) all_ok = NO;
-    }
-    return all_ok;
 }
 
 /*
@@ -468,12 +529,34 @@ match_hidden_flag(NSURL *url, BOOL want, copy_ctx_t *c)
 }
 
 /*
+ * misplaced_error — the error for a rollback rename that failed, leaving an
+ * item under a hidden name; it names that path so the item can be found.
+ *
+ * Inputs:
+ *   name   — the item's real name
+ *   hidden — where it is now
+ *   code   — errno of the failed rename
+ *
+ * Output: NSError with a user-facing description.
+ */
+static NSError *
+misplaced_error(NSString *name, NSURL *hidden, int code)
+{
+    return described_error([NSString stringWithFormat:
+        @"\"%@\" could not be put back (%s) and is now at \"%@\".",
+        name, strerror(code), hidden.path]);
+}
+
+/*
  * commit_item — renames a fully staged item onto dst.
  *
  * Without replace, dst must not exist (RENAME_EXCL). With replace, the
  * existing dst is first renamed aside, the staged item renamed into place,
  * and only then is the old item deleted; if the second rename fails the old
  * item is put back. The existing dst is therefore never lost on failure.
+ *
+ * copyfile copies the lock flags, and a locked item cannot be renamed, so
+ * a locked staged item is unlocked for the rename and locked again in place.
  *
  * Each rename and deletion is logged. The item put in place, and an
  * existing item put back after a failure, get the hidden flag state they
@@ -495,62 +578,67 @@ commit_item(NSURL *staged, NSURL *dst, BOOL replace, BOOL hidden, copy_ctx_t *c)
     const char *staged_p = staged.fileSystemRepresentation;
     const char *dst_p    = dst.fileSystemRepresentation;
 
-    if (!replace || !item_exists(dst)) {
-        if (renamex_np(staged_p, dst_p, RENAME_EXCL) != 0) return posix_error(errno, dst);
-        log_line(c, @"Renamed \"%@\" to \"%@\"", staged.path, dst.path);
-        match_hidden_flag(dst, hidden, c);
-        return nil;
+    struct stat st;
+    u_int lock = (lstat(staged_p, &st) == 0) ? (st.st_flags & LOCK_FLAGS) : 0;
+    if (lock && lchflags(staged_p, st.st_flags & ~lock) != 0) {
+        return posix_error(errno, staged);
     }
 
-    struct stat old_st;
-    BOOL old_hidden = lstat(dst_p, &old_st) == 0 && (old_st.st_flags & UF_HIDDEN);
-    NSURL *old = sibling_temp_url(dst, @"old");
-    if (rename(dst_p, old.fileSystemRepresentation) != 0) {
-        return posix_error(errno, dst);
-    }
-    log_line(c, @"Renamed the existing \"%@\" aside to \"%@\"", dst.path, old.path);
-    if (rename(staged_p, dst_p) != 0) {
-        int saved_errno = errno;
-        rename(old.fileSystemRepresentation, dst_p);
-        log_line(c, @"Renamed \"%@\" back to \"%@\"", old.path, dst.path);
-        match_hidden_flag(dst, old_hidden, c);
-        return posix_error(saved_errno, dst);
+    NSURL *old = nil;
+    if (!replace || !item_exists(dst)) {
+        if (renamex_np(staged_p, dst_p, RENAME_EXCL) != 0) return posix_error(errno, dst);
+    } else {
+        struct stat old_st;
+        BOOL old_hidden = lstat(dst_p, &old_st) == 0 && (old_st.st_flags & UF_HIDDEN);
+        old = sibling_temp_url(dst, @"old");
+        if (rename(dst_p, old.fileSystemRepresentation) != 0) {
+            return posix_error(errno, dst);
+        }
+        log_line(c, @"Renamed the existing \"%@\" aside to \"%@\"", dst.path, old.path);
+        if (rename(staged_p, dst_p) != 0) {
+            int saved_errno = errno;
+            if (rename(old.fileSystemRepresentation, dst_p) != 0) {
+                int back_errno = errno;
+                log_line(c, @"✗ Could not rename \"%@\" back to \"%@\"", old.path, dst.path);
+                return misplaced_error(dst.lastPathComponent, old, back_errno);
+            }
+            log_line(c, @"Renamed \"%@\" back to \"%@\"", old.path, dst.path);
+            match_hidden_flag(dst, old_hidden, c);
+            return posix_error(saved_errno, dst);
+        }
     }
     log_line(c, @"Renamed \"%@\" to \"%@\"", staged.path, dst.path);
     match_hidden_flag(dst, hidden, c);
+    if (lock && lstat(dst_p, &st) == 0) lchflags(dst_p, st.st_flags | lock);
+
     /* The new item is in place; a failed cleanup only leaves a hidden
      * ".<name>.files-old-*" item behind, never data loss. */
-    if ([NSFileManager.defaultManager removeItemAtURL:old error:nil]) {
-        log_line(c, @"Deleted the replaced item \"%@\"", old.path);
-    } else {
-        log_line(c, @"Could not delete the replaced item \"%@\"", old.path);
-    }
+    if (old) remove_logged(old, @"the replaced item", c);
     return nil;
 }
 
 /*
  * transfer_item — copies or moves one top-level item to dst.
  *
- * The item is staged under a hidden sibling name of dst and committed with
- * commit_item only once it is complete (and, if requested, hash-verified),
- * so cancel, I/O errors and validation failures leave dst untouched.
- * Moves try rename(2) first; across volumes they copy, verify, commit, and
- * only then delete the source.
+ * A move on the same volume is a single rename(2) — RENAME_EXCL, so it
+ * cannot clobber anything — or, when replacing an existing dst, a rename
+ * to a hidden staging name followed by commit_item. Otherwise the item is
+ * copied under a hidden sibling name of dst (hash-verified as it goes, if
+ * requested) and committed with commit_item only once it is complete, so
+ * cancel, I/O errors and validation failures leave dst untouched; a move
+ * across volumes then deletes the source.
  *
  * Inputs:
- *   src           — source item URL
- *   dst           — final destination URL
- *   replace       — YES to replace an existing dst (user chose Replace)
- *   is_cut        — YES = move (source removed on success)
- *   hash_validate — YES = SHA-256 verify copied files before committing
- *   c             — copy context (progress, cancel flag)
- *   hash_results  — receives per-file verification results; may be nil
+ *   src     — source item URL
+ *   dst     — final destination URL
+ *   replace — YES to replace an existing dst (user chose Replace)
+ *   is_cut  — YES = move (source removed on success)
+ *   c       — copy context (progress, cancel flag, hash validation)
  *
  * Output: nil on success, NSError otherwise.
  */
 static NSError *
-transfer_item(NSURL *src, NSURL *dst, BOOL replace, BOOL is_cut,
-              BOOL hash_validate, copy_ctx_t *c, NSMutableDictionary *hash_results)
+transfer_item(NSURL *src, NSURL *dst, BOOL replace, BOOL is_cut, copy_ctx_t *c)
 {
     NSURL *staged = sibling_temp_url(dst, @"tmp");
     struct stat st;
@@ -558,24 +646,27 @@ transfer_item(NSURL *src, NSURL *dst, BOOL replace, BOOL is_cut,
     BOOL hidden  = have_st && (st.st_flags & UF_HIDDEN);  /* the copy should match */
 
     if (is_cut) {
-        BOOL is_file = have_st && S_ISREG(st.st_mode);
-        if (renamex_np(src.fileSystemRepresentation, staged.fileSystemRepresentation,
+        BOOL direct = !replace || !item_exists(dst);
+        NSURL *to   = direct ? dst : staged;
+        if (renamex_np(src.fileSystemRepresentation, to.fileSystemRepresentation,
                        RENAME_EXCL) == 0) {
             c->file_name  = src.lastPathComponent;
             c->file_total = 0;
             c->file_done  = 0;
             report_progress(c, 0);
-            if (is_file) {
-                log_line(c, @"Renamed \"%@\" to \"%@\" (%@ of %@ moved on the same "
-                            @"volume, no data copied)", src.path, staged.path,
-                         byte_count(st.st_size), byte_count(st.st_size));
-            } else {
-                log_line(c, @"Renamed \"%@\" to \"%@\" (moved on the same volume, "
-                            @"no data copied)", src.path, staged.path);
+            if (c->log) {
+                NSString *moved = (have_st && S_ISREG(st.st_mode))
+                    ? [byte_count(st.st_size) stringByAppendingString:@" moved"] : @"moved";
+                log_line(c, @"Renamed \"%@\" to \"%@\" (%@ on the same volume, no data "
+                            @"copied)", src.path, to.path, moved);
             }
+            if (direct) return nil;
+
             NSError *err = commit_item(staged, dst, replace, hidden, c);
             if (err) {
-                rename(staged.fileSystemRepresentation, src.fileSystemRepresentation);
+                if (rename(staged.fileSystemRepresentation, src.fileSystemRepresentation) != 0) {
+                    return misplaced_error(src.lastPathComponent, staged, errno);
+                }
                 log_line(c, @"Renamed \"%@\" back to \"%@\"", staged.path, src.path);
                 match_hidden_flag(src, hidden, c);
                 return err;
@@ -591,18 +682,9 @@ transfer_item(NSURL *src, NSURL *dst, BOOL replace, BOOL is_cut,
     NSError *err = copy_tree(src, staged, c);
     if (err) return err;
 
-    if (hash_validate && !verify_copy(src, staged, dst, hash_results, c)) {
-        [NSFileManager.defaultManager removeItemAtURL:staged error:nil];
-        log_line(c, @"Deleted the staging item \"%@\"", staged.path);
-        return described_error([NSString stringWithFormat:
-            @"SHA-256 validation failed for \"%@\". Nothing was replaced and "
-             "the source was kept.", src.lastPathComponent]);
-    }
-
     err = commit_item(staged, dst, replace, hidden, c);
     if (err) {
-        [NSFileManager.defaultManager removeItemAtURL:staged error:nil];
-        log_line(c, @"Deleted the staging item \"%@\"", staged.path);
+        remove_logged(staged, @"the staging item", c);
         return err;
     }
 
@@ -695,8 +777,7 @@ pasteboard_has_files
  *   cancel_flag   — non-zero (atomic) aborts the operation; may be NULL
  *   progress      — progress callback; may be nil
  *   log           — transfer-log callback; may be nil
- *   completion    — called on main queue with the first error (nil on
- *                   success) and per-file hash results (nil unless hash_validate)
+ *   completion    — called on main queue with the first error (nil on success)
  */
 + (void)
 run_copy_srcs:(NSArray<NSURL *> *)srcs
@@ -707,13 +788,12 @@ hash_validate:(BOOL)hash_validate
   cancel_flag:(atomic_int *)cancel_flag
      progress:(FileCopyProgressBlock)progress
           log:(FileCopyLogBlock)log
-   completion:(void (^)(NSError *, NSDictionary<NSURL *, NSNumber *> *))completion
+   completion:(void (^)(NSError *))completion
 {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSMutableDictionary *hash_results =
-            hash_validate ? [NSMutableDictionary dictionary] : nil;
-        copy_ctx_t ctx = { .progress = progress, .log = log, .cancel = cancel_flag };
-        NSString *dest_path = dest.URLByStandardizingPath.path;
+        copy_ctx_t ctx = { .progress = progress, .log = log, .cancel = cancel_flag,
+                           .hash_validate = hash_validate };
+        NSString *dest_path = real_path(dest);
         NSError *first_err  = nil;
 
         for (NSURL *src in srcs) {
@@ -723,7 +803,10 @@ hash_validate:(BOOL)hash_validate
                 break;
             }
 
-            NSString *src_path = src.URLByStandardizingPath.path;
+            /* The source's folder is canonicalised, not the source itself,
+             * so a symbolic link is compared as the link, not its target. */
+            NSString *src_dir  = real_path(src.URLByDeletingLastPathComponent);
+            NSString *src_path = [src_dir stringByAppendingPathComponent:src.lastPathComponent];
             if ([dest_path isEqualToString:src_path] ||
                 [dest_path hasPrefix:[src_path stringByAppendingString:@"/"]]) {
                 first_err = described_error([NSString stringWithFormat:
@@ -733,7 +816,7 @@ hash_validate:(BOOL)hash_validate
 
             NSURL *dst   = [dest URLByAppendingPathComponent:src.lastPathComponent];
             BOOL replace = NO;
-            if ([dst.URLByStandardizingPath.path isEqualToString:src_path]) {
+            if ([dest_path isEqualToString:src_dir]) {
                 if (is_cut) continue;              /* moving onto itself: no-op */
                 dst = unique_dest_url(src.lastPathComponent, dest);
                 log_line(&ctx, @"Duplicating \"%@\" in its own folder as \"%@\"",
@@ -758,16 +841,14 @@ hash_validate:(BOOL)hash_validate
                 }
             }
 
-            NSError *err = transfer_item(src, dst, replace, is_cut, hash_validate,
-                                         &ctx, hash_results);
+            NSError *err = transfer_item(src, dst, replace, is_cut, &ctx);
             if (err && !first_err) first_err = err;
             if (err.code == NSUserCancelledError &&
                 [err.domain isEqualToString:NSCocoaErrorDomain]) break;
         }
 
-        NSDictionary *frozen_results = [hash_results copy];
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (completion) completion(first_err, frozen_results);
+            if (completion) completion(first_err);
         });
     });
 }
@@ -799,9 +880,7 @@ transfer_urls:(NSArray<NSURL *> *)srcs
     }
     [self run_copy_srcs:srcs to:dest is_cut:is_cut hash_validate:hash
                conflict:nil cancel_flag:NULL progress:nil log:nil
-             completion:^(NSError *err, NSDictionary<NSURL *, NSNumber *> *hash_results) {
-        if (completion) completion(err);
-    }];
+             completion:completion];
 }
 
 /*

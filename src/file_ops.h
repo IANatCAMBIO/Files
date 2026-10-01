@@ -114,9 +114,11 @@ typedef FilesConflictResolution (^FilesConflictBlock)(NSURL *src, NSURL *dst);
  *
  * Runs on a background queue; calls completion on the main queue.
  * Uses copyfile(3) (APFS clones, full metadata, symlinks kept as links) and
- * rename(2) for same-volume moves. Each item is staged under a hidden name
+ * rename(2) for same-volume moves. Each copy is staged under a hidden name
  * and renamed into place only when complete, so cancel, errors and failed
  * validation never damage an existing destination or delete the source.
+ * Validation hashes each file as soon as it is copied, stopping at the
+ * first mismatch; APFS clones are identical by construction and not hashed.
  * Copying a folder into itself is rejected; pasting into the source's own
  * folder duplicates on copy and is a no-op on cut.
  *
@@ -129,7 +131,7 @@ typedef FilesConflictResolution (^FilesConflictBlock)(NSURL *src, NSURL *dst);
  *   cancel_flag   — set to non-zero (atomic_store) to abort; may be NULL
  *   progress      — progress callback; may be nil
  *   log           — transfer-log callback; may be nil
- *   completion    — called on main queue with error and hash_results dict
+ *   completion    — called on main queue with the first error, nil on success
  */
 + (void)run_copy_srcs:(NSArray<NSURL *> *)srcs
                    to:(NSURL *)dest
@@ -139,8 +141,7 @@ typedef FilesConflictResolution (^FilesConflictBlock)(NSURL *src, NSURL *dst);
           cancel_flag:(atomic_int *)cancel_flag
              progress:(FileCopyProgressBlock)progress
                   log:(FileCopyLogBlock)log
-           completion:(void (^)(NSError *err,
-                                NSDictionary<NSURL *, NSNumber *> *hash_results))completion;
+           completion:(void (^)(NSError *err))completion;
 
 /*
  * move_to_trash:completion: — moves urls to the trash.

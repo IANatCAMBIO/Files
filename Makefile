@@ -41,7 +41,7 @@ SRCS     = $(wildcard src/*.m)
 OBJS     = $(patsubst src/%.m,build/%.o,$(SRCS))
 DEPS     = $(OBJS:.o=.d)
 
-.PHONY: all run install clean
+.PHONY: all run install clean test
 
 all: $(BUNDLE)
 
@@ -108,6 +108,18 @@ install: all
 	cp -R $(BUNDLE) "$(INSTALL_DIR)/$(BUNDLE)" && \
 	echo "Installed to $(INSTALL_DIR)/$(BUNDLE)" && \
 	if [ $$running = 1 ]; then open "$(INSTALL_DIR)/$(BUNDLE)" && echo "Reopened Files"; fi
+
+# Engine tests: tests/*_test.m linked against the app's objects (all but
+# main.o), run against a scratch folder and a small disk image.
+TEST_SRCS = $(wildcard tests/*_test.m)
+TEST_BINS = $(patsubst tests/%.m,build/%,$(TEST_SRCS))
+APP_OBJS  = $(filter-out build/main.o,$(OBJS))
+
+build/%_test: tests/%_test.m $(APP_OBJS) Makefile | build
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< $(APP_OBJS)
+
+test: $(TEST_BINS)
+	@for t in $(TEST_BINS); do echo "== $$t"; ./$$t || exit 1; done
 
 clean:
 	@rm -rf build $(BUNDLE)

@@ -3,12 +3,15 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
-#define HASH_CHUNK (1024 * 1024)  /* 1 MB read buffer */
+#define HASH_CHUNK (1024 * 1024)  /* largest read buffer: 1 MB */
 
 /*
  * file_digests — single-pass SHA-256 (+ optional MD5) of a file, F_NOCACHE,
- * cancellable. Inputs/output are documented in file_hash.h.
+ * cancellable. The read buffer is sized to the file (at most HASH_CHUNK),
+ * so hashing many small files does not map and unmap 1 MB each time.
+ * Inputs/output are documented in file_hash.h.
  */
 int
 file_digests(const char *path, uint8_t sha256[FILE_SHA256_LEN],
@@ -20,7 +23,11 @@ file_digests(const char *path, uint8_t sha256[FILE_SHA256_LEN],
     if (fd < 0) return -1;
     fcntl(fd, F_NOCACHE, 1);
 
-    uint8_t *buf = malloc(HASH_CHUNK);
+    /* One byte more than the file, so a file read in one go ends at once. */
+    struct stat st;
+    size_t buf_len = HASH_CHUNK;
+    if (fstat(fd, &st) == 0 && st.st_size < HASH_CHUNK) buf_len = (size_t)st.st_size + 1;
+    uint8_t *buf = malloc(buf_len);
     if (!buf) {
         close(fd);
         return -1;
@@ -37,7 +44,7 @@ file_digests(const char *path, uint8_t sha256[FILE_SHA256_LEN],
     int ret = 0;
     for (;;) {
         if (cancel && atomic_load(cancel)) { ret = -2; break; }
-        ssize_t n = read(fd, buf, HASH_CHUNK);
+        ssize_t n = read(fd, buf, buf_len);
         if (n == 0) break;
         if (n < 0) {
             if (errno == EINTR) continue;
