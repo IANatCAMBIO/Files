@@ -12,7 +12,9 @@ A minimalist macOS file manager written in Objective-C + AppKit.
 - Single- or dual-pane browsing (View ▸ Dual Pane, ⇧⌘2; Tab switches panes)
 - The status bar shows the item count and, on the right, the free and
   total space of the disk being browsed ("10.3 GB (of 245 GB) free"; free
-  space counts purgeable space, as Finder does)
+  space counts purgeable space, as Finder does). View ▸ Show Used Disk
+  Space (off by default; also in Preferences) shows the space used instead
+  ("234.8 GB (of 245 GB) used")
 - Bookmarks bar (Home, Desktop, Downloads, Documents, Applications, Trash);
   ⌘D or the ★ button adds the current folder, and right-click ▸ Add to
   Bookmarks on a folder in the list adds that folder (before Trash, which

@@ -19,6 +19,7 @@ NSString * const files_pref_hidden_columns  = @"files.hidden_columns";
 NSString * const files_pref_search_this_mac = @"files.search_this_mac";
 NSString * const files_pref_show_bookmarks  = @"files.show_bookmarks";
 NSString * const files_pref_folder_sizes    = @"files.folder_sizes";
+NSString * const files_pref_show_used_space = @"files.show_used_space";
 
 /*
  * files_register_defaults — registers non-NO preference defaults.

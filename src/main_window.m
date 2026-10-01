@@ -144,6 +144,7 @@ init_with_url:(NSURL *)url
                 usingBlock:^(NSNotification *n) {
         [ws update_search_placeholder];
         [ws apply_bookmarks_bar_pref];
+        [ws refresh_disk_space];
     }];
     [self apply_bookmarks_bar_pref];
 
@@ -512,14 +513,17 @@ show_pane_status
 }
 
 /*
- * refresh_disk_space — shows "10.4 GB (of 200 GB) free" for the volume of
- * the active pane's folder at the right of the status bar. Free space is
+ * refresh_disk_space — shows "10.4 GB (of 200 GB) free" — or, with
+ * files_pref_show_used_space (View ▸ Show Used Disk Space), "189.6 GB (of
+ * 200 GB) used", i.e. total less free — for the volume of the active
+ * pane's folder at the right of the status bar. Free space is
  * the space available for important use (it counts purgeable space, as
  * Finder does), else the plain available capacity. The volume is asked on
  * a background queue — an unresponsive network volume must not stall the
  * window — at most every 0.3 s however often the status changes (every
  * listing and selection change asks), and a newer request supersedes an
- * older answer still on its way. Empty if the volume does not say.
+ * older answer still on its way. Empty if the volume does not say. Also
+ * runs on every preference change, so the toggle shows at once.
  */
 - (void)
 refresh_disk_space
@@ -535,6 +539,7 @@ refresh_disk_space
         NSString *path = [s active_browser].current_url.path;
         if (!path) return;
         NSUInteger generation = ++s.space_generation;
+        BOOL used = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_show_used_space];
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             /* A new URL each time: resource values are cached per URL. */
             NSDictionary<NSURLResourceKey, id> *v =
@@ -546,10 +551,13 @@ refresh_disk_space
             NSNumber *free  = v[NSURLVolumeAvailableCapacityForImportantUsageKey]
                               ?: v[NSURLVolumeAvailableCapacityKey];
             NSNumber *total = v[NSURLVolumeTotalCapacityKey];
-            NSString *text  = (free && total.longLongValue > 0)
-                ? [NSString stringWithFormat:@"%@ (of %@) free",
-                   files_format_bytes(free.longLongValue), files_format_bytes(total.longLongValue)]
-                : @"";
+            NSString *text  = @"";
+            if (free && total.longLongValue > 0) {
+                int64_t shown = used ? MAX(total.longLongValue - free.longLongValue, 0)
+                                     : free.longLongValue;
+                text = [NSString stringWithFormat:@"%@ (of %@) %@", files_format_bytes(shown),
+                        files_format_bytes(total.longLongValue), used ? @"used" : @"free"];
+            }
             dispatch_async(dispatch_get_main_queue(), ^{
                 FilesMainWindow *m = ws;
                 if (m && generation == m.space_generation) m.space_label.stringValue = text;

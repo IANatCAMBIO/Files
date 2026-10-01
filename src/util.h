@@ -21,6 +21,7 @@ extern NSString * const files_pref_keep_running;    /* stay running with no wind
 extern NSString * const files_pref_search_this_mac; /* search the whole Mac, not the current folder */
 extern NSString * const files_pref_show_bookmarks;  /* bookmarks bar above the list (default on) */
 extern NSString * const files_pref_folder_sizes;    /* Size column totals folders' contents */
+extern NSString * const files_pref_show_used_space; /* status bar shows used, not free, space */
 
 /* NSUserDefaults key (array of column identifiers): file-list columns the
  * user has hidden from the column-header menu. Absent = all shown. */
