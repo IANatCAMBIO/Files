@@ -106,9 +106,49 @@ watch_trash(void)
     });
 }
 
+/* Points a mouse wheel's one-line step moves the bookmarks. */
+static const CGFloat wheel_line_w = 20.0;
+
+/*
+ * FilesBookmarksScrollView — the bar's horizontal-only scroll view. A
+ * mouse wheel scrolls vertically, which a horizontal scroll view ignores,
+ * so whichever axis an event mostly moves along scrolls the bookmarks
+ * sideways: wheel down or a swipe left shows later bookmarks.
+ */
+@interface FilesBookmarksScrollView : NSScrollView
+@end
+
+@implementation FilesBookmarksScrollView
+
+/*
+ * scrollWheel: — scrolls the bookmarks horizontally by the event's larger
+ * delta, in points for a trackpad or smooth-scrolling mouse and in lines
+ * (wheel_line_w each) for a notched wheel, stopping at either end. Does
+ * nothing while every bookmark is visible.
+ *
+ * Inputs:
+ *   event — scroll-wheel event
+ */
+- (void)
+scrollWheel:(NSEvent *)event
+{
+    CGFloat dx    = event.scrollingDeltaX, dy = event.scrollingDeltaY;
+    CGFloat delta = fabs(dx) > fabs(dy) ? dx : dy;
+    if (!event.hasPreciseScrollingDeltas) delta *= wheel_line_w;
+    NSClipView *clip = self.contentView;
+    NSRect bounds    = clip.bounds;
+    if (delta == 0 || NSWidth(self.documentView.frame) <= NSWidth(bounds)) return;
+
+    bounds.origin.x -= delta;
+    [clip scrollToPoint:[clip constrainBoundsRect:bounds].origin];
+    [self reflectScrolledClipView:clip];
+}
+
+@end
+
 @implementation FilesBookmarksBar {
     NSMutableArray<NSURL *> *_bookmarks;
-    NSScrollView            *_scroll_view;
+    FilesBookmarksScrollView *_scroll_view;
     NSView                  *_btn_container;
     NSButton                *_star_button;
     NSButton                *_trash_btn;   /* the Trash bookmark's button (in _btn_container); nil if none */
@@ -261,9 +301,9 @@ setup_star_button
 }
 
 /*
- * setup_scroll_view — creates the NSScrollView that allows horizontal
- * scrolling when there are too many bookmarks to fit. Offset to the right
- * of the star button.
+ * setup_scroll_view — creates the scroll view that scrolls the bookmarks
+ * horizontally (mouse wheel or trackpad) when there are too many to fit.
+ * Offset to the right of the star button.
  */
 - (void)
 setup_scroll_view
@@ -272,7 +312,7 @@ setup_scroll_view
     CGFloat bar_w  = self.bounds.size.width;
     CGFloat bar_h  = self.bounds.size.height;
 
-    _scroll_view = [[NSScrollView alloc] initWithFrame:
+    _scroll_view = [[FilesBookmarksScrollView alloc] initWithFrame:
                        NSMakeRect(offset, 0, bar_w - offset, bar_h)];
     _scroll_view.hasVerticalScroller   = NO;
     _scroll_view.hasHorizontalScroller = NO;
@@ -357,8 +397,9 @@ rebuild_buttons
     }
     [self update_trash_icon];
 
-    _btn_container.frame = NSMakeRect(0, 0,
-        MAX(x, self.bounds.size.width), bar_h);
+    /* Exactly as wide as the buttons, so the bar scrolls only when the
+     * window is too narrow for them, however it is resized later. */
+    _btn_container.frame = NSMakeRect(0, 0, x, bar_h);
     _scroll_view.documentView = _btn_container;
     [self setNeedsDisplay:YES];
 }
