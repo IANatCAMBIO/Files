@@ -2036,9 +2036,9 @@ acceptsFirstResponder
 }
 
 /*
- * keyDown: — Return/Enter opens the selected item when it is a single
- * folder (or package, as a double-click would), and otherwise begins an
- * inline rename (folders are renamed from the context menu); Space opens or closes
+ * keyDown: — Return/Enter opens the selection as a double-click would
+ * (open_selected:: folders are shown, files open in their default app;
+ * rename is in the context menu); Space opens or closes
  * Quick Look for the selection; ← and → (no modifiers) go back and
  * forward. Move to Trash is deliberately not bound
  * to a bare Delete key: it is only reachable via ⌘⌫ (Edit menu key
@@ -2052,14 +2052,7 @@ keyDown:(NSEvent *)event
 {
     NSString *chars = event.charactersIgnoringModifiers;
     if ([chars isEqualToString:@"\r"] || [chars isEqualToString:@"\n"]) {
-        NSArray<NSURL *> *sel = [self selected_urls];
-        NSNumber *is_dir = nil;
-        [sel.firstObject getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
-        if (sel.count == 1 && is_dir.boolValue) {
-            [self navigate_to:sel.firstObject];
-        } else {
-            [self begin_rename:nil];
-        }
+        [self open_selected:nil];
         return;
     }
     NSEventModifierFlags mods = event.modifierFlags & (NSEventModifierFlagCommand |
