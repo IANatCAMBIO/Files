@@ -1,5 +1,6 @@
 #import "util.h"
 #import "git_info.h"
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -74,15 +75,43 @@ files_same_path(NSURL *a, NSURL *b)
 }
 
 /*
- * files_icon_for_url — Workspace icon, git-badged for working trees.
+ * files_icon_for_url — Workspace icon, git-badged for working trees,
+ * cached: plain files share one icon per type (keyed by UTI) so a folder
+ * of 10,000 JPEGs costs one image; folders and packages can carry custom
+ * icons (or be git working trees), so they are cached per path. The cache
+ * is bounded and evictable under memory pressure.
  * Inputs/output are documented in util.h.
  */
 NSImage *
 files_icon_for_url(NSURL *url, CGFloat size)
 {
-    NSImage *icon = [NSWorkspace.sharedWorkspace iconForFile:url.path];
-    icon.size = NSMakeSize(size, size);
-    return files_is_git_repo(url) ? files_git_badged_icon(icon) : icon;
+    static NSCache<NSString *, NSImage *> *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        cache = [[NSCache alloc] init];
+        cache.countLimit = 4096;
+    });
+
+    NSNumber *is_dir = nil;
+    NSString *uti    = nil;
+    [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
+    [url getResourceValue:&uti forKey:NSURLTypeIdentifierKey error:nil];
+    BOOL by_type = !is_dir.boolValue && uti.length > 0;
+    NSString *key = [NSString stringWithFormat:@"%g:%@", size, by_type ? uti : url.path];
+
+    NSImage *icon = [cache objectForKey:key];
+    if (icon) return icon;
+    UTType *type = by_type ? [UTType typeWithIdentifier:uti] : nil;
+    if (type) {
+        icon = [[NSWorkspace.sharedWorkspace iconForContentType:type] copy];
+        icon.size = NSMakeSize(size, size);
+    } else {
+        icon = [NSWorkspace.sharedWorkspace iconForFile:url.path];
+        icon.size = NSMakeSize(size, size);
+        if (files_is_git_repo(url)) icon = files_git_badged_icon(icon);
+    }
+    [cache setObject:icon forKey:key];
+    return icon;
 }
 
 /*

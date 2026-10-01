@@ -1,6 +1,6 @@
 #import <Cocoa/Cocoa.h>
 
-@class FilesBrowserPane;
+@class FilesBrowserView;
 
 /*
  * FilesMainWindow — NSWindowController that owns the main application window:
@@ -32,10 +32,10 @@
 - (instancetype)initWithCoder:(NSCoder *)coder NS_UNAVAILABLE;
 
 /*
- * active_pane — returns the currently active browser pane.
+ * active_browser — returns the browser of the active pane.
  *
- * Output: FilesBrowserPane (never nil).
+ * Output: FilesBrowserView (never nil).
  */
-- (FilesBrowserPane *)active_pane;
+- (FilesBrowserView *)active_browser;
 
 @end

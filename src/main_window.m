@@ -1,6 +1,5 @@
 #import "main_window.h"
 #import "bookmarks_bar.h"
-#import "browser_pane.h"
 #import "browser_view.h"
 #import "info_panel.h"
 #import "info_sidebar.h"
@@ -52,9 +51,9 @@ static void *first_responder_ctx = &first_responder_ctx;
 @property (nonatomic, strong) NSSplitViewItem       *sidebar_item;
 @property (nonatomic, strong) FilesInfoSidebar      *info_sidebar;
 
-/* Panes */
-@property (nonatomic, strong) FilesBrowserPane *primary_pane;
-@property (nonatomic, strong) FilesBrowserPane *secondary_pane;    /* nil = single-pane */
+/* Panes: one browser each; in dual-pane mode the inactive one is dimmed. */
+@property (nonatomic, strong) FilesBrowserView *primary_browser;
+@property (nonatomic, strong) FilesBrowserView *secondary_browser; /* nil = single-pane */
 @property (nonatomic)         NSInteger         active_pane_index; /* 0 or 1 */
 
 /* Status bar (full-width, below the split) and the floating action button,
@@ -66,6 +65,9 @@ static void *first_responder_ctx = &first_responder_ctx;
 
 /* Paths of volumes waiting for their open files to close before unmounting. */
 @property (nonatomic, strong) NSMutableSet<NSString *> *pending_unmounts;
+
+/* NSUserDefaultsDidChangeNotification observer (main queue). */
+@property (nonatomic, strong) id defaults_observer;
 
 @end
 
@@ -109,15 +111,21 @@ init_with_url:(NSURL *)url
                                                name:FilesVolumesChangedNotification
                                              object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self
-                                           selector:@selector(update_search_placeholder)
-                                               name:NSUserDefaultsDidChangeNotification
-                                             object:nil];
-
+                                           selector:@selector(window_will_close:)
+                                               name:NSWindowWillCloseNotification
+                                             object:self.window];
+    /* Defaults can change on any thread; the search field is only touched
+     * on the main queue. */
     __weak FilesMainWindow *ws = self;
+    self.defaults_observer = [NSNotificationCenter.defaultCenter
+        addObserverForName:NSUserDefaultsDidChangeNotification object:nil
+                     queue:NSOperationQueue.mainQueue
+                usingBlock:^(NSNotification *n) { [ws update_search_placeholder]; }];
+
     self.bookmarks_bar.selection_handler = ^(NSURL *url) {
         [[ws active_browser] navigate_to:url];
     };
-    [self.primary_pane.browser navigate_to:url];
+    [self.primary_browser navigate_to:url];
 
     /* Deferred so it runs after the window's initial first-responder pass. */
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -127,12 +135,28 @@ init_with_url:(NSURL *)url
 }
 
 /*
+ * window_will_close: — stops each browser's folder watcher and Spotlight
+ * search and clears the info sidebar's Quick Look request as the window
+ * closes, so a Files kept running with no windows holds none of them.
+ *
+ * Inputs:
+ *   note — NSWindowWillCloseNotification for this window (unused)
+ */
+- (void)
+window_will_close:(NSNotification *)note
+{
+    for (FilesBrowserView *b in [self all_browsers]) [b shut_down];
+    [self.info_sidebar clear];
+}
+
+/*
  * dealloc — removes the observers added in init_with_url:.
  */
 - (void)
 dealloc
 {
     [self.window removeObserver:self forKeyPath:@"firstResponder" context:first_responder_ctx];
+    [NSNotificationCenter.defaultCenter removeObserver:self.defaults_observer];
     [NSNotificationCenter.defaultCenter removeObserver:self];
 }
 
@@ -210,9 +234,8 @@ build_layout
     self.pane_split.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     [browser_container addSubview:self.pane_split];
 
-    self.primary_pane = [[FilesBrowserPane alloc] init_with_frame:self.pane_split.bounds];
-    [self.pane_split addSubview:self.primary_pane];
-    [self wire_pane:self.primary_pane];
+    self.primary_browser = [self new_browser_with_frame:self.pane_split.bounds];
+    [self.pane_split addSubview:self.primary_browser];
 
     /* Sidebar side. */
     self.info_sidebar = [[FilesInfoSidebar alloc]
@@ -262,26 +285,15 @@ build_layout
 /* ── Panes ───────────────────────────────────────────────────────────────── */
 
 /*
- * active_pane — returns the currently active browser pane.
- *
- * Output: FilesBrowserPane (never nil).
- */
-- (FilesBrowserPane *)
-active_pane
-{
-    return (self.active_pane_index == 1 && self.secondary_pane)
-        ? self.secondary_pane : self.primary_pane;
-}
-
-/*
- * active_browser — returns the FilesBrowserView of the active pane.
+ * active_browser — returns the browser of the active pane.
  *
  * Output: FilesBrowserView (never nil).
  */
 - (FilesBrowserView *)
 active_browser
 {
-    return [self active_pane].browser;
+    return (self.active_pane_index == 1 && self.secondary_browser)
+        ? self.secondary_browser : self.primary_browser;
 }
 
 /*
@@ -292,61 +304,52 @@ active_browser
 - (NSArray<FilesBrowserView *> *)
 all_browsers
 {
-    return self.secondary_pane
-        ? @[self.primary_pane.browser, self.secondary_pane.browser]
-        : @[self.primary_pane.browser];
+    return self.secondary_browser
+        ? @[self.primary_browser, self.secondary_browser]
+        : @[self.primary_browser];
 }
 
 /*
- * wire_pane: — connects a pane's browser callbacks to the window. Every
- * callback records per-pane state, but only the active pane updates the
- * shared toolbar, status bar, floating button and info sidebar.
+ * new_browser_with_frame: — creates a pane's browser and connects its
+ * callbacks to the window. Callbacks from either pane are accepted, but
+ * only the active pane updates the shared toolbar, status bar, floating
+ * button and info sidebar.
  *
  * Inputs:
- *   pane — pane to wire
+ *   frame — initial frame
+ *
+ * Output: new FilesBrowserView, sized with the split view.
  */
-- (void)
-wire_pane:(FilesBrowserPane *)pane
+- (FilesBrowserView *)
+new_browser_with_frame:(NSRect)frame
 {
-    __weak FilesMainWindow  *ws = self;
-    __weak FilesBrowserPane *wp = pane;
-    FilesBrowserView *b = pane.browser;
+    FilesBrowserView *b = [[FilesBrowserView alloc] init_with_frame:frame];
+    b.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
+    __weak FilesMainWindow  *ws = self;
+    __weak FilesBrowserView *wb = b;
     b.navigation_handler = ^(NSURL *url) {
         FilesMainWindow *s = ws;
-        FilesBrowserPane *p = wp;
-        if (!s || !p) return;
-        p.showing_trash      = files_same_path(url, files_directory_url(NSTrashDirectory));
-        p.unmountable_volume = unmountable_volume_root(url);
-        if ([s active_pane] != p) return;
+        if (!s || [s active_browser] != wb) return;
         [s update_toolbar_for_url:url];
         [s update_floating_button];
-        [s.bookmarks_bar update_trash_icon];
     };
     b.open_window_handler = ^(NSURL *url) {
         FilesMainWindow *s = ws;
-        if (s.new_window_handler) {
-            s.new_window_handler(url);
-        } else {
-            [[s active_browser] navigate_to:url];
-        }
+        if (s.new_window_handler) s.new_window_handler(url);
     };
     b.info_handler = ^(NSArray<NSURL *> *urls) {
         [FilesInfoPanel.shared show_for_url:urls.firstObject];
     };
     b.sidebar_handler = ^(NSArray<NSURL *> *urls) {
         FilesMainWindow *s = ws;
-        if (s && [s active_pane] == wp) [s refresh_sidebar_for_active_pane];
+        if (s && [s active_browser] == wb) [s refresh_sidebar_for_active_pane];
     };
     b.status_text_handler = ^(NSString *text) {
         FilesMainWindow *s = ws;
-        FilesBrowserPane *p = wp;
-        if (!s || !p) return;
-        p.status_text = text;
-        /* Listings of the Trash are the signal that its contents changed. */
-        if (p.showing_trash) [s.bookmarks_bar update_trash_icon];
-        if ([s active_pane] == p) [s show_pane_status];
+        if (s && [s active_browser] == wb) [s show_pane_status];
     };
+    return b;
 }
 
 /*
@@ -376,16 +379,17 @@ unmountable_volume_root(NSURL *url)
 - (void)
 update_floating_button
 {
-    FilesBrowserPane *p = [self active_pane];
-    NSButton *btn = self.floating_btn;
+    NSURL    *url    = [self active_browser].current_url;
+    NSURL    *volume = nil;
+    NSButton *btn    = self.floating_btn;
     NSImage  *icon;
-    if (p.showing_trash) {
+    if (files_same_path(url, files_directory_url(NSTrashDirectory))) {
         icon        = [[NSImage imageNamed:NSImageNameTrashEmpty] copy];
         icon.size   = NSMakeSize(20.0, 20.0);
         btn.action  = @selector(empty_trash_action:);
         btn.toolTip = @"Empty Trash";
-    } else if (p.unmountable_volume) {
-        NSString *name = [FilesVolumeManager.shared display_name_for_volume:p.unmountable_volume];
+    } else if ((volume = unmountable_volume_root(url))) {
+        NSString *name = [FilesVolumeManager.shared display_name_for_volume:volume];
         btn.toolTip = [NSString stringWithFormat:@"Unmount \"%@\"", name];
         icon        = [[NSImage imageWithSystemSymbolName:@"eject" accessibilityDescription:btn.toolTip]
                           imageWithSymbolConfiguration:
@@ -412,12 +416,12 @@ update_floating_button
 - (void)
 set_active_pane:(NSInteger)idx
 {
-    self.active_pane_index        = idx;
-    self.primary_pane.is_active   = (idx == 0);
-    self.secondary_pane.is_active = (idx == 1);
+    self.active_pane_index = idx;
+    BOOL dual = self.secondary_browser != nil;
+    self.primary_browser.alphaValue   = (dual && idx != 0) ? 0.45 : 1.0;
+    self.secondary_browser.alphaValue = (idx != 1) ? 0.45 : 1.0;
 
-    FilesBrowserPane *p = [self active_pane];
-    [self update_toolbar_for_url:p.browser.current_url];
+    [self update_toolbar_for_url:[self active_browser].current_url];
     [self show_pane_status];
     [self update_floating_button];
     [self refresh_sidebar_for_active_pane];
@@ -431,7 +435,7 @@ set_active_pane:(NSInteger)idx
 show_pane_status
 {
     if (self.transient_status_id) return;
-    self.status_label.stringValue = [self active_pane].status_text ?: @"";
+    self.status_label.stringValue = [self active_browser].status_text ?: @"";
 }
 
 /*
@@ -484,23 +488,20 @@ update_toolbar_for_url:(NSURL *)url
 - (IBAction)
 toggle_dual_pane:(id)sender
 {
-    if (self.secondary_pane) {
-        [self.secondary_pane removeFromSuperview];
-        self.secondary_pane = nil;
-        self.primary_pane.in_dual_mode = NO;
+    if (self.secondary_browser) {
+        [self.secondary_browser shut_down];
+        [self.secondary_browser removeFromSuperview];
+        self.secondary_browser = nil;
         [self set_active_pane:0];
-        [self.window makeFirstResponder:self.primary_pane.browser];
+        [self.window makeFirstResponder:self.primary_browser];
     } else {
         CGFloat split_w = self.pane_split.bounds.size.width;
-        self.secondary_pane = [[FilesBrowserPane alloc]
-            init_with_frame:NSMakeRect(0, 0, split_w / 2, self.pane_split.bounds.size.height)];
-        self.secondary_pane.in_dual_mode = YES;
-        self.primary_pane.in_dual_mode   = YES;
-        [self wire_pane:self.secondary_pane];
-        [self.pane_split addSubview:self.secondary_pane];
+        self.secondary_browser = [self new_browser_with_frame:
+            NSMakeRect(0, 0, split_w / 2, self.pane_split.bounds.size.height)];
+        [self.pane_split addSubview:self.secondary_browser];
         [self.pane_split setPosition:split_w / 2 ofDividerAtIndex:0];
         [self set_active_pane:0];
-        [self.secondary_pane.browser navigate_to:self.primary_pane.browser.current_url];
+        [self.secondary_browser navigate_to:self.primary_browser.current_url];
     }
     [self.window.toolbar validateVisibleItems];
 }
@@ -515,11 +516,11 @@ toggle_dual_pane:(id)sender
 - (void)
 keyDown:(NSEvent *)event
 {
-    if (self.secondary_pane && event.keyCode == 48 /* Tab */ &&
+    if (self.secondary_browser && event.keyCode == 48 /* Tab */ &&
         !(event.modifierFlags & NSEventModifierFlagCommand)) {
-        FilesBrowserPane *other = (self.active_pane_index == 0)
-            ? self.secondary_pane : self.primary_pane;
-        [self.window makeFirstResponder:other.browser];
+        FilesBrowserView *other = (self.active_pane_index == 0)
+            ? self.secondary_browser : self.primary_browser;
+        [self.window makeFirstResponder:other];
         return;
     }
     [super keyDown:event];
@@ -544,11 +545,11 @@ observeValueForKeyPath:(NSString *)keyPath
         [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
         return;
     }
-    if (!self.secondary_pane) return;
+    if (!self.secondary_browser) return;
 
     NSResponder *r = self.window.firstResponder;
     for (NSView *v = [r isKindOfClass:NSView.class] ? (NSView *)r : nil; v; v = v.superview) {
-        NSInteger idx = (v == self.primary_pane) ? 0 : (v == self.secondary_pane) ? 1 : -1;
+        NSInteger idx = (v == self.primary_browser) ? 0 : (v == self.secondary_browser) ? 1 : -1;
         if (idx < 0) continue;
         if (idx != self.active_pane_index) [self set_active_pane:idx];
         return;
@@ -752,7 +753,7 @@ validateToolbarItem:(NSToolbarItem *)item
         item.image = [NSImage imageWithSystemSymbolName:on ? @"eye" : @"eye.slash"
                                accessibilityDescription:item.label];
     } else if (action == @selector(toggle_dual_pane:)) {
-        item.image = [NSImage imageWithSystemSymbolName:self.secondary_pane
+        item.image = [NSImage imageWithSystemSymbolName:self.secondary_browser
                                                         ? @"rectangle.split.2x1.fill"
                                                         : @"rectangle.split.2x1"
                                accessibilityDescription:item.label];
@@ -1053,7 +1054,7 @@ empty_trash_action:(id)sender
 - (IBAction)
 unmount_action:(id)sender
 {
-    NSURL *volume = [self active_pane].unmountable_volume;
+    NSURL *volume = unmountable_volume_root([self active_browser].current_url);
     if (!volume) return;
     NSString *name = [FilesVolumeManager.shared display_name_for_volume:volume];
     self.floating_btn.enabled = NO;
@@ -1175,8 +1176,8 @@ volumes_changed:(NSNotification *)note
 /* ── View preferences (apply to every pane) ──────────────────────────────── */
 
 /*
- * toggle_hidden_files_action: — flips files_pref_show_hidden and reloads
- * every pane.
+ * toggle_hidden_files_action: — flips files_pref_show_hidden; every pane
+ * in every window applies it (FilesBrowserView apply_view_prefs).
  *
  * Inputs:
  *   sender — toolbar item (unused)
@@ -1186,7 +1187,6 @@ toggle_hidden_files_action:(id)sender
 {
     NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
     [ud setBool:![ud boolForKey:files_pref_show_hidden] forKey:files_pref_show_hidden];
-    for (FilesBrowserView *b in [self all_browsers]) [b reload_directory];
     [self.window.toolbar validateVisibleItems];
 }
 
@@ -1204,7 +1204,7 @@ validateMenuItem:(NSMenuItem *)item
 {
     SEL action = item.action;
     if (action == @selector(toggle_dual_pane:)) {
-        item.state = self.secondary_pane ? NSControlStateValueOn : NSControlStateValueOff;
+        item.state = self.secondary_browser ? NSControlStateValueOn : NSControlStateValueOff;
     } else if (action == @selector(set_search_scope:)) {
         BOOL mac   = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_search_this_mac];
         item.state = (item.tag == 1) == mac ? NSControlStateValueOn : NSControlStateValueOff;

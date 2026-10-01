@@ -40,6 +40,12 @@
 @property (nonatomic, copy) void (^open_window_handler)(NSURL *url);
 
 /*
+ * status_text — the text last passed to status_text_handler (item count,
+ * selection, listing error or progress message); nil before the first.
+ */
+@property (nonatomic, copy, readonly) NSString *status_text;
+
+/*
  * init_with_frame: — designated initialiser; builds subviews and sets up the
  * table.
  *
@@ -129,6 +135,13 @@
  * No-op while Spotlight results are displayed.
  */
 - (void)reload_directory;
+
+/*
+ * shut_down — stops the folder watcher, any Spotlight search and
+ * preference observing, for a browser whose window is closing. The
+ * browser shows nothing new afterwards.
+ */
+- (void)shut_down;
 
 /*
  * Action methods wired to the menu / responder chain (Go-menu and view

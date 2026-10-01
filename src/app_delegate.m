@@ -1,6 +1,6 @@
 #import "app_delegate.h"
 #import "main_window.h"
-#import "browser_pane.h"
+#import "browser_view.h"
 #import "volume_manager.h"
 #import "mounts_panel.h"
 #import "default_viewer.h"
@@ -332,7 +332,7 @@ open_window_at:(NSURL *)url
 window_for_folder:(NSURL *)folder
 {
     for (FilesMainWindow *w in self.windows) {
-        if (files_same_path([w active_pane].browser.current_url, folder)) {
+        if (files_same_path([w active_browser].current_url, folder)) {
             [w showWindow:nil];
             return w;
         }
@@ -373,7 +373,7 @@ application:(NSApplication *)app openURLs:(NSArray<NSURL *> *)urls
         [reveal[parent] addObject:url.lastPathComponent];
     }
     for (NSURL *parent in reveal) {
-        [[[self window_for_folder:parent] active_pane].browser reveal_items:reveal[parent]];
+        [[[self window_for_folder:parent] active_browser] reveal_items:reveal[parent]];
     }
     [NSApp activate];
 }
@@ -689,7 +689,8 @@ menuNeedsUpdate:(NSMenu *)menu
 
 /*
  * mount_menu_item_clicked: — navigates the front window's active pane to the
- * location stored in the menu item's representedObject.
+ * location stored in the menu item's representedObject, or opens a window
+ * on it when none is open (Files kept running).
  *
  * Inputs:
  *   sender — NSMenuItem with representedObject = volume or cloud folder URL
@@ -699,7 +700,12 @@ mount_menu_item_clicked:(NSMenuItem *)sender
 {
     NSURL *vol = sender.representedObject;
     if (!vol) return;
-    [[[self front_window] active_pane].browser navigate_to:vol];
+    FilesMainWindow *front = [self front_window];
+    if (front) {
+        [[front active_browser] navigate_to:vol];
+    } else {
+        [self open_window_at:vol];
+    }
 }
 
 /*

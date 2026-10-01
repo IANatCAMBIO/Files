@@ -4,8 +4,9 @@
  * FilesBookmarksBar — a 28pt horizontal strip of recessed buttons for quick
  * directory navigation. Defaults to Home, Desktop, Downloads, Documents,
  * Applications and Trash. User-added bookmarks are persisted in
- * NSUserDefaults. Trash is always present as the last bookmark and cannot
- * be removed.
+ * NSUserDefaults and shared by every window's bar. Trash is always present
+ * as the last bookmark and cannot be removed; its icon shows whether the
+ * Trash is empty, following one app-wide watcher.
  */
 @interface FilesBookmarksBar : NSView
 
@@ -37,13 +38,5 @@
  *   url — file-system directory URL to bookmark
  */
 - (void)add_bookmark:(NSURL *)url;
-
-/*
- * update_trash_icon — re-checks ~/.Trash and switches the bookmark icon
- * between NSImageNameTrashEmpty and NSImageNameTrashFull to reflect the
- * current state. Safe to call at any time; does nothing if the Trash
- * bookmark is not present.
- */
-- (void)update_trash_icon;
 
 @end

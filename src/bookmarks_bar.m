@@ -1,5 +1,7 @@
 #import "bookmarks_bar.h"
 #import "util.h"
+#import <CoreServices/CoreServices.h>
+#include <dirent.h>
 
 static NSString * const bookmarks_defaults_key = @"files.bookmarks";
 /* Set once iCloud Drive has been added to a saved bookmark list, so a user
@@ -9,6 +11,100 @@ static const CGFloat btn_gap     = 4.0;
 static const CGFloat btn_pad_left = 4.0;
 static const CGFloat star_btn_w   = 26.0;
 static const CGFloat star_btn_gap = 3.0;
+
+/* Posted (main queue) by a bar after it saves the bookmark list, so every
+ * other window's bar shows the same list; object is the bar that saved. */
+static NSString * const bookmarks_changed_note = @"FilesBookmarksChanged";
+
+/* Posted (main queue) when the Trash goes from empty to full or back. */
+static NSString * const trash_changed_note = @"FilesTrashChanged";
+
+/* Whether the Trash has visible items, as last checked by the watcher. */
+static BOOL trash_full;
+
+/*
+ * trash_has_items — whether the Trash holds anything but hidden (dot)
+ * files, as Finder judges it. Stops at the first such entry.
+ *
+ * Inputs:
+ *   path — the Trash folder
+ *
+ * Output: YES if it has a visible item.
+ */
+static BOOL
+trash_has_items(const char *path)
+{
+    DIR *d = opendir(path);
+    if (!d) return NO;
+    BOOL found = NO;
+    struct dirent *e;
+    while (!found && (e = readdir(d)) != NULL) {
+        found = e->d_name[0] != '.';
+    }
+    closedir(d);
+    return found;
+}
+
+/*
+ * check_trash — re-checks the Trash on a utility queue and, if it went
+ * from empty to full or back, records it in trash_full and posts
+ * trash_changed_note on the main queue.
+ */
+static void
+check_trash(void)
+{
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create("files.trash",
+            dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
+    });
+    NSString *path = files_directory_url(NSTrashDirectory).path;
+    dispatch_async(queue, ^{
+        BOOL full = trash_has_items(path.fileSystemRepresentation);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (full == trash_full) return;
+            trash_full = full;
+            [NSNotificationCenter.defaultCenter postNotificationName:trash_changed_note object:nil];
+        });
+    });
+}
+
+/*
+ * trash_event_callback — FSEventStream callback for the Trash (main
+ * queue): any change in it re-checks whether it is empty.
+ */
+static void
+trash_event_callback(ConstFSEventStreamRef stream, void *info, size_t n, void *paths,
+                     const FSEventStreamEventFlags *flags, const FSEventStreamEventId *ids)
+{
+    check_trash();
+}
+
+/*
+ * watch_trash — starts the app's single Trash watcher (an FSEventStream on
+ * ~/.Trash, kept for the life of the process) and checks the Trash once.
+ * Every bookmarks bar follows it through trash_changed_note, so the Trash
+ * icon tracks Move to Trash, Empty Trash and changes made by other apps
+ * without anything listing the Trash on navigation.
+ */
+static void
+watch_trash(void)
+{
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *path = files_directory_url(NSTrashDirectory).URLByResolvingSymlinksInPath.path;
+        FSEventStreamContext ctx = {0};
+        FSEventStreamRef stream = FSEventStreamCreate(kCFAllocatorDefault, trash_event_callback,
+            &ctx, (__bridge CFArrayRef)@[path], kFSEventStreamEventIdSinceNow, 0.5,
+            kFSEventStreamCreateFlagNone);
+        if (stream) {
+            FSEventStreamSetDispatchQueue(stream, dispatch_get_main_queue());
+            FSEventStreamStart(stream);
+        }
+        check_trash();
+    });
+}
 
 @implementation FilesBookmarksBar {
     NSMutableArray<NSURL *> *_bookmarks;
@@ -37,7 +133,36 @@ init_with_frame:(NSRect)frame
     [self setup_scroll_view];
     [self rebuild_buttons];
 
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(update_trash_icon)
+                                               name:trash_changed_note object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(bookmarks_changed:)
+                                               name:bookmarks_changed_note object:nil];
+    watch_trash();
     return self;
+}
+
+/*
+ * dealloc — stops observing the shared Trash and bookmark notifications.
+ */
+- (void)
+dealloc
+{
+    [NSNotificationCenter.defaultCenter removeObserver:self];
+}
+
+/*
+ * bookmarks_changed: — another window's bar saved the bookmark list:
+ * reload it, so no bar later saves an outdated copy over it.
+ *
+ * Inputs:
+ *   note — bookmarks_changed_note; object is the bar that saved
+ */
+- (void)
+bookmarks_changed:(NSNotification *)note
+{
+    if (note.object == self) return;
+    [self load_bookmarks];
+    [self rebuild_buttons];
 }
 
 /*
@@ -96,7 +221,8 @@ load_bookmarks
 }
 
 /*
- * persist_bookmarks — writes the current bookmark paths to NSUserDefaults.
+ * persist_bookmarks — writes the current bookmark paths to NSUserDefaults
+ * and tells the other windows' bars (bookmarks_changed_note).
  */
 - (void)
 persist_bookmarks
@@ -106,6 +232,7 @@ persist_bookmarks
         [paths addObject:url.path];
     }
     [NSUserDefaults.standardUserDefaults setObject:paths forKey:bookmarks_defaults_key];
+    [NSNotificationCenter.defaultCenter postNotificationName:bookmarks_changed_note object:self];
 }
 
 /*
@@ -237,34 +364,18 @@ rebuild_buttons
 }
 
 /*
- * update_trash_icon — checks ~/.Trash and sets the Trash bookmark button to
- * NSImageNameTrashFull or NSImageNameTrashEmpty to match the real state.
- *
- * Runs the filesystem check on a background queue to avoid blocking the UI,
- * then updates the button image on the main queue.
+ * update_trash_icon — shows the Trash bookmark as full or empty, from the
+ * shared Trash watcher's last check (trash_full). Called on every
+ * trash_changed_note and when the buttons are rebuilt.
  */
 - (void)
 update_trash_icon
 {
     if (!_trash_btn) return;
-    NSURL *trash = files_directory_url(NSTrashDirectory);
-    __weak NSButton *btn = _trash_btn;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        /* Ignore .DS_Store and other hidden files, as Finder does. */
-        NSArray *items = [NSFileManager.defaultManager
-            contentsOfDirectoryAtURL:trash includingPropertiesForKeys:nil
-                             options:NSDirectoryEnumerationSkipsHiddenFiles error:nil];
-        BOOL has_items = items.count > 0;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            NSButton *b = btn;
-            if (!b) return;
-            NSImage *icon = [NSImage imageNamed:has_items
-                ? NSImageNameTrashFull : NSImageNameTrashEmpty];
-            icon = [icon copy];
-            icon.size = NSMakeSize(14, 14);
-            b.image = icon;
-        });
-    });
+    NSImage *icon = [[NSImage imageNamed:trash_full ? NSImageNameTrashFull
+                                                    : NSImageNameTrashEmpty] copy];
+    icon.size = NSMakeSize(14, 14);
+    _trash_btn.image = icon;
 }
 
 /*

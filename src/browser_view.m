@@ -101,7 +101,7 @@ column_title(NSString *col_id)
  *   col_id — column identifier
  *
  * Output: NSURLResourceKey (name for unknown columns; the Git column sorts
- *         by name within tracked / untracked, see apply_sort).
+ *         by name within tracked / untracked, see listing_rows).
  */
 static NSURLResourceKey
 sort_resource_key(NSString *col_id)
@@ -132,7 +132,8 @@ file_mode(NSURL *url)
 }
 
 /*
- * perms_string_for_mode — formats a POSIX mode_t as the 10-char ls -l string.
+ * perms_string_for_mode — formats a POSIX mode_t as the 10-char ls -l
+ * string, with strmode(3).
  *
  * Inputs:
  *   mode — st_mode (type and permission bits)
@@ -142,78 +143,95 @@ file_mode(NSURL *url)
 static NSString *
 perms_string_for_mode(mode_t mode)
 {
-    char b[11];
-
-    switch (mode & S_IFMT) {
-    case S_IFDIR:  b[0] = 'd'; break;
-    case S_IFLNK:  b[0] = 'l'; break;
-    case S_IFCHR:  b[0] = 'c'; break;
-    case S_IFBLK:  b[0] = 'b'; break;
-    case S_IFIFO:  b[0] = 'p'; break;
-    case S_IFSOCK: b[0] = 's'; break;
-    default:       b[0] = '-'; break;
-    }
-
-    b[1] = (mode & S_IRUSR) ? 'r' : '-';
-    b[2] = (mode & S_IWUSR) ? 'w' : '-';
-    b[3] = (mode & S_ISUID) ? ((mode & S_IXUSR) ? 's' : 'S')
-                             : ((mode & S_IXUSR) ? 'x' : '-');
-
-    b[4] = (mode & S_IRGRP) ? 'r' : '-';
-    b[5] = (mode & S_IWGRP) ? 'w' : '-';
-    b[6] = (mode & S_ISGID) ? ((mode & S_IXGRP) ? 's' : 'S')
-                             : ((mode & S_IXGRP) ? 'x' : '-');
-
-    b[7] = (mode & S_IROTH) ? 'r' : '-';
-    b[8] = (mode & S_IWOTH) ? 'w' : '-';
-    b[9] = (mode & S_ISVTX) ? ((mode & S_IXOTH) ? 't' : 'T')
-                             : ((mode & S_IXOTH) ? 'x' : '-');
-    b[10] = '\0';
+    char b[12];
+    strmode(mode, b);
+    b[10] = '\0';  /* drop the trailing space strmode leaves for ACL markers */
     return @(b);
 }
 
+/* Most Spotlight results shown; a broad search can match far more. */
+#define SEARCH_RESULT_LIMIT 5000
+
 /*
- * icon_for_url — icon for a listed item at the given size, cached. Plain
- * files share one icon per type (keyed by UTI) so a folder of 10,000 JPEGs
- * costs one image; folders, packages and apps can carry custom icons (or
- * be git working trees), so they are cached per path. The cache is
- * bounded and evictable under memory pressure.
+ * git_index_stamp — identifies the state of a git index file by its
+ * modification time and size, which change whenever git rewrites it.
  *
  * Inputs:
- *   url  — file URL from a listing (resource values prefetched)
- *   size — edge length in points (16 normal, 32 for Large Rows)
+ *   index — path of the index file, or nil
  *
- * Output: NSImage sized size×size.
+ * Output: opaque stamp string, or nil if there is no readable index.
  */
-static NSImage *
-icon_for_url(NSURL *url, CGFloat size)
+static NSString *
+git_index_stamp(NSString *index)
 {
-    static NSCache<NSString *, NSImage *> *cache;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        cache = [[NSCache alloc] init];
-        cache.countLimit = 512;
-    });
+    struct stat st;
+    if (!index || stat(index.fileSystemRepresentation, &st) != 0) return nil;
+    return [NSString stringWithFormat:@"%ld.%09ld:%lld", (long)st.st_mtimespec.tv_sec,
+            (long)st.st_mtimespec.tv_nsec, (long long)st.st_size];
+}
 
-    NSNumber *is_dir = nil;
-    NSString *uti    = nil;
-    [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
-    [url getResourceValue:&uti forKey:NSURLTypeIdentifierKey error:nil];
-    BOOL by_type = !is_dir.boolValue && uti.length > 0;
-    NSString *key = [NSString stringWithFormat:@"%g:%@", size, by_type ? uti : url.path];
-
-    NSImage *icon = [cache objectForKey:key];
-    if (!icon) {
-        UTType *type = by_type ? [UTType typeWithIdentifier:uti] : nil;
-        if (type) {
-            icon = [[NSWorkspace.sharedWorkspace iconForContentType:type] copy];
-            icon.size = NSMakeSize(size, size);
-        } else {
-            icon = files_icon_for_url(url, size);
+/*
+ * listing_rows — the rows to show for a set of items: hidden items dropped
+ * (unless show_hidden), then sorted folders-first and by the sort column
+ * using prefetched values (Finder-style natural order for names and
+ * kinds). The Git column sorts tracked items first (ascending), then by
+ * name. Pure and thread-safe, so listings are prepared off the main thread.
+ *
+ * Inputs:
+ *   items       — listed URLs with listing_keys() prefetched
+ *   sort_key    — column identifier to sort by
+ *   ascending   — sort direction
+ *   tracked     — git-tracked names (used only when sorting by Git); may be nil
+ *   show_hidden — YES to keep items whose NSURLIsHiddenKey is set
+ *
+ * Output: new sorted, filtered array.
+ */
+static NSArray<NSURL *> *
+listing_rows(NSArray<NSURL *> *items, NSString *sort_key, BOOL ascending,
+             NSSet<NSString *> *tracked, BOOL show_hidden)
+{
+    NSMutableArray<NSURL *> *rows = [NSMutableArray arrayWithCapacity:items.count];
+    for (NSURL *url in items) {
+        if (!show_hidden) {
+            NSNumber *hidden = nil;
+            [url getResourceValue:&hidden forKey:NSURLIsHiddenKey error:nil];
+            if (hidden.boolValue) continue;
         }
-        [cache setObject:icon forKey:key];
+        [rows addObject:url];
     }
-    return icon;
+
+    NSURLResourceKey key = sort_resource_key(sort_key);
+    if (![sort_key isEqualToString:col_git]) tracked = nil;
+    [rows sortUsingComparator:^NSComparisonResult(NSURL *a, NSURL *b) {
+        NSNumber *a_dir = nil, *b_dir = nil;
+        [a getResourceValue:&a_dir forKey:NSURLIsDirectoryKey error:nil];
+        [b getResourceValue:&b_dir forKey:NSURLIsDirectoryKey error:nil];
+        if (a_dir.boolValue != b_dir.boolValue) {
+            return a_dir.boolValue ? NSOrderedAscending : NSOrderedDescending;
+        }
+        if (tracked) {
+            BOOL a_git = [tracked containsObject:a.lastPathComponent];
+            BOOL b_git = [tracked containsObject:b.lastPathComponent];
+            if (a_git != b_git) {
+                return (a_git == ascending) ? NSOrderedAscending : NSOrderedDescending;
+            }
+        }
+
+        id av = nil, bv = nil;
+        [a getResourceValue:&av forKey:key error:nil];
+        [b getResourceValue:&bv forKey:key error:nil];
+
+        NSComparisonResult cmp;
+        if (!av || !bv) {
+            cmp = (av == bv) ? NSOrderedSame : (av ? NSOrderedDescending : NSOrderedAscending);
+        } else if ([av isKindOfClass:NSString.class]) {
+            cmp = [(NSString *)av localizedStandardCompare:bv];
+        } else {
+            cmp = [av compare:bv];
+        }
+        return ascending ? cmp : (NSComparisonResult)(-cmp);
+    }];
+    return rows;
 }
 
 /* ── FilesBrowserView ────────────────────────────────────────────────── */
@@ -230,8 +248,9 @@ icon_for_url(NSURL *url, CGFloat size)
 @property (nonatomic, strong) NSMutableArray<NSURL *> *back_stack;
 @property (nonatomic, strong) NSMutableArray<NSURL *> *forward_stack;
 @property (nonatomic, strong) NSURL                   *current_dir;
-@property (nonatomic, strong) NSMutableArray<NSURL *> *all_items;
-@property (nonatomic, strong) NSMutableArray<NSURL *> *filtered_items;
+/* Everything listed (or found), unfiltered, and the rows shown from it. */
+@property (nonatomic, copy)   NSArray<NSURL *>        *all_items;
+@property (nonatomic, copy)   NSArray<NSURL *>        *filtered_items;
 
 /* Folder watcher: stream plus the resolved path events are compared with. */
 @property (nonatomic, assign) FSEventStreamRef         fs_stream;
@@ -245,15 +264,26 @@ icon_for_url(NSURL *url, CGFloat size)
  * repo and for Spotlight results, which hides the column. */
 @property (nonatomic, copy, readonly) NSSet<NSString *> *git_tracked; /* set_git_tracked: */
 @property (nonatomic, assign) BOOL                     reload_scheduled;
+/* The folder and index state git_tracked was last read for by git, so
+ * reloads that leave the index alone do not run git again. */
+@property (nonatomic, copy)   NSString                *git_cache_dir;
+@property (nonatomic, copy)   NSString                *git_cache_stamp;
 
-/* Background listing: serial queue and a counter that discards stale results. */
-@property (nonatomic, strong) dispatch_queue_t         list_queue;
+/* Counters that discard results a newer listing or search has superseded. */
 @property (nonatomic, assign) NSUInteger               list_generation;
+@property (nonatomic, assign) NSUInteger               search_generation;
 @property (nonatomic, assign) BOOL                     auto_fit_pending;
 
-/* Names to select when the next listing lands (reveal_items:), replacing
- * the kept selection; nil normally. */
+/* Why the folder could not be listed (shown as the status); nil normally. */
+@property (nonatomic, copy)   NSString                *listing_error;
+/* Total Spotlight matches when more than SEARCH_RESULT_LIMIT; 0 otherwise. */
+@property (nonatomic, assign) NSUInteger               search_overflow;
+
+/* Names to select when the next listing lands (reveal_items:, a new or
+ * renamed item), replacing the kept selection; nil normally. With
+ * pending_rename, the item selected that way is then renamed in place. */
 @property (nonatomic, copy)   NSSet<NSString *>       *pending_names;
+@property (nonatomic, assign) BOOL                     pending_rename;
 
 /* Inline rename: the Name cell's own text field while it is being edited,
  * the item being renamed, and whether a listing reload was postponed so
@@ -270,20 +300,29 @@ icon_for_url(NSURL *url, CGFloat size)
 @property (nonatomic, strong) NSMetadataQuery         *search_query;
 @property (nonatomic, assign) BOOL                     search_active;
 
-/* Mirror files_pref_large_rows and files_pref_auto_fit as currently
- * applied to the table. */
+/* Mirror files_pref_large_rows, files_pref_auto_fit and
+ * files_pref_show_hidden as currently applied to the table. */
 @property (nonatomic, assign) BOOL                     large_rows;
 @property (nonatomic, assign) BOOL                     auto_fit;
+@property (nonatomic, assign) BOOL                     show_hidden;
+
+/* NSUserDefaultsDidChangeNotification observer (main queue). */
+@property (nonatomic, strong) id                       defaults_observer;
+
+@property (nonatomic, copy, readwrite) NSString       *status_text;
 
 - (void)schedule_reload;
 
 @end
 
 /*
- * fs_event_callback — FSEventStream callback (main queue). Schedules one
- * coalesced reload if any event concerns a direct child of the watched
- * folder (or the folder itself), or the git index; events deeper in the
- * tree are ignored.
+ * fs_event_callback — FSEventStream callback (main queue). The stream
+ * reports folders, not files: a change to any item in a folder names the
+ * folder (with a trailing slash). Schedules one coalesced reload if an
+ * event names the watched folder, its parent (the folder itself was
+ * renamed: kFSEventStreamCreateFlagWatchRoot), or the git index's folder,
+ * or if the folder was deleted or events were dropped; events from deeper
+ * in the tree are ignored.
  *
  * Inputs:
  *   client_info — the FilesBrowserView (unretained; the view stops the
@@ -301,15 +340,19 @@ fs_event_callback(ConstFSEventStreamRef stream, void *client_info,
     FilesBrowserView *view = (__bridge FilesBrowserView *)client_info;
     NSArray<NSString *> *paths = (__bridge NSArray<NSString *> *)event_paths;
     NSString *watched = view.watched_path;
+    NSString *git_dir = view.watched_git_index.stringByDeletingLastPathComponent;
 
     for (size_t i = 0; i < num_events; i++) {
         NSString *path = paths[i];
+        if (path.length > 1 && [path hasSuffix:@"/"]) {
+            path = [path substringToIndex:path.length - 1];
+        }
         BOOL relevant =
             (event_flags[i] & (kFSEventStreamEventFlagMustScanSubDirs |
                                kFSEventStreamEventFlagRootChanged)) ||
             [path isEqualToString:watched] ||
-            [path.stringByDeletingLastPathComponent isEqualToString:watched] ||
-            [path isEqualToString:view.watched_git_index];
+            [path isEqualToString:watched.stringByDeletingLastPathComponent] ||
+            (git_dir && [path isEqualToString:git_dir]);
         if (relevant) {
             [view schedule_reload];
             return;
@@ -337,22 +380,23 @@ init_with_frame:(NSRect)frame
 
     self.back_stack     = [NSMutableArray array];
     self.forward_stack  = [NSMutableArray array];
-    self.all_items      = [NSMutableArray array];
-    self.filtered_items = [NSMutableArray array];
+    self.all_items      = @[];
+    self.filtered_items = @[];
     self.sort_key       = col_name;
     self.sort_ascending = YES;
-    self.list_queue     = dispatch_queue_create("files.browser.listing",
-                                                DISPATCH_QUEUE_SERIAL);
+    self.show_hidden    = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_show_hidden];
 
     [self build_table];
     [self update_sort_indicators];
     [self apply_view_prefs];
-    /* Every browser in every window follows the Large Rows and Auto-Fit
-     * Columns preferences, wherever they are changed. */
-    [NSNotificationCenter.defaultCenter addObserver:self
-                                           selector:@selector(apply_view_prefs)
-                                               name:NSUserDefaultsDidChangeNotification
-                                             object:nil];
+    /* Every browser in every window follows the view preferences, wherever
+     * they are changed. Defaults can change on any thread; the table is
+     * only touched on the main queue. */
+    __weak FilesBrowserView *ws = self;
+    self.defaults_observer = [NSNotificationCenter.defaultCenter
+        addObserverForName:NSUserDefaultsDidChangeNotification object:nil
+                     queue:NSOperationQueue.mainQueue
+                usingBlock:^(NSNotification *n) { [ws apply_view_prefs]; }];
 
     return self;
 }
@@ -459,9 +503,11 @@ toggle_column:(NSMenuItem *)sender
  * (files_pref_hidden_columns), and the Git column outside a repository
  * (git_tracked nil). Name always shows and gives up or takes back the
  * width of columns that appear or disappear, so they are not pushed off
- * the right edge; with Auto-Fit on, the columns are then refitted.
+ * the right edge. Callers refit the columns if it reports a change.
+ *
+ * Output: YES if any column was shown or hidden.
  */
-- (void)
+- (BOOL)
 update_column_visibility
 {
     NSArray<NSString *> *hidden =
@@ -479,9 +525,8 @@ update_column_visibility
         CGFloat w  = col.width + self.table.intercellSpacing.width;
         delta     += hide ? w : -w;
     }
-    if (!changed) return;
-    name_col.width = MAX(name_col.minWidth, name_col.width + delta);
-    if (self.auto_fit) [self apply_auto_fit];
+    if (changed) name_col.width = MAX(name_col.minWidth, name_col.width + delta);
+    return changed;
 }
 
 /*
@@ -524,23 +569,30 @@ build_context_menu
 /* ── Folder watcher ──────────────────────────────────────────────────── */
 
 /*
- * start_watching:git_index: — watches dir, and the folder holding git_index
- * when given, with an FSEventStream (file-level events, 0.3 s latency).
- * fs_event_callback filters to direct children and the index file, so
- * activity deeper in the tree (e.g. ~/Library caches while viewing ~) is
- * ignored.
+ * watch:git_index: — watches dir, and the folder holding git_index when
+ * given, with one FSEventStream (folder-level events, 0.3 s latency,
+ * kFSEventStreamCreateFlagWatchRoot so a deleted or renamed folder is
+ * noticed). fs_event_callback keeps only events naming the folder itself,
+ * so activity deeper in the tree (e.g. ~/Library caches while viewing ~)
+ * is ignored. Does nothing if that is already what is watched.
  *
  * Inputs:
  *   dir       — directory URL to watch
  *   git_index — resolved path of the enclosing repo's index file, or nil
  */
 - (void)
-start_watching:(NSURL *)dir git_index:(NSString *)git_index
+watch:(NSURL *)dir git_index:(NSString *)git_index
 {
+    /* FSEvents reports resolved paths (/private/var, not /var). */
+    NSString *path = dir.URLByResolvingSymlinksInPath.path;
+    if (self.fs_stream && [path isEqualToString:self.watched_path] &&
+        (git_index == self.watched_git_index ||
+         [git_index isEqualToString:self.watched_git_index])) {
+        return;
+    }
     [self stop_watching];
 
-    /* FSEvents reports resolved paths (/private/var, not /var). */
-    self.watched_path      = dir.URLByResolvingSymlinksInPath.path;
+    self.watched_path      = path;
     self.watched_git_index = git_index;
     NSArray<NSString *> *paths = git_index
         ? @[self.watched_path, git_index.stringByDeletingLastPathComponent]
@@ -554,7 +606,7 @@ start_watching:(NSURL *)dir git_index:(NSString *)git_index
         (__bridge CFArrayRef)paths,
         kFSEventStreamEventIdSinceNow,
         0.3,
-        kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagFileEvents
+        kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagWatchRoot
     );
     if (self.fs_stream) {
         FSEventStreamSetDispatchQueue(self.fs_stream, dispatch_get_main_queue());
@@ -596,33 +648,47 @@ schedule_reload
 }
 
 /*
- * dealloc — stops the folder watcher, any Spotlight query and the defaults
- * observer.
+ * shut_down — stops the folder watcher, any Spotlight search and the
+ * defaults observer. Called when the window closes, so nothing keeps
+ * running even if something still holds the view; safe to call twice.
+ */
+- (void)
+shut_down
+{
+    if (self.defaults_observer) {
+        [NSNotificationCenter.defaultCenter removeObserver:self.defaults_observer];
+        self.defaults_observer = nil;
+    }
+    [self stop_watching];
+    [self stop_search_query];
+    ++self.list_generation;  /* drop any listing still in flight */
+}
+
+/*
+ * dealloc — shut_down, in case the window did not.
  */
 - (void)
 dealloc
 {
-    [NSNotificationCenter.defaultCenter removeObserver:self
-                                                  name:NSUserDefaultsDidChangeNotification
-                                                object:nil];
-    [self stop_watching];
-    [self stop_search_query];
+    [self shut_down];
 }
 
 /*
  * apply_view_prefs — applies files_pref_large_rows (normal rows: 20pt,
- * 16pt icons; large rows: twice both) and files_pref_auto_fit. No-op when
- * both are already applied, so it is cheap to call on every defaults
- * change; otherwise the table is redrawn for a new row height, and the
- * columns are fitted when auto-fit is on and either it was just turned on
- * or the icon size changed.
+ * 16pt icons; large rows: twice both), files_pref_auto_fit,
+ * files_pref_show_hidden and files_pref_hidden_columns. Cheap when
+ * nothing changed, so it runs on every defaults change; otherwise the
+ * table is redrawn for a new row height, the rows are re-filtered for
+ * Show Hidden Files, and the columns are fitted when auto-fit is on and it
+ * was just turned on, the icon size changed or a column appeared or went.
  */
 - (void)
 apply_view_prefs
 {
     NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
-    BOOL large = [ud boolForKey:files_pref_large_rows];
-    BOOL fit   = [ud boolForKey:files_pref_auto_fit];
+    BOOL large  = [ud boolForKey:files_pref_large_rows];
+    BOOL fit    = [ud boolForKey:files_pref_auto_fit];
+    BOOL hidden = [ud boolForKey:files_pref_show_hidden];
     BOOL rows_changed = large != self.large_rows || self.table.rowHeight != [self row_height];
     BOOL fit_turned_on = fit && !self.auto_fit;
     self.auto_fit = fit;
@@ -631,8 +697,12 @@ apply_view_prefs
         self.table.rowHeight = [self row_height];
         [self.table reloadData];
     }
-    if (fit && (rows_changed || fit_turned_on)) [self apply_auto_fit];
-    [self update_column_visibility];
+    if (hidden != self.show_hidden) {
+        self.show_hidden = hidden;
+        [self resort_revealing:NO];
+    }
+    BOOL cols_changed = [self update_column_visibility];
+    if (fit && (rows_changed || fit_turned_on || cols_changed)) [self apply_auto_fit];
 }
 
 /*
@@ -677,9 +747,8 @@ push_history:(NSURL *)url onto:(NSMutableArray<NSURL *> *)stack
 
 /*
  * load_location: — makes url the displayed folder: ends any Spotlight search,
- * re-targets the watcher (the git index is added once the listing finds
- * it), starts a listing (auto-fit runs when it lands) and
- * notifies the navigation handler. Shared by navigate_to:,
+ * starts a listing (which re-targets the watcher and auto-fits when it
+ * lands) and notifies the navigation handler. Shared by navigate_to:,
  * go_back and go_forward; does not touch the history stacks.
  *
  * Inputs:
@@ -691,7 +760,6 @@ load_location:(NSURL *)url
     [self stop_search_query];
     self.current_dir      = url;
     self.auto_fit_pending = YES;
-    [self start_watching:url git_index:nil];
     [self reload_directory];
 
     if (self.navigation_handler) self.navigation_handler(url);
@@ -758,7 +826,8 @@ reveal_items:(NSArray<NSString *> *)names
 {
     if (!self.current_dir) return;
     self.pending_names = [NSSet setWithArray:names];
-    [self load_location:self.current_dir];
+    [self stop_search_query];
+    [self reload_directory];
 }
 
 /*
@@ -773,10 +842,8 @@ reveal_items:(NSArray<NSString *> *)names
 - (void)
 mount_disk_image:(NSURL *)image
 {
-    if (self.status_text_handler) {
-        self.status_text_handler([NSString stringWithFormat:@"Mounting \"%@\"…",
-                                  image.lastPathComponent]);
-    }
+    [self report_status:[NSString stringWithFormat:@"Mounting \"%@\"…",
+                         image.lastPathComponent]];
     __weak FilesBrowserView *ws = self;
     [FilesVolumeManager.shared mount_disk_image:image
                                      completion:^(NSURL *volume, NSError *err) {
@@ -870,30 +937,48 @@ selected_urls
 /* ── Directory loading ───────────────────────────────────────────────── */
 
 /*
- * reload_directory — re-reads the current folder and refreshes the table.
- * See reload_directory_then:.
+ * shows_hidden_items — whether hidden items are listed: when Show Hidden
+ * Files is on, and always in the Trash, since the OS marks Trash items
+ * hidden.
+ *
+ * Output: YES to list hidden items.
  */
-- (void)
-reload_directory
+- (BOOL)
+shows_hidden_items
 {
-    [self reload_directory_then:nil];
+    return self.show_hidden ||
+           files_same_path(self.current_dir, files_directory_url(NSTrashDirectory));
 }
 
 /*
- * reload_directory_then: — lists the current folder on a background queue
- * (so large or network folders never block the UI), then on the main queue
- * sorts, filters, reloads the table and restores the selection by path.
- * Inside a git working tree it also asks git which items are tracked.
- * A generation counter drops results that a newer reload or navigation
- * has superseded. No-op while Spotlight results are displayed; postponed
- * (without calling done) while an inline rename is in progress.
+ * row_order — the settings rows are filtered and sorted by, as one value,
+ * so a listing prepared in the background can tell whether they changed
+ * before it landed.
  *
- * Inputs:
- *   done — called on the main queue after the table shows the new
- *          listing; not called if the result was superseded. May be nil.
+ * Output: opaque string.
+ */
+- (NSString *)
+row_order
+{
+    return [NSString stringWithFormat:@"%@/%d/%d", self.sort_key, self.sort_ascending,
+            [self shows_hidden_items]];
+}
+
+/*
+ * reload_directory — lists the current folder on a background queue (so
+ * large, slow or unreachable folders never block the UI, nor later
+ * listings), filters and sorts it there, then shows it on the main queue,
+ * keeping the selection by path. A generation counter drops results that a
+ * newer reload or navigation has superseded. No-op while Spotlight results
+ * are displayed; postponed while an inline rename is in progress.
+ *
+ * Inside a git working tree the Git column is filled in by a second step,
+ * after the listing is already shown: `git ls-files` runs only when the
+ * folder or its index changed since it last ran, and meanwhile the
+ * previous answer for this folder (or none) is shown.
  */
 - (void)
-reload_directory_then:(void (^)(void))done
+reload_directory
 {
     NSURL *dir = self.current_dir;
     if (!dir || self.search_active) return;
@@ -903,29 +988,59 @@ reload_directory_then:(void (^)(void))done
     }
 
     NSUInteger generation = ++self.list_generation;
+    NSString *order       = [self row_order];
+    NSString *sort_key    = self.sort_key;
+    BOOL ascending        = self.sort_ascending;
+    BOOL show_hidden      = [self shows_hidden_items];
+    BOOL same_dir         = [self.git_cache_dir isEqualToString:dir.path];
+    NSString *cache_stamp = same_dir ? self.git_cache_stamp : nil;
+    NSSet<NSString *> *cache_tracked = same_dir ? self.git_tracked : nil;
     __weak FilesBrowserView *ws = self;
-    dispatch_async(self.list_queue, ^{
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSError *err = nil;
         NSArray<NSURL *> *items =
             [NSFileManager.defaultManager contentsOfDirectoryAtURL:dir
                                         includingPropertiesForKeys:listing_keys()
                                                            options:0
                                                              error:&err];
-        if (!items) NSLog(@"[browser] error reading %@: %@", dir.path, err);
-
-        NSURL *work_tree = files_git_work_tree(dir);
-        NSSet<NSString *> *tracked = work_tree ? files_git_tracked_names(dir) : nil;
+        NSURL *work_tree    = files_git_work_tree(dir);
         NSString *git_index = work_tree ? files_git_index_path(work_tree) : nil;
+        NSString *stamp     = git_index_stamp(git_index);
+        BOOL git_current    = cache_tracked && stamp && [stamp isEqualToString:cache_stamp];
+        NSSet<NSString *> *tracked = work_tree ? (cache_tracked ?: [NSSet set]) : nil;
+        NSArray<NSURL *> *rows = listing_rows(items ?: @[], sort_key, ascending,
+                                              tracked, show_hidden);
+        NSString *error = items ? nil
+            : (err.localizedFailureReason ?: err.localizedDescription ?: @"It cannot be read.");
 
         dispatch_async(dispatch_get_main_queue(), ^{
             FilesBrowserView *s = ws;
             if (!s || generation != s.list_generation || s.search_active) return;
-            if (git_index != s.watched_git_index && ![git_index isEqualToString:s.watched_git_index]) {
-                [s start_watching:dir git_index:git_index];
-            }
+            [s watch:dir git_index:git_index];
             [s set_git_tracked:tracked];
-            [s show_listing:items ?: @[]];
-            if (done) done();
+            s.listing_error = error;
+            [s show_listing:items ?: @[]
+                       rows:[order isEqualToString:[s row_order]] ? rows : nil];
+        });
+        if (!work_tree || git_current) return;
+
+        NSSet<NSString *> *fresh = files_git_tracked_names(dir) ?: [NSSet set];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            FilesBrowserView *s = ws;
+            if (!s || generation != s.list_generation || s.search_active) return;
+            s.git_cache_dir   = dir.path;
+            s.git_cache_stamp = stamp;
+            [s set_git_tracked:fresh];
+            if ([s.sort_key isEqualToString:col_git]) {
+                [s resort_revealing:NO];
+            } else {
+                NSInteger col = [s.table columnWithIdentifier:col_git];
+                [s.table reloadDataForRowIndexes:
+                             [NSIndexSet indexSetWithIndexesInRange:
+                                 NSMakeRange(0, (NSUInteger)s.table.numberOfRows)]
+                                   columnIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)col]];
+            }
         });
     });
 }
@@ -933,7 +1048,8 @@ reload_directory_then:(void (^)(void))done
 /*
  * set_git_tracked: — records which listed names git tracks; the Git
  * column shows only inside a repository (tracked non-nil) and if the user
- * has not hidden it (update_column_visibility).
+ * has not hidden it (update_column_visibility). If the column appears or
+ * goes, the next rows shown are auto-fitted.
  *
  * Inputs:
  *   tracked — tracked names, or nil outside a repo / for search results
@@ -942,7 +1058,7 @@ reload_directory_then:(void (^)(void))done
 set_git_tracked:(NSSet<NSString *> *)tracked
 {
     _git_tracked = [tracked copy];
-    [self update_column_visibility];
+    if ([self update_column_visibility]) self.auto_fit_pending = YES;
 }
 
 /*
@@ -958,39 +1074,65 @@ selected_paths
 }
 
 /*
- * reload_table_selecting:reveal: — reloads the table from filtered_items
- * and selects the rows whose paths are in paths. AppKit keeps selected row
- * numbers across reloadData, which point at other items once the rows are
- * reordered (sorting) or rebuilt (refresh, search update); this re-selects
- * by item instead.
+ * show_rows:selecting:reveal: — makes rows the table's contents and
+ * selects the rows whose paths are in paths (AppKit keeps selected row
+ * numbers across reloadData, which point at other items once rows are
+ * reordered or rebuilt), updates the status and runs a pending auto-fit
+ * (for a search, only once it has results).
  *
  * Inputs:
+ *   rows   — items to show, already filtered and sorted
  *   paths  — paths to select (from selected_paths, taken before the change)
  *   reveal — YES to scroll the first selected row into view
  */
 - (void)
-reload_table_selecting:(NSSet<NSString *> *)paths reveal:(BOOL)reveal
+show_rows:(NSArray<NSURL *> *)rows selecting:(NSSet<NSString *> *)paths reveal:(BOOL)reveal
 {
+    self.filtered_items = rows;
     [self.table reloadData];
-    NSIndexSet *rows = [self.filtered_items indexesOfObjectsPassingTest:
+    NSIndexSet *sel = [rows indexesOfObjectsPassingTest:
         ^BOOL(NSURL *item, NSUInteger idx, BOOL *stop) {
             return [paths containsObject:item.path];
         }];
-    [self.table selectRowIndexes:rows byExtendingSelection:NO];
-    if (reveal && rows.count > 0) [self.table scrollRowToVisible:(NSInteger)rows.firstIndex];
+    [self.table selectRowIndexes:sel byExtendingSelection:NO];
+    if (reveal && sel.count > 0) [self.table scrollRowToVisible:(NSInteger)sel.firstIndex];
+
+    [self update_status_bar];
+    if (self.auto_fit_pending && (rows.count > 0 || !self.search_active)) {
+        self.auto_fit_pending = NO;
+        if (self.auto_fit) [self apply_auto_fit];
+    }
 }
 
 /*
- * show_listing: — installs a fresh folder listing in the table, keeping the
- * selection (matched by path) and running a pending auto-fit. Names
- * requested by reveal_items: are selected instead, and the first of them
- * scrolled into view.
+ * resort_revealing: — re-filters and re-sorts the current items (listing
+ * or search results) after the sort, Show Hidden Files or git state
+ * changed, keeping the selection.
+ *
+ * Inputs:
+ *   reveal — YES to scroll the first selected row into view
+ */
+- (void)
+resort_revealing:(BOOL)reveal
+{
+    [self show_rows:listing_rows(self.all_items, self.sort_key, self.sort_ascending,
+                                 self.git_tracked, [self shows_hidden_items])
+          selecting:[self selected_paths] reveal:reveal];
+}
+
+/*
+ * show_listing:rows: — installs a fresh folder listing, keeping the
+ * selection (matched by path). Names requested by pending_names are
+ * selected instead, the first of them scrolled into view, and, with
+ * pending_rename, renamed in place.
  *
  * Inputs:
  *   items — folder contents with listing_keys() prefetched
+ *   rows  — items filtered and sorted for display, or nil if the order
+ *           changed while they were prepared (they are then redone here)
  */
 - (void)
-show_listing:(NSArray<NSURL *> *)items
+show_listing:(NSArray<NSURL *> *)items rows:(NSArray<NSURL *> *)rows
 {
     NSSet<NSString *> *want = [self selected_paths];
     BOOL reveal = self.pending_names != nil;
@@ -1003,83 +1145,16 @@ show_listing:(NSArray<NSURL *> *)items
     }
     self.pending_names = nil;
 
-    self.all_items = [items mutableCopy];
-    [self apply_sort];
-    [self apply_filter];
-    [self reload_table_selecting:want reveal:reveal];
-
-    [self update_status_bar];
-    if (self.auto_fit_pending) {
-        self.auto_fit_pending = NO;
-        if ([NSUserDefaults.standardUserDefaults boolForKey:files_pref_auto_fit]) {
-            [self apply_auto_fit];
-        }
+    self.all_items = items;
+    if (!rows) {
+        rows = listing_rows(items, self.sort_key, self.sort_ascending,
+                            self.git_tracked, [self shows_hidden_items]);
     }
-}
+    [self show_rows:rows selecting:want reveal:reveal];
 
-/*
- * apply_sort — sorts all_items folders-first, then by the sort column using
- * prefetched values (Finder-style natural order for names and kinds). The
- * Git column sorts tracked items first (ascending), then by name.
- */
-- (void)
-apply_sort
-{
-    NSURLResourceKey key = sort_resource_key(self.sort_key);
-    BOOL ascending       = self.sort_ascending;
-    NSSet<NSString *> *tracked = [self.sort_key isEqualToString:col_git] ? self.git_tracked : nil;
-
-    [self.all_items sortUsingComparator:^NSComparisonResult(NSURL *a, NSURL *b) {
-        NSNumber *a_dir = nil, *b_dir = nil;
-        [a getResourceValue:&a_dir forKey:NSURLIsDirectoryKey error:nil];
-        [b getResourceValue:&b_dir forKey:NSURLIsDirectoryKey error:nil];
-        if (a_dir.boolValue != b_dir.boolValue) {
-            return a_dir.boolValue ? NSOrderedAscending : NSOrderedDescending;
-        }
-        if (tracked) {
-            BOOL a_git = [tracked containsObject:a.lastPathComponent];
-            BOOL b_git = [tracked containsObject:b.lastPathComponent];
-            if (a_git != b_git) {
-                return (a_git == ascending) ? NSOrderedAscending : NSOrderedDescending;
-            }
-        }
-
-        id av = nil, bv = nil;
-        [a getResourceValue:&av forKey:key error:nil];
-        [b getResourceValue:&bv forKey:key error:nil];
-
-        NSComparisonResult cmp;
-        if (!av || !bv) {
-            cmp = (av == bv) ? NSOrderedSame : (av ? NSOrderedDescending : NSOrderedAscending);
-        } else if ([av isKindOfClass:NSString.class]) {
-            cmp = [(NSString *)av localizedStandardCompare:bv];
-        } else {
-            cmp = [av compare:bv];
-        }
-        return ascending ? cmp : (NSComparisonResult)(-cmp);
-    }];
-}
-
-/*
- * apply_filter — populates filtered_items from all_items, hiding items whose
- * NSURLIsHiddenKey is set unless files_pref_show_hidden is on. Everything in
- * the Trash is shown, since the OS marks Trash items hidden.
- */
-- (void)
-apply_filter
-{
-    BOOL show_hidden =
-        [NSUserDefaults.standardUserDefaults boolForKey:files_pref_show_hidden] ||
-        files_same_path(self.current_dir, files_directory_url(NSTrashDirectory));
-
-    self.filtered_items = [NSMutableArray arrayWithCapacity:self.all_items.count];
-    for (NSURL *url in self.all_items) {
-        if (!show_hidden) {
-            NSNumber *hidden = nil;
-            [url getResourceValue:&hidden forKey:NSURLIsHiddenKey error:nil];
-            if (hidden.boolValue) continue;
-        }
-        [self.filtered_items addObject:url];
+    if (self.pending_rename) {
+        self.pending_rename = NO;
+        if (self.table.numberOfSelectedRows == 1) [self begin_rename:nil];
     }
 }
 
@@ -1104,7 +1179,8 @@ set_search_filter:(NSString *)text
 
 /*
  * stop_search_query — stops the running NSMetadataQuery (if any), removes its
- * observers and leaves search mode. Does not reload the listing.
+ * observers, drops results still being prepared and leaves search mode.
+ * Does not reload the listing.
  */
 - (void)
 stop_search_query
@@ -1117,7 +1193,9 @@ stop_search_query
             name:NSMetadataQueryDidFinishGatheringNotification object:self.search_query];
         self.search_query = nil;
     }
-    self.search_active = NO;
+    ++self.search_generation;
+    self.search_active   = NO;
+    self.search_overflow = 0;
 }
 
 /*
@@ -1137,7 +1215,8 @@ begin_spotlight_search:(NSString *)query
     self.search_active    = YES;
     self.auto_fit_pending = YES;
     [self set_git_tracked:nil];
-    self.filtered_items   = [NSMutableArray array];
+    self.all_items      = @[];
+    self.filtered_items = @[];
     [self.table reloadData];
     [self update_status_bar];
 
@@ -1173,9 +1252,12 @@ end_spotlight_search
 }
 
 /*
- * search_results_updated: — NSMetadataQuery notification handler; shows the
- * results (sorted and hidden-filtered like a listing) in the table, keeping
- * the selected results selected.
+ * search_results_updated: — NSMetadataQuery notification handler. Takes the
+ * paths of the first SEARCH_RESULT_LIMIT results on the main thread, then
+ * on a background queue makes URLs with listing_keys() prefetched and
+ * filters and sorts them like a listing, and shows them on the main queue,
+ * keeping the selected results selected. A newer update or the end of the
+ * search drops the result (search_generation).
  *
  * Inputs:
  *   note — NSMetadataQueryDidUpdateNotification or DidFinishGatheringNotification
@@ -1183,29 +1265,45 @@ end_spotlight_search
 - (void)
 search_results_updated:(NSNotification *)note
 {
-    [self.search_query disableUpdates];
-
-    NSMutableArray<NSURL *> *results = [NSMutableArray arrayWithCapacity:self.search_query.resultCount];
-    for (NSUInteger i = 0; i < self.search_query.resultCount; i++) {
-        NSMetadataItem *item = [self.search_query resultAtIndex:i];
-        NSString *path = [item valueForAttribute:NSMetadataItemPathKey];
-        if (path) [results addObject:[NSURL fileURLWithPath:path]];
+    NSMetadataQuery *query = self.search_query;
+    [query disableUpdates];
+    NSUInteger total = query.resultCount;
+    NSUInteger count = MIN(total, (NSUInteger)SEARCH_RESULT_LIMIT);
+    NSMutableArray<NSString *> *paths = [NSMutableArray arrayWithCapacity:count];
+    for (NSUInteger i = 0; i < count; i++) {
+        NSString *path = [[query resultAtIndex:i] valueForAttribute:NSMetadataItemPathKey];
+        if (path) [paths addObject:path];
     }
+    [query enableUpdates];
 
-    NSSet<NSString *> *keep = [self selected_paths];
-    self.all_items = results;
-    [self apply_sort];
-    [self apply_filter];
-    [self reload_table_selecting:keep reveal:NO];
-    [self update_status_bar];
-    if (self.auto_fit_pending && results.count > 0) {
-        self.auto_fit_pending = NO;
-        if ([NSUserDefaults.standardUserDefaults boolForKey:files_pref_auto_fit]) {
-            [self apply_auto_fit];
+    NSUInteger generation = ++self.search_generation;
+    NSString *order       = [self row_order];
+    NSString *sort_key    = self.sort_key;
+    BOOL ascending        = self.sort_ascending;
+    BOOL show_hidden      = [self shows_hidden_items];
+    __weak FilesBrowserView *ws = self;
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSMutableArray<NSURL *> *items = [NSMutableArray arrayWithCapacity:paths.count];
+        for (NSString *path in paths) {
+            NSURL *url = [NSURL fileURLWithPath:path];
+            [url resourceValuesForKeys:listing_keys() error:nil];  /* caches them */
+            [items addObject:url];
         }
-    }
+        NSArray<NSURL *> *rows = listing_rows(items, sort_key, ascending, nil, show_hidden);
 
-    [self.search_query enableUpdates];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            FilesBrowserView *s = ws;
+            if (!s || generation != s.search_generation || !s.search_active) return;
+            s.all_items       = items;
+            s.search_overflow = total > count ? total : 0;
+            if (![order isEqualToString:[s row_order]]) {
+                [s resort_revealing:NO];
+            } else {
+                [s show_rows:rows selecting:[s selected_paths] reveal:NO];
+            }
+        });
+    });
 }
 
 /* ── Sort indicators ─────────────────────────────────────────────────── */
@@ -1258,9 +1356,7 @@ cell_text_for_column:(NSString *)col_id
         return files_format_bytes(sz.longLongValue);
 
     } else if ([col_id isEqualToString:col_kind]) {
-        NSNumber *is_dir = nil;
-        [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
-        if (is_dir.boolValue) return @"Folder";
+        /* "Folder" for folders, "Application" for apps and so on. */
         NSString *kind = nil;
         [url getResourceValue:&kind forKey:NSURLLocalizedTypeDescriptionKey error:nil];
         return kind ?: @"—";
@@ -1329,8 +1425,12 @@ apply_auto_fit
 
         NSDictionary *attrs = @{ NSFontAttributeName: cell_font_for_column(col_id) };
         CGFloat extra = [col_id isEqualToString:col_name] ? name_extra : cell_extra;
-        for (NSUInteger i = 0; i < rows; i++) {
-            NSString *text = [self cell_text_for_column:col_id url:self.filtered_items[i]];
+        /* The Git column only ever shows "tracked", which may be filled in
+         * after this runs, so it is sized for that word. */
+        BOOL git = [col_id isEqualToString:col_git];
+        for (NSUInteger i = 0; i < (git ? 1 : rows); i++) {
+            NSString *text = git ? @"tracked"
+                                 : [self cell_text_for_column:col_id url:self.filtered_items[i]];
             /* Text fields need whole points: 42.3 pt of text does not fit
              * in 42.3 pt, it is truncated. */
             CGFloat w = ceil([text sizeWithAttributes:attrs].width) + extra;
@@ -1427,18 +1527,42 @@ empty_trash_with_finder
 }
 
 /*
- * update_status_bar — sends the item/selection count to status_text_handler.
+ * report_status: — records text as status_text and passes it to
+ * status_text_handler.
+ *
+ * Inputs:
+ *   text — status text
+ */
+- (void)
+report_status:(NSString *)text
+{
+    self.status_text = text;
+    if (self.status_text_handler) self.status_text_handler(text);
+}
+
+/*
+ * update_status_bar — reports the item/selection count, why the folder
+ * could not be listed, or how many Spotlight matches were not shown.
  */
 - (void)
 update_status_bar
 {
+    if (self.listing_error && !self.search_active) {
+        [self report_status:[NSString stringWithFormat:@"\"%@\" could not be read: %@",
+                             self.current_dir.lastPathComponent, self.listing_error]];
+        return;
+    }
     NSInteger total    = (NSInteger)self.filtered_items.count;
     NSInteger selected = (NSInteger)self.table.numberOfSelectedRows;
     NSString *msg = [NSString stringWithFormat:@"%ld item%@", (long)total, total == 1 ? @"" : @"s"];
+    if (self.search_active && self.search_overflow) {
+        msg = [msg stringByAppendingFormat:@" (first %d of %lu matches)",
+               SEARCH_RESULT_LIMIT, (unsigned long)self.search_overflow];
+    }
     if (selected > 0) {
         msg = [msg stringByAppendingFormat:@" — %ld selected", (long)selected];
     }
-    if (self.status_text_handler) self.status_text_handler(msg);
+    [self report_status:msg];
 }
 
 /* ── NSTableViewDataSource / Delegate ────────────────────────────────── */
@@ -1524,7 +1648,7 @@ viewForTableColumn:(NSTableColumn *)col
     }
 
     cell.textField.stringValue = [self cell_text_for_column:ident url:url];
-    if ([ident isEqualToString:col_name]) cell.imageView.image = icon_for_url(url, icon_sz);
+    if ([ident isEqualToString:col_name]) cell.imageView.image = files_icon_for_url(url, icon_sz);
     return cell;
 }
 
@@ -1550,10 +1674,7 @@ didClickTableColumn:(NSTableColumn *)col
         self.sort_key       = new_key;
         self.sort_ascending = YES;
     }
-    NSSet<NSString *> *keep = [self selected_paths];
-    [self apply_sort];
-    [self apply_filter];
-    [self reload_table_selecting:keep reveal:YES];
+    [self resort_revealing:YES];
     [self update_sort_indicators];
 }
 
@@ -1978,8 +2099,9 @@ move_to_trash_action:(id)sender
 
 /*
  * create_and_rename: — creates a new folder or empty file in the current
- * folder, then selects it and starts an inline rename once the listing
- * shows it (the name is pre-selected without its extension).
+ * folder, then selects it and starts an inline rename once a listing
+ * shows it (pending_names / pending_rename; the name is pre-selected
+ * without its extension).
  *
  * Inputs:
  *   folder — YES for "untitled folder", NO for "untitled.txt"
@@ -2000,16 +2122,9 @@ create_and_rename:(BOOL)folder
                              err, s.window);
             return;
         }
-        [s reload_directory_then:^{
-            NSUInteger idx = [s.filtered_items indexOfObjectPassingTest:
-                ^BOOL(NSURL *item, NSUInteger i, BOOL *stop) {
-                    return files_same_path(item, new_url);
-                }];
-            if (idx == NSNotFound) return;
-            [s.table selectRowIndexes:[NSIndexSet indexSetWithIndex:idx] byExtendingSelection:NO];
-            [s.table scrollRowToVisible:(NSInteger)idx];
-            [s begin_rename:nil];
-        }];
+        s.pending_names  = [NSSet setWithObject:new_url.lastPathComponent];
+        s.pending_rename = YES;
+        [s reload_directory];
     }];
 }
 
@@ -2153,7 +2268,8 @@ cancel_rename
 
 /*
  * controlTextDidEndEditing: — commits the rename when editing ends (Return,
- * Tab or clicking elsewhere). An unchanged or empty name is a no-op.
+ * Tab or clicking elsewhere); the renamed item stays selected. An
+ * unchanged or empty name is a no-op.
  *
  * Inputs:
  *   note — NSControlTextDidEndEditingNotification
@@ -2176,7 +2292,11 @@ controlTextDidEndEditing:(NSNotification *)note
     [FilesFileOps rename_url:target to:new_name completion:^(NSURL *new_url, NSError *err) {
         FilesBrowserView *s = ws;
         if (!s) return;
-        if (err) files_show_error(@"Rename failed", err, s.window);
+        if (err) {
+            files_show_error(@"Rename failed", err, s.window);
+        } else {
+            s.pending_names = [NSSet setWithObject:new_url.lastPathComponent];
+        }
         [s reload_directory];
     }];
 }

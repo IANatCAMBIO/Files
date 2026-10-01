@@ -54,19 +54,27 @@ files_git_tracked_names(NSURL *dir)
     if (!files_run_tool(git_tool, @[@"-C", dir.path, @"ls-files", @"-z"], &data)) return nil;
 
     /* NUL-separated paths relative to dir; keep the part before the first
-     * '/', which is the name of the child of dir the file lives under. */
+     * '/', which is the name of the child of dir the file lives under.
+     * ls-files output is sorted, so all of a folder's files are adjacent:
+     * only the first entry of each run makes a string, and a repository's
+     * root costs one string per child rather than one per tracked file. */
     NSMutableSet<NSString *> *names = [NSMutableSet set];
-    const char *p   = data.bytes;
-    const char *end = p + data.length;
+    const char *p    = data.bytes;
+    const char *end  = p + data.length;
+    const char *prev = NULL;    /* first component of the previous entry */
+    size_t prev_len  = 0;
     while (p < end) {
         const char *entry_end = memchr(p, '\0', (size_t)(end - p));
         if (!entry_end) entry_end = end;
         const char *slash    = memchr(p, '/', (size_t)(entry_end - p));
         const char *name_end = slash ? slash : entry_end;
-        if (name_end > p) {
-            NSString *name = [[NSString alloc] initWithBytes:p length:(NSUInteger)(name_end - p)
+        size_t len = (size_t)(name_end - p);
+        if (len > 0 && !(prev && len == prev_len && memcmp(p, prev, len) == 0)) {
+            NSString *name = [[NSString alloc] initWithBytes:p length:len
                                                     encoding:NSUTF8StringEncoding];
             if (name) [names addObject:name];
+            prev     = p;
+            prev_len = len;
         }
         p = entry_end + 1;
     }
