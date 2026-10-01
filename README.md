@@ -10,6 +10,9 @@ A minimalist macOS file manager written in Objective-C + AppKit.
 - Auto-fit columns (View ▸ Auto-Fit Columns, on by default) and optional
   double-height rows with larger icons (View ▸ Large Rows)
 - Single- or dual-pane browsing (View ▸ Dual Pane, ⇧⌘2; Tab switches panes)
+- The status bar shows the item count and, on the right, the free and
+  total space of the disk being browsed ("10.3 GB (of 245 GB) free"; free
+  space counts purgeable space, as Finder does)
 - Bookmarks bar (Home, Desktop, Downloads, Documents, Applications, Trash);
   ⌘D or the ★ button adds the current folder, and right-click ▸ Add to
   Bookmarks on a folder in the list adds that folder (before Trash, which

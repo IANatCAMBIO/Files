@@ -72,6 +72,11 @@ static void *first_responder_ctx = &first_responder_ctx;
  * which is Empty Trash in the Trash and Unmount at an unmountable volume's
  * root (see update_floating_button). */
 @property (nonatomic, strong) NSTextField *status_label;
+/* Right of the status bar: free and total space of the active pane's
+ * volume (refresh_disk_space). */
+@property (nonatomic, strong) NSTextField *space_label;
+@property (nonatomic, assign) NSUInteger   space_generation;
+@property (nonatomic, assign) BOOL         space_refresh_scheduled;
 @property (nonatomic, strong) NSButton    *floating_btn;
 @property (nonatomic, assign) NSUInteger   transient_status_id;  /* 0 = none showing */
 
@@ -232,10 +237,34 @@ build_layout
     self.status_label.font      = [NSFont systemFontOfSize:11.0];
     self.status_label.textColor = NSColor.secondaryLabelColor;
     [status_container addSubview:self.status_label];
+    self.space_label = [NSTextField labelWithString:@""];
+    self.space_label.translatesAutoresizingMaskIntoConstraints = NO;
+    self.space_label.alignment = NSTextAlignmentRight;
+    self.space_label.font      = [NSFont systemFontOfSize:11.0];
+    self.space_label.textColor = NSColor.secondaryLabelColor;
+    [self.space_label setContentHuggingPriority:NSLayoutPriorityRequired
+                                 forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.space_label setContentCompressionResistancePriority:NSLayoutPriorityRequired
+                                               forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [status_container addSubview:self.space_label];
+
+    /* The item count stays centred in the bar; it gives way (truncating)
+     * before it would run into the disk space on the right. */
+    NSLayoutConstraint *centred = [self.status_label.centerXAnchor
+                                      constraintEqualToAnchor:status_container.centerXAnchor];
+    centred.priority = NSLayoutPriorityDefaultHigh;
+    self.status_label.lineBreakMode = NSLineBreakByTruncatingTail;
+    [self.status_label setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                                forOrientation:NSLayoutConstraintOrientationHorizontal];
     [NSLayoutConstraint activateConstraints:@[
         [self.status_label.centerYAnchor  constraintEqualToAnchor:status_container.centerYAnchor],
-        [self.status_label.leadingAnchor  constraintEqualToAnchor:status_container.leadingAnchor],
-        [self.status_label.trailingAnchor constraintEqualToAnchor:status_container.trailingAnchor
+        centred,
+        [self.status_label.leadingAnchor  constraintGreaterThanOrEqualToAnchor:status_container.leadingAnchor
+                                                                      constant:8.0],
+        [self.status_label.trailingAnchor constraintLessThanOrEqualToAnchor:self.space_label.leadingAnchor
+                                                                   constant:-8.0],
+        [self.space_label.centerYAnchor   constraintEqualToAnchor:status_container.centerYAnchor],
+        [self.space_label.trailingAnchor  constraintEqualToAnchor:status_container.trailingAnchor
                                                          constant:-8.0],
     ]];
 
@@ -477,8 +506,56 @@ set_active_pane:(NSInteger)idx
 - (void)
 show_pane_status
 {
+    [self refresh_disk_space];
     if (self.transient_status_id) return;
     self.status_label.stringValue = [self active_browser].status_text ?: @"";
+}
+
+/*
+ * refresh_disk_space — shows "10.4 GB (of 200 GB) free" for the volume of
+ * the active pane's folder at the right of the status bar. Free space is
+ * the space available for important use (it counts purgeable space, as
+ * Finder does), else the plain available capacity. The volume is asked on
+ * a background queue — an unresponsive network volume must not stall the
+ * window — at most every 0.3 s however often the status changes (every
+ * listing and selection change asks), and a newer request supersedes an
+ * older answer still on its way. Empty if the volume does not say.
+ */
+- (void)
+refresh_disk_space
+{
+    if (self.space_refresh_scheduled) return;
+    self.space_refresh_scheduled = YES;
+    __weak FilesMainWindow *ws = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        FilesMainWindow *s = ws;
+        if (!s) return;
+        s.space_refresh_scheduled = NO;
+        NSString *path = [s active_browser].current_url.path;
+        if (!path) return;
+        NSUInteger generation = ++s.space_generation;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            /* A new URL each time: resource values are cached per URL. */
+            NSDictionary<NSURLResourceKey, id> *v =
+                [[NSURL fileURLWithPath:path] resourceValuesForKeys:@[
+                    NSURLVolumeAvailableCapacityForImportantUsageKey,
+                    NSURLVolumeAvailableCapacityKey,
+                    NSURLVolumeTotalCapacityKey,
+                ] error:nil];
+            NSNumber *free  = v[NSURLVolumeAvailableCapacityForImportantUsageKey]
+                              ?: v[NSURLVolumeAvailableCapacityKey];
+            NSNumber *total = v[NSURLVolumeTotalCapacityKey];
+            NSString *text  = (free && total.longLongValue > 0)
+                ? [NSString stringWithFormat:@"%@ (of %@) free",
+                   files_format_bytes(free.longLongValue), files_format_bytes(total.longLongValue)]
+                : @"";
+            dispatch_async(dispatch_get_main_queue(), ^{
+                FilesMainWindow *m = ws;
+                if (m && generation == m.space_generation) m.space_label.stringValue = text;
+            });
+        });
+    });
 }
 
 /*
