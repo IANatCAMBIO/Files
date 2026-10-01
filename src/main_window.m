@@ -338,6 +338,9 @@ new_browser_with_frame:(NSRect)frame
         FilesMainWindow *s = ws;
         if (s.new_window_handler) s.new_window_handler(url);
     };
+    b.bookmark_handler = ^(NSURL *url) {
+        [ws.bookmarks_bar add_bookmark:url];
+    };
     b.info_handler = ^(NSArray<NSURL *> *urls) {
         [FilesInfoPanel.shared show_for_url:urls.firstObject];
     };

@@ -40,6 +40,12 @@
 @property (nonatomic, copy) void (^open_window_handler)(NSURL *url);
 
 /*
+ * bookmark_handler — called with a folder the user chose to bookmark
+ * (context menu ▸ Add to Bookmarks).
+ */
+@property (nonatomic, copy) void (^bookmark_handler)(NSURL *url);
+
+/*
  * status_text — the text last passed to status_text_handler (item count,
  * selection, listing error or progress message); nil before the first.
  */

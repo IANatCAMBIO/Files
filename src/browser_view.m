@@ -553,6 +553,7 @@ build_context_menu
 
     add(@"Open",          @selector(open_selected:));
     add(@"Run Application", @selector(run_application:));
+    add(@"Add to Bookmarks", @selector(add_to_bookmarks:));
     [menu addItem:NSMenuItem.separatorItem];
     add(@"Cut",           @selector(cut:));
     add(@"Copy",          @selector(copy:));
@@ -1809,10 +1810,42 @@ run_application:(id)sender
 }
 
 /*
+ * selected_folder — the selected item if exactly one is selected and it is
+ * a folder (not a package such as an app).
+ *
+ * Output: folder URL, or nil.
+ */
+- (NSURL *)
+selected_folder
+{
+    NSArray<NSURL *> *sel = [self selected_urls];
+    if (sel.count != 1) return nil;
+    NSNumber *dir = nil, *pkg = nil;
+    [sel.firstObject getResourceValue:&dir forKey:NSURLIsDirectoryKey error:nil];
+    [sel.firstObject getResourceValue:&pkg forKey:NSURLIsPackageKey error:nil];
+    return (dir.boolValue && !pkg.boolValue) ? sel.firstObject : nil;
+}
+
+/*
+ * add_to_bookmarks: — context menu ▸ Add to Bookmarks: hands the selected
+ * folder to bookmark_handler, which adds it to the bookmarks bar.
+ *
+ * Inputs:
+ *   sender — context-menu item (unused)
+ */
+- (void)
+add_to_bookmarks:(id)sender
+{
+    NSURL *folder = [self selected_folder];
+    if (folder && self.bookmark_handler) self.bookmark_handler(folder);
+}
+
+/*
  * validateMenuItem: — checks each column-header menu item whose column
  * the user shows (Name: always, disabled); shows "Run Application" in the
  * context menu only when
- * the selected items include an application, and shows the path item
+ * the selected items include an application, "Add to Bookmarks" only for
+ * a single selected folder, and the path item
  * only for a single selected item, titled "Copy Path to File" for a file
  * (packages such as apps count as files) and "Copy Path" for a folder.
  *
@@ -1837,14 +1870,15 @@ validateMenuItem:(NSMenuItem *)item
                                                     : NSControlStateValueOn;
         return ![col_id isEqualToString:col_name];
     }
+    if (item.action == @selector(add_to_bookmarks:)) {
+        BOOL folder = [self selected_folder] != nil;
+        item.hidden = !folder;
+        return folder;
+    }
     if (item.action == @selector(copy_path:)) {
-        NSArray<NSURL *> *sel = [self selected_urls];
-        item.hidden = (sel.count != 1);
+        item.hidden = ([self selected_urls].count != 1);
         if (item.hidden) return NO;
-        NSNumber *dir = nil, *pkg = nil;
-        [sel.firstObject getResourceValue:&dir forKey:NSURLIsDirectoryKey error:nil];
-        [sel.firstObject getResourceValue:&pkg forKey:NSURLIsPackageKey error:nil];
-        item.title = (dir.boolValue && !pkg.boolValue) ? @"Copy Path" : @"Copy Path to File";
+        item.title = [self selected_folder] ? @"Copy Path" : @"Copy Path to File";
         return YES;
     }
     return YES;
