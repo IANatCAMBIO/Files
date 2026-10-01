@@ -2039,7 +2039,8 @@ acceptsFirstResponder
  * keyDown: — Return/Enter opens the selected item when it is a single
  * folder (or package, as a double-click would), and otherwise begins an
  * inline rename (folders are renamed from the context menu); Space opens or closes
- * Quick Look for the selection. Move to Trash is deliberately not bound
+ * Quick Look for the selection; ← and → (no modifiers) go back and
+ * forward. Move to Trash is deliberately not bound
  * to a bare Delete key: it is only reachable via ⌘⌫ (Edit menu key
  * equivalent), matching Finder.
  *
@@ -2066,6 +2067,15 @@ keyDown:(NSEvent *)event
                                                        NSEventModifierFlagOption);
     if ([chars isEqualToString:@" "] && mods == 0) {
         [self toggle_quick_look];
+        return;
+    }
+    unichar key = chars.length == 1 ? [chars characterAtIndex:0] : 0;
+    if (mods == 0 && key == NSLeftArrowFunctionKey) {
+        [self go_back];
+        return;
+    }
+    if (mods == 0 && key == NSRightArrowFunctionKey) {
+        [self go_forward];
         return;
     }
     [super keyDown:event];

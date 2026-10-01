@@ -238,8 +238,8 @@ folder.
 | Select All     | ⌘A                 |
 | Open folder    | Return (on a folder) |
 | Rename         | Return (on a file) |
-| Back           | ⌘[                 |
-| Forward        | ⌘]                 |
+| Back           | ⌘[ or ←            |
+| Forward        | ⌘] or →            |
 | Home           | ⌘⇧H               |
 | Desktop        | ⌘⇧D               |
 | Downloads      | ⌘⇧L               |
