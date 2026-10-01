@@ -13,6 +13,8 @@
 @property (nonatomic, strong) NSNumber *archive_reveal_attempted;  /* value tried this session */
 @property (nonatomic, strong) NSNumber *keep_running_applied;      /* login item state applied */
 @property (nonatomic, assign) BOOL launched;  /* applicationDidFinishLaunching: has run */
+@property (nonatomic, assign) BOOL synced;    /* sync_integrations has run */
+@property (nonatomic, assign) BOOL fda_asked; /* the launch Full Disk Access prompt was shown */
 @end
 
 /* Archive Utility's preferences domain and the "reveal in Finder after
@@ -56,7 +58,7 @@ applicationWillFinishLaunching:(NSNotification *)n
  * preference changes, and opens a home-folder window unless the launch
  * already opened one (to reveal files) or Files was started at login to
  * keep running in the background (files_pref_keep_running). The first
- * window runs the launch checks (run_checks); a login launch makes only
+ * window runs the launch checks (run_checks_soon); a login launch makes only
  * the silent part of them (sync_integrations), leaving the Full Disk
  * Access prompt for the first window.
  *
@@ -79,9 +81,11 @@ applicationDidFinishLaunching:(NSNotification *)n
     }];
 
     self.launched = YES;
+    BOOL at_login = [self launched_at_login];
+    NSLog(@"[launch] %@", at_login ? @"started as a login item" : @"started normally");
     if (self.windows.count > 0) {
-        [self run_checks];
-    } else if ([self launched_at_login] &&
+        [self run_checks_soon];
+    } else if (at_login &&
                [NSUserDefaults.standardUserDefaults boolForKey:files_pref_keep_running]) {
         [self sync_integrations];
         return;
@@ -107,15 +111,27 @@ launched_at_login
 }
 
 /*
- * run_checks — the checks made whenever Files gets its first window: at
- * launch, and, while it keeps running with no windows, each time it is
- * used again (so they are not limited to once per login). Asks for Full
- * Disk Access if it is missing, then sync_integrations.
+ * run_checks_soon — the checks made whenever Files gets its first window:
+ * at launch, and, while it keeps running with no windows, each time it is
+ * used again (so they are not limited to once per login). Run on the next
+ * pass of the main run loop, so the window draws first. Asks for Full
+ * Disk Access if it is missing — once per run of Files, so declining is
+ * not met with the same prompt on every reopen — then sync_integrations.
+ */
+- (void)
+run_checks_soon
+{
+    dispatch_async(dispatch_get_main_queue(), ^{ [self run_checks]; });
+}
+
+/*
+ * run_checks — the body of run_checks_soon.
  */
 - (void)
 run_checks
 {
-    if (!files_has_full_disk_access()) {
+    if (!self.fda_asked && !files_has_full_disk_access()) {
+        self.fda_asked = YES;
         [self prompt_full_disk_access:
             @"Files is a file manager and needs Full Disk Access to show and manage "
              "all of your files (for example the Trash, Mail and Messages data, and "
@@ -140,6 +156,7 @@ sync_integrations
     [self sync_archive_utility_reporting:NO];
     files_default_viewer_sync(nil);
     [self sync_keep_running_reporting:NO];
+    self.synced = YES;
 }
 
 /*
@@ -147,10 +164,14 @@ sync_integrations
  * applies preferences that act outside Files, reporting failure (the
  * preference just changed, most likely from a menu or Preferences). Each
  * is a no-op unless its preference changed since it was last applied.
+ * Does nothing before the first sync_integrations, which applies them all
+ * silently: the defaults written while the first window is built (its
+ * frame, the first bookmark list) are not preference changes.
  */
 - (void)
 prefs_changed
 {
+    if (!self.synced) return;
     [self sync_archive_utility_reporting:YES];
     [self sync_keep_running_reporting:YES];
 }
@@ -158,10 +179,12 @@ prefs_changed
 /*
  * sync_keep_running_reporting: — registers Files as a login item
  * (SMAppService main app) while files_pref_keep_running is on, and
- * unregisters it when off. Runs with sync_integrations and whenever the
- * preference changes; each value is applied at most once until
- * sync_integrations re-checks, so frequent defaults notifications cost
- * nothing. Staying open after the last window closes follows the
+ * unregisters it when off, on files_background_queue() (SMAppService asks
+ * a system daemon and blocks); any alert is shown on the main queue. Runs
+ * with sync_integrations and whenever the preference changes; each value
+ * is applied at most once until sync_integrations re-checks, so frequent
+ * defaults notifications cost nothing. Staying open after the last window
+ * closes follows the
  * preference directly (applicationShouldTerminateAfterLastWindowClosed:),
  * and Info.plist's NSSupportsAutomaticTermination = NO keeps macOS from
  * quitting Files while it has no windows.
@@ -177,34 +200,47 @@ sync_keep_running_reporting:(BOOL)report
     if (self.keep_running_applied && self.keep_running_applied.boolValue == want) return;
     self.keep_running_applied = @(want);
 
-    SMAppService *svc  = SMAppService.mainAppService;
-    SMAppServiceStatus st = svc.status;
-    NSError *err = nil;
-    if (!want) {
-        if ((st == SMAppServiceStatusEnabled || st == SMAppServiceStatusRequiresApproval) &&
-            ![svc unregisterAndReturnError:&err]) {
-            NSLog(@"[keep_running] could not remove login item: %@", err);
+    dispatch_async(files_background_queue(), ^{
+        SMAppService *svc  = SMAppService.mainAppService;
+        SMAppServiceStatus st = svc.status;
+        NSError *err = nil;
+        if (!want) {
+            if ((st == SMAppServiceStatusEnabled || st == SMAppServiceStatusRequiresApproval) &&
+                ![svc unregisterAndReturnError:&err]) {
+                NSLog(@"[keep_running] could not remove login item: %@", err);
+            }
+            return;
         }
-        return;
-    }
-    if (st == SMAppServiceStatusEnabled) return;
-    if (st != SMAppServiceStatusRequiresApproval && ![svc registerAndReturnError:&err]) {
-        NSLog(@"[keep_running] could not add login item: %@", err);
-        if (report) {
-            files_show_error(@"Files could not add itself to your login items", err,
-                             NSApp.keyWindow);
+        if (st == SMAppServiceStatusEnabled) return;
+        if (st != SMAppServiceStatusRequiresApproval && ![svc registerAndReturnError:&err]) {
+            NSLog(@"[keep_running] could not add login item: %@", err);
+            if (report) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    files_show_error(@"Files could not add itself to your login items", err,
+                                     [self front_window].window);
+                });
+            }
+            return;
         }
-        return;
-    }
-    if (svc.status != SMAppServiceStatusRequiresApproval || !report) return;
+        if (svc.status != SMAppServiceStatusRequiresApproval || !report) return;
+        dispatch_async(dispatch_get_main_queue(), ^{ [self ask_login_item_approval]; });
+    });
+}
 
+/*
+ * ask_login_item_approval — explains that the login item is turned off in
+ * System Settings and offers to open Login Items there.
+ */
+- (void)
+ask_login_item_approval
+{
     NSAlert *alert        = files_new_alert();
     alert.messageText     = @"Allow Files to open at login";
     alert.informativeText = @"Files is turned off in Login Items. Turn it on in System "
                              "Settings ▸ General ▸ Login Items so Files starts at login.";
     [alert addButtonWithTitle:@"Open Login Items Settings"];
     [alert addButtonWithTitle:@"Not Now"];
-    files_present_alert(alert, NSApp.keyWindow, ^(NSModalResponse resp) {
+    files_present_alert(alert, [self front_window].window, ^(NSModalResponse resp) {
         if (resp == NSAlertFirstButtonReturn) [SMAppService openSystemSettingsLoginItems];
     });
 }
@@ -217,7 +253,7 @@ sync_keep_running_reporting:(BOOL)report
  * sync_integrations — at every launch, including the first, which applies
  * the default — and whenever the preference changes. files_sync_prefs
  * reads Archive Utility's real values and writes only what differs
- * (missing keys included), on a serial background queue; nothing is
+ * (missing keys included), on files_background_queue(); nothing is
  * cached, so values changed or reset elsewhere are corrected at the next
  * sync_integrations. This needs Full Disk Access (Archive Utility is
  * sandboxed), which run_checks prompts for.
@@ -233,17 +269,11 @@ sync_keep_running_reporting:(BOOL)report
 - (void)
 sync_archive_utility_reporting:(BOOL)report
 {
-    static dispatch_queue_t queue;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        queue = dispatch_queue_create("files.archive_utility", DISPATCH_QUEUE_SERIAL);
-    });
-
     BOOL want = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_archive_reveal];
     if (self.archive_reveal_attempted && self.archive_reveal_attempted.boolValue == want) return;
     self.archive_reveal_attempted = @(want);
 
-    dispatch_async(queue, ^{
+    dispatch_async(files_background_queue(), ^{
         BOOL ok = files_sync_prefs(archive_utility_domain,
                                    @{ @"dearchive-reveal-after": @[@(want)],
                                       @"archive-reveal-after":   @[@(want)] },
@@ -294,7 +324,7 @@ prompt_full_disk_access:(NSString *)reason
  * saved frame). Used at launch, by File ▸ New Window, when a window asks
  * for one (a newly mounted disk image), and when Files, kept running with
  * no windows, is used again. Opening the first window after launch with
- * none open runs run_checks.
+ * none open runs run_checks_soon.
  *
  * Inputs:
  *   url — folder to show
@@ -315,7 +345,7 @@ open_window_at:(NSURL *)url
     w.new_window_handler = ^(NSURL *u) { [ws open_window_at:u]; };
     [self.windows addObject:w];
     [w showWindow:nil];
-    if (first && self.launched) [self run_checks];
+    if (first && self.launched) [self run_checks_soon];
     return w;
 }
 

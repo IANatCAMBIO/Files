@@ -130,11 +130,11 @@ files_has_full_disk_access(void)
 }
 
 /*
- * files_run_tool — runs a command-line tool and waits for it.
+ * files_run_tool — runs a command-line tool and waits for it, up to timeout.
  * Inputs/output are documented in util.h.
  */
 BOOL
-files_run_tool(NSString *tool, NSArray<NSString *> *args, NSData **out)
+files_run_tool(NSString *tool, NSArray<NSString *> *args, double timeout, NSData **out)
 {
     NSTask *task        = [[NSTask alloc] init];
     task.executableURL  = [NSURL fileURLWithPath:tool];
@@ -144,24 +144,92 @@ files_run_tool(NSString *tool, NSArray<NSString *> *args, NSData **out)
     NSPipe *pipe        = [NSPipe pipe];
     task.standardOutput = pipe;
     if (![task launchAndReturnError:nil]) return NO;
+    if (timeout > 0) {
+        /* Terminating the tool closes its end of the pipe, ending the read. */
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeout * NSEC_PER_SEC)),
+                       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            if (task.running) [task terminate];
+        });
+    }
     NSData *data = [pipe.fileHandleForReading readDataToEndOfFile];
     [task waitUntilExit];
     if (out) *out = data;
     return task.terminationStatus == 0;
 }
 
+/*
+ * files_background_queue — one serial utility-QoS queue, made once.
+ * Inputs/output are documented in util.h.
+ */
+dispatch_queue_t
+files_background_queue(void)
+{
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create("files.background",
+            dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
+    });
+    return queue;
+}
+
 static NSString * const defaults_tool = @"/usr/bin/defaults";
 
 /*
- * files_sync_prefs — read once, write only differences.
+ * sync_prefs_cf — files_sync_prefs for a domain CFPreferences can reach:
+ * reads each key from exactly that domain (current user, any host),
+ * changes the ones that differ and synchronizes once.
+ *
+ * Inputs:
+ *   domain   — preferences domain; @"NSGlobalDomain" for the global one
+ *   values   — key → wrapped wanted value
+ *   previous — if non-nil, receives key → wrapped prior value per change
+ *
+ * Output: YES if every key now has its wanted value.
+ */
+static BOOL
+sync_prefs_cf(NSString *domain, NSDictionary<NSString *, NSArray *> *values,
+              NSMutableDictionary<NSString *, NSArray *> *previous)
+{
+    CFStringRef app = [domain isEqualToString:@"NSGlobalDomain"]
+                      ? kCFPreferencesAnyApplication : (__bridge CFStringRef)domain;
+    NSMutableDictionary<NSString *, NSArray *> *changed = [NSMutableDictionary dictionary];
+    for (NSString *key in values) {
+        id want = values[key].firstObject;  /* nil: remove the key */
+        id have = CFBridgingRelease(CFPreferencesCopyValue((__bridge CFStringRef)key, app,
+                                    kCFPreferencesCurrentUser, kCFPreferencesAnyHost));
+        if (want ? [have isEqual:want] : have == nil) continue;
+        CFPreferencesSetValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)want, app,
+                              kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+        changed[key] = have ? @[have] : @[];
+    }
+    if (changed.count == 0) return YES;
+    if (!CFPreferencesSynchronize(app, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)) {
+        return NO;
+    }
+    [previous addEntriesFromDictionary:changed];
+    return YES;
+}
+
+/*
+ * files_sync_prefs — read once, write only differences: CFPreferences, or
+ * the defaults tool for a sandboxed app's container.
  * Inputs/output are documented in util.h.
  */
 BOOL
 files_sync_prefs(NSString *domain, NSDictionary<NSString *, NSArray *> *values,
                  NSMutableDictionary<NSString *, NSArray *> *previous)
 {
+    NSString *container = [NSString stringWithFormat:@"%@/Library/Containers/%@",
+                           NSHomeDirectory(), domain];
+    if (access(container.fileSystemRepresentation, F_OK) != 0) {
+        return sync_prefs_cf(domain, values, previous);
+    }
+
     NSData *data = nil;
-    if (!files_run_tool(defaults_tool, @[@"export", domain, @"-"], &data)) return NO;
+    if (!files_run_tool(defaults_tool, @[@"export", domain, @"-"], FILES_TOOL_TIMEOUT, &data)) {
+        return NO;
+    }
     NSDictionary *current = [NSPropertyListSerialization propertyListWithData:data
                                                                       options:0
                                                                        format:NULL
@@ -184,9 +252,11 @@ files_sync_prefs(NSString *domain, NSDictionary<NSString *, NSArray *> *values,
                                                                       error:nil];
             NSString *plist = xml ? [[NSString alloc] initWithData:xml encoding:NSUTF8StringEncoding]
                                   : nil;
-            wrote = plist && files_run_tool(defaults_tool, @[@"write", domain, key, plist], NULL);
+            wrote = plist && files_run_tool(defaults_tool, @[@"write", domain, key, plist],
+                                              FILES_TOOL_TIMEOUT, NULL);
         } else {
-            wrote = files_run_tool(defaults_tool, @[@"delete", domain, key], NULL);
+            wrote = files_run_tool(defaults_tool, @[@"delete", domain, key],
+                                   FILES_TOOL_TIMEOUT, NULL);
         }
         if (wrote && previous) previous[key] = have ? @[have] : @[];
         ok = wrote && ok;

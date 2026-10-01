@@ -51,7 +51,8 @@ NSSet<NSString *> *
 files_git_tracked_names(NSURL *dir)
 {
     NSData *data = nil;
-    if (!files_run_tool(git_tool, @[@"-C", dir.path, @"ls-files", @"-z"], &data)) return nil;
+    if (!files_run_tool(git_tool, @[@"-C", dir.path, @"ls-files", @"-z"],
+                        FILES_TOOL_TIMEOUT, &data)) return nil;
 
     /* NUL-separated paths relative to dir; keep the part before the first
      * '/', which is the name of the child of dir the file lives under.
@@ -194,7 +195,7 @@ run_git(NSURL *repo, NSArray<NSString *> *args)
 {
     NSData *data = nil;
     NSArray *full = [@[@"-C", repo.path] arrayByAddingObjectsFromArray:args];
-    if (!files_run_tool(git_tool, full, &data)) return nil;
+    if (!files_run_tool(git_tool, full, FILES_TOOL_TIMEOUT, &data)) return nil;
     NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     /* Newlines only: a tab can be a meaningful (empty) leading field. */
     return [text stringByTrimmingCharactersInSet:NSCharacterSet.newlineCharacterSet];

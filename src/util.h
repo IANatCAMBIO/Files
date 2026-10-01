@@ -85,19 +85,38 @@ BOOL files_same_path(NSURL *a, NSURL *b);
  */
 NSImage *files_icon_for_url(NSURL *url, CGFloat size);
 
+/* Timeout for quick helper tools (git, defaults, lsof), in seconds. */
+#define FILES_TOOL_TIMEOUT 15.0
+
 /*
  * files_run_tool — runs a command-line tool with stdin and stderr at
- * /dev/null, optionally capturing stdout, and waits for it to exit.
+ * /dev/null, optionally capturing stdout, and waits for it to exit, or
+ * terminates it (SIGTERM) after timeout seconds — so a tool stuck on an
+ * unresponsive network volume cannot block its caller for good. A process
+ * in an uninterruptible kernel wait may still outlive the timeout.
  * Blocks; call off the main thread.
  *
  * Inputs:
- *   tool — absolute path of the executable, e.g. @"/usr/bin/defaults"
- *   args — arguments after the tool name
- *   out  — receives stdout if non-NULL
+ *   tool    — absolute path of the executable, e.g. @"/usr/bin/defaults"
+ *   args    — arguments after the tool name
+ *   timeout — seconds to allow (FILES_TOOL_TIMEOUT for quick tools); 0 for
+ *             no limit
+ *   out     — receives stdout if non-NULL, even when the exit status is
+ *             not 0
  *
  * Output: YES if it ran and exited 0.
  */
-BOOL files_run_tool(NSString *tool, NSArray<NSString *> *args, NSData **out);
+BOOL files_run_tool(NSString *tool, NSArray<NSString *> *args, double timeout, NSData **out);
+
+/*
+ * files_background_queue — the serial, utility-priority queue for work
+ * Files does in the background on its own initiative (keeping Archive
+ * Utility, Finder and the login item in step with its preferences), so it
+ * never competes with the UI or runs two such jobs at once.
+ *
+ * Output: the shared queue.
+ */
+dispatch_queue_t files_background_queue(void);
 
 /*
  * files_has_full_disk_access — whether this process has Full Disk Access.
@@ -111,11 +130,13 @@ BOOL files_has_full_disk_access(void);
 
 /*
  * files_sync_prefs — makes preferences in another app's (or the global)
- * domain hold the given values, using the `defaults` tool (which, unlike
- * CFPreferences, reaches a sandboxed app's container; that needs Full Disk
- * Access). Reads the domain once (`defaults export`) and writes or deletes
- * only the keys that differ, so the common case costs one process and no
- * writes. Blocks; call off the main thread.
+ * domain hold the given values. Ordinary domains are read and written
+ * directly with CFPreferences; a sandboxed app's domain (one with a
+ * folder in ~/Library/Containers) goes through the `defaults` tool, which,
+ * unlike CFPreferences, reaches its container — that needs Full Disk
+ * Access. Either way the domain is read once and only the keys that
+ * differ are written or deleted, so the common case writes nothing.
+ * Blocks; call off the main thread.
  *
  * Values are "wrapped": @[value] means the key should hold value (any
  * property-list object), @[] means the key should be absent. The same form

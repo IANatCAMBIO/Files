@@ -243,19 +243,13 @@ give_back(void)
 }
 
 /*
- * files_default_viewer_sync — take_over or give_back on a serial queue.
- * Inputs/output are documented in default_viewer.h.
+ * files_default_viewer_sync — take_over or give_back on
+ * files_background_queue(). Inputs/output are documented in default_viewer.h.
  */
 void
 files_default_viewer_sync(void (^done)(BOOL ok))
 {
-    static dispatch_queue_t queue;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        queue = dispatch_queue_create("files.default_viewer", DISPATCH_QUEUE_SERIAL);
-    });
-
-    dispatch_async(queue, ^{
+    dispatch_async(files_background_queue(), ^{
         BOOL on = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_default_viewer];
         BOOL ok = on ? take_over() : give_back();
         if (!ok) NSLog(@"[default_viewer] could not %@ every setting", on ? @"apply" : @"restore");
