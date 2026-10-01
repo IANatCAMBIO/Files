@@ -24,6 +24,8 @@ static const CGFloat status_h        = 20.0;
 static const CGFloat sidebar_w       = 180.0;  /* initial info sidebar width */
 static const CGFloat sidebar_min_w   = 140.0;
 static const CGFloat browser_min_w   = 400.0;
+static const CGFloat search_w        = 220.0;  /* toolbar search field */
+static const CGFloat address_min_w   = 200.0;  /* narrowest the address bar gets */
 
 /* How long a transient status message stays before the item count returns. */
 static const double  transient_status_sec = 4.0;
@@ -40,8 +42,17 @@ static void *first_responder_ctx = &first_responder_ctx;
 
 @interface FilesMainWindow () <NSToolbarDelegate, NSToolbarItemValidation>
 
-/* Toolbar views */
-@property (nonatomic, strong) NSTextField *address_bar;
+/* Toolbar views; address_width is the address bar's width (fit_address_bar). */
+@property (nonatomic, strong) NSTextField        *address_bar;
+@property (nonatomic, strong) NSLayoutConstraint *address_width;
+@property (nonatomic, weak)   NSToolbarItem      *address_item;
+/* Measured by fit_address_bar when every toolbar item was last laid out:
+ * the row of items, its leading margin, the padding around the address
+ * bar, and the other items' total width (search field at full width). */
+@property (nonatomic, weak)   NSView             *toolbar_row;
+@property (nonatomic, assign) CGFloat             toolbar_margin;
+@property (nonatomic, assign) CGFloat             toolbar_pad;
+@property (nonatomic, assign) CGFloat             toolbar_others_w;
 
 /* Layout */
 @property (nonatomic, weak)   NSSearchField         *search_field;  /* toolbar search field */
@@ -114,6 +125,10 @@ init_with_url:(NSURL *)url
                                            selector:@selector(window_will_close:)
                                                name:NSWindowWillCloseNotification
                                              object:self.window];
+    [NSNotificationCenter.defaultCenter addObserver:self
+                                           selector:@selector(fit_address_bar)
+                                               name:NSWindowDidResizeNotification
+                                             object:self.window];
     /* Defaults can change on any thread; the search field is only touched
      * on the main queue. */
     __weak FilesMainWindow *ws = self;
@@ -127,8 +142,10 @@ init_with_url:(NSURL *)url
     };
     [self.primary_browser navigate_to:url];
 
-    /* Deferred so it runs after the window's initial first-responder pass. */
+    /* Deferred so it runs after the window's initial first-responder pass
+     * and once the toolbar has been laid out. */
     dispatch_async(dispatch_get_main_queue(), ^{
+        [self fit_address_bar];
         [self.window makeFirstResponder:self.address_bar];
     });
     return self;
@@ -479,6 +496,56 @@ update_toolbar_for_url:(NSURL *)url
     [self.window.toolbar validateVisibleItems];
 }
 
+/*
+ * fit_address_bar — makes the address bar fill the toolbar between the +
+ * button and the search field. The toolbar sizes a view item to its
+ * fitting width and puts any room left over after its last item, so this
+ * sets the address bar to the toolbar's width less its margins and the
+ * other items (never below address_min_w). The toolbar's row of items, its
+ * margin and the other items' width are measured whenever every item is
+ * laid out with the search field at full width; the last measurement is
+ * used while some are squeezed or in the overflow menu — the address bar
+ * included, as when the window has just been made narrower. Runs whenever
+ * the window is resized, and once after the first layout.
+ */
+- (void)
+fit_address_bar
+{
+    NSView *viewer = self.address_bar.superview;   /* the item's viewer */
+    NSView *row    = viewer.superview;             /* the toolbar's row of items */
+    if (row) {
+        [row layoutSubtreeIfNeeded];
+        CGFloat pad   = NSWidth(viewer.frame) - NSWidth(self.address_bar.frame);
+        CGFloat start = CGFLOAT_MAX, end = 0, next_w = 0, next_x = CGFLOAT_MAX;
+        for (NSView *v in row.subviews) {
+            start = MIN(start, NSMinX(v.frame));
+            end   = MAX(end, NSMaxX(v.frame));
+            if (NSMinX(v.frame) >= NSMaxX(viewer.frame) && NSMinX(v.frame) < next_x) {
+                next_x = NSMinX(v.frame);   /* the search item comes next */
+                next_w = NSWidth(v.frame);
+            }
+        }
+        if (row.subviews.count == self.window.toolbar.items.count && next_w >= search_w + pad) {
+            self.toolbar_row      = row;
+            self.toolbar_margin   = start;
+            self.toolbar_pad      = pad;
+            self.toolbar_others_w = (end - start) - NSWidth(viewer.frame);
+        }
+    }
+    if (!self.toolbar_row) return;   /* never measured: keep address_min_w */
+
+    CGFloat want = MAX(address_min_w,
+                       floor(NSWidth(self.toolbar_row.bounds) - 2.0 * self.toolbar_margin
+                             - self.toolbar_others_w - self.toolbar_pad));
+    if (fabs(want - self.address_width.constant) < 1.0) return;
+    self.address_width.constant = want;
+    /* The toolbar measures an item's view when it is set, and keeps that
+     * size until the window is resized again; setting it anew makes the new
+     * width count now (otherwise a narrower window could leave items in the
+     * overflow menu). */
+    self.address_item.view = self.address_bar;
+}
+
 /* ── Dual pane ───────────────────────────────────────────────────────────── */
 
 /*
@@ -570,9 +637,7 @@ static NSArray<NSToolbarItemIdentifier> *
 toolbar_identifiers(void)
 {
     return @[tb_back, tb_forward, tb_up, tb_reload, tb_new_item,
-             NSToolbarFlexibleSpaceItemIdentifier,
              tb_path,
-             NSToolbarFlexibleSpaceItemIdentifier,
              tb_search, tb_hidden_files, tb_open_terminal,
              tb_dual_pane, tb_sidebar];
 }
@@ -686,6 +751,9 @@ willBeInsertedIntoToolbar:(BOOL)flag
     }
     if ([identifier isEqualToString:tb_search]) {
         NSSearchToolbarItem *item = [[NSSearchToolbarItem alloc] initWithItemIdentifier:identifier];
+        /* A fixed width, so the address bar gets the toolbar's spare room. */
+        item.preferredWidthForSearchField = search_w;
+        [item.searchField.widthAnchor constraintLessThanOrEqualToConstant:search_w].active = YES;
         item.searchField.target            = self;
         item.searchField.action            = @selector(search_changed:);
         item.label                         = @"Search";
@@ -716,16 +784,25 @@ willBeInsertedIntoToolbar:(BOOL)flag
         self.address_bar.target            = self;
         self.address_bar.action            = @selector(address_bar_action:);
         self.address_bar.focusRingType     = NSFocusRingTypeNone;
-        NSLayoutConstraint *pref = [self.address_bar.widthAnchor constraintEqualToConstant:400];
-        pref.priority = NSLayoutPriorityDefaultLow;
+        /* One line, the end of the path kept in view when it is too long. */
+        self.address_bar.usesSingleLineMode = YES;
+        self.address_bar.cell.wraps         = NO;
+        self.address_bar.cell.scrollable    = YES;
+        self.address_bar.lineBreakMode      = NSLineBreakByTruncatingHead;
+        /* The toolbar lays an item out at its view's fitting width and
+         * leaves any spare room after the last item, so fit_address_bar
+         * sets this width to fill it. */
+        self.address_width = [self.address_bar.widthAnchor
+                                 constraintEqualToConstant:address_min_w];
+        self.address_width.priority = NSLayoutPriorityDefaultLow;
         [NSLayoutConstraint activateConstraints:@[
-            [self.address_bar.widthAnchor constraintGreaterThanOrEqualToConstant:200],
-            [self.address_bar.widthAnchor constraintLessThanOrEqualToConstant:800],
-            pref,
+            [self.address_bar.widthAnchor constraintGreaterThanOrEqualToConstant:address_min_w],
+            self.address_width,
         ]];
         NSToolbarItem *item = [[NSToolbarItem alloc] initWithItemIdentifier:identifier];
         item.view  = self.address_bar;
         item.label = @"Path";
+        self.address_item = item;
         return item;
     }
     return nil;
