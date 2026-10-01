@@ -159,6 +159,10 @@ build_content
             [rows addObject:[self pref_box:item[0] key:item[1]]];
         }
     }
+    [rows addObject:[self pref_box:@"Show Hashes in Get Info (SHA-256 / MD5)"
+                               key:files_pref_show_hashes]];
+    [rows addObject:note_label(@"Get Info reads the whole file to compute them, which takes "
+                                "a while for large files.")];
 
     [rows addObject:integration_heading];
     self.browser_label = [NSTextField labelWithString:@""];

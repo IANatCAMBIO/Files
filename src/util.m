@@ -308,6 +308,43 @@ files_sync_prefs(NSString *domain, NSDictionary<NSString *, NSArray *> *values,
 }
 
 /*
+ * files_kind_text — "Application Container" for app bundles, else the
+ * localized type description. Inputs/output are documented in util.h.
+ */
+NSString *
+files_kind_text(NSURL *url)
+{
+    NSDictionary<NSURLResourceKey, id> *res =
+        [url resourceValuesForKeys:@[NSURLContentTypeKey, NSURLLocalizedTypeDescriptionKey]
+                             error:nil];
+    if ([res[NSURLContentTypeKey] conformsToType:UTTypeApplicationBundle]) {
+        return @"Application Container";
+    }
+    return res[NSURLLocalizedTypeDescriptionKey] ?: @"—";
+}
+
+/*
+ * files_opens_with_text — the default app's name for a file, from
+ * NSWorkspace. Inputs/output are documented in util.h.
+ */
+NSString *
+files_opens_with_text(NSURL *url)
+{
+    NSDictionary<NSURLResourceKey, id> *res =
+        [url resourceValuesForKeys:@[NSURLIsDirectoryKey, NSURLIsPackageKey, NSURLContentTypeKey]
+                             error:nil];
+    BOOL folder = [res[NSURLIsDirectoryKey] boolValue] && ![res[NSURLIsPackageKey] boolValue];
+    if (folder || [res[NSURLContentTypeKey] conformsToType:UTTypeApplicationBundle]) return @"—";
+
+    NSURL *app = [NSWorkspace.sharedWorkspace URLForApplicationToOpenURL:url];
+    if (!app) return @"None";
+    NSString *name = nil;
+    [app getResourceValue:&name forKey:NSURLLocalizedNameKey error:nil];
+    name = name ?: app.lastPathComponent;
+    return [name.pathExtension isEqualToString:@"app"] ? name.stringByDeletingPathExtension : name;
+}
+
+/*
  * files_format_bytes — Finder-style byte count via one shared formatter.
  * Inputs/output are documented in util.h.
  */

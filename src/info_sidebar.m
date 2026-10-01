@@ -16,9 +16,10 @@ static const CGFloat sep2_y       = name_y + name_h + 4.0;        /* 209 */
 static const CGFloat first_row_y  = sep2_y + 1.0 + 6.0;           /* 216 */
 
 /* Metadata rows, in display order; indexes row_keys and _row_vals. */
-enum { row_kind, row_size, row_created, row_modified, row_count };
+enum { row_kind, row_opens_with, row_size, row_created, row_modified, row_count };
 static NSString * const row_keys[row_count] = {
-    [row_kind]     = @"Kind",
+    [row_kind]       = @"Kind",
+    [row_opens_with] = @"Opens with",
     [row_size]     = @"Size",
     [row_created]  = @"Created",
     [row_modified] = @"Modified",
@@ -231,13 +232,14 @@ show_url:(NSURL *)url
 
     NSDictionary<NSURLResourceKey, id> *res =
         [url resourceValuesForKeys:@[
-            NSURLNameKey, NSURLLocalizedTypeDescriptionKey, NSURLIsDirectoryKey,
+            NSURLNameKey, NSURLIsDirectoryKey,
             NSURLIsPackageKey, NSURLFileSizeKey, NSURLCreationDateKey,
             NSURLContentModificationDateKey,
         ] error:nil];
 
     _name_label.stringValue = res[NSURLNameKey] ?: url.lastPathComponent ?: @"";
-    _row_vals[row_kind].stringValue = res[NSURLLocalizedTypeDescriptionKey] ?: @"—";
+    _row_vals[row_kind].stringValue       = files_kind_text(url);
+    _row_vals[row_opens_with].stringValue = files_opens_with_text(url);
 
     NSNumber *sz = res[NSURLFileSizeKey];
     _row_vals[row_size].stringValue = ([res[NSURLIsDirectoryKey] boolValue] || !sz)
@@ -271,8 +273,9 @@ show_urls:(NSArray<NSURL *> *)urls
     _preview_view.image = multi_selection_icon();
     _name_label.stringValue  = [NSString stringWithFormat:@"%lu items selected",
                                  (unsigned long)urls.count];
-    _row_vals[row_kind].stringValue     = @"—";
-    _row_vals[row_created].stringValue  = @"—";
+    _row_vals[row_kind].stringValue       = @"—";
+    _row_vals[row_opens_with].stringValue = @"—";
+    _row_vals[row_created].stringValue    = @"—";
     _row_vals[row_modified].stringValue = @"—";
 
     NSArray<NSURLResourceKey> *keys = @[NSURLIsDirectoryKey, NSURLFileSizeKey];

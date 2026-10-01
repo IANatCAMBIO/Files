@@ -629,7 +629,11 @@ fit_address_bar
     NSView *row    = viewer.superview;             /* the toolbar's row of items */
     if (row) {
         [row layoutSubtreeIfNeeded];
-        CGFloat pad   = NSWidth(viewer.frame) - NSWidth(self.address_bar.frame);
+        /* Against the alignment rect, which address_width sizes: a bezeled
+         * field's frame is wider than it, so measuring the frame would
+         * leave the row that much too wide. */
+        CGFloat pad   = NSWidth(viewer.frame) -
+                        NSWidth([self.address_bar alignmentRectForFrame:self.address_bar.frame]);
         CGFloat start = CGFLOAT_MAX, end = 0, next_w = 0, next_x = CGFLOAT_MAX;
         for (NSView *v in row.subviews) {
             start = MIN(start, NSMinX(v.frame));
@@ -913,6 +917,8 @@ willBeInsertedIntoToolbar:(BOOL)flag
         [item.searchField.widthAnchor constraintLessThanOrEqualToConstant:search_w].active = YES;
         item.searchField.target            = self;
         item.searchField.action            = @selector(search_changed:);
+        /* No focus ring, like the address bar. */
+        item.searchField.focusRingType     = NSFocusRingTypeNone;
         item.label                         = @"Search";
 
         /* The magnifying glass offers where to search. */

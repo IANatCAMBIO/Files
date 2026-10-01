@@ -12,7 +12,7 @@
 extern NSString * const files_pref_show_hidden;     /* list dotfiles/hidden items */
 extern NSString * const files_pref_auto_fit;        /* auto-fit table columns (default on) */
 extern NSString * const files_pref_hash_validation; /* SHA-256 verify copies */
-extern NSString * const files_pref_show_hashes;     /* hashes in Get Info */
+extern NSString * const files_pref_show_hashes;     /* hashes in Get Info (Preferences ▸ View) */
 extern NSString * const files_pref_large_rows;      /* double-height file rows */
 extern NSString * const files_pref_simple_copies;   /* copy/move without the progress panel */
 extern NSString * const files_pref_default_viewer;  /* Files replaces Finder as file viewer (default on) */
@@ -72,6 +72,33 @@ NSURL *files_icloud_drive_url(void);
  * Output: YES if both are non-nil and their standardized paths match.
  */
 BOOL files_same_path(NSURL *a, NSURL *b);
+
+/*
+ * files_kind_text — the Kind Files' Info shows for an item: "Application
+ * Container" for an application bundle (.app), which is a folder holding
+ * the app, else the system's localized type description ("Folder", "PNG
+ * image", …).
+ *
+ * Inputs:
+ *   url — file URL of the item
+ *
+ * Output: kind text, or "—" if it cannot be determined.
+ */
+NSString *files_kind_text(NSURL *url);
+
+/*
+ * files_opens_with_text — the app that opens a file by default
+ * (LaunchServices' choice, as a double-click in Files would use), for
+ * Info. Folders and apps open themselves, so they have none; a package
+ * that is a document (an .rtfd, a Keynote file) counts as a file.
+ *
+ * Inputs:
+ *   url — file URL of the item
+ *
+ * Output: the app's name (e.g. "Preview"); "None" for a file no app is
+ *         set to open; "—" for a folder or app.
+ */
+NSString *files_opens_with_text(NSURL *url);
 
 /*
  * files_icon_for_url — the icon Files shows for an item at a given size:

@@ -25,8 +25,9 @@ A minimalist macOS file manager written in Objective-C + AppKit.
 - Quick Look: Space previews the selection (Space or Esc closes it; the
   arrow keys move through the list and the preview follows)
 - Collapsible info sidebar with a Quick Look thumbnail and file details
-- Get Info panel: size, dates, owner/group, editable permissions, Locked
-  flag, rename, and optional SHA-256 / MD5 checksums
+- Get Info panel: kind, the app that opens the file, size, dates,
+  owner/group, editable permissions, Locked flag, rename, and SHA-256 /
+  MD5 checksums (Preferences ▸ Show Hashes in Get Info, off by default)
 - Git folders: the top folder of a git working tree shows its usual folder
   icon with a git badge centered on it. Inside a repository the list gains
   a Git column that reads "tracked" for every file git tracks (including

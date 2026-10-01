@@ -141,6 +141,7 @@ make_perm_popup(NSString *caption, id target, NSPopUpButton **popup)
 @property (nonatomic, strong) NSImageView *icon_view;
 @property (nonatomic, strong) NSTextField *name_field;
 @property (nonatomic, strong) NSTextField *kind_value;
+@property (nonatomic, strong) NSTextField *opens_with_value;
 @property (nonatomic, strong) NSTextField *size_value;
 @property (nonatomic, strong) NSTextField *where_value;
 @property (nonatomic, strong) NSTextField *created_value;
@@ -153,7 +154,7 @@ make_perm_popup(NSString *caption, id target, NSPopUpButton **popup)
 @property (nonatomic, strong) NSTextField *sha256_value;
 @property (nonatomic, strong) NSTextField *md5_value;
 @property (nonatomic, strong) NSButton    *lock_check;
-@property (nonatomic, strong) NSButton    *hash_check;
+@property (nonatomic, assign) BOOL         hashes_on;  /* files_pref_show_hashes, as last applied */
 @property (nonatomic, strong) FilesCancelToken *hash_job; /* in-flight hash; stale guard */
 @property (nonatomic, strong) NSTextField *branch_value;
 @property (nonatomic, strong) NSTextField *pushed_value;
@@ -184,9 +185,10 @@ shared
 /*
  * init — creates the panel: the icon and an editable name field on top,
  * a separator, then an NSGridView of labelled rows (Kind … MD5, the Locked
- * and Show Hashes checkboxes, and a Git section that is hidden except for
- * the top folder of a working tree). The panel is a fixed width and its
- * height follows the visible rows (fit_window).
+ * checkbox, and a Git section that is hidden except for the top folder of
+ * a working tree). The panel is a fixed width and its height follows the
+ * visible rows (fit_window). The hash rows follow Preferences ▸ Show
+ * Hashes in Get Info (files_pref_show_hashes), live.
  *
  * Output: self, or nil if the window controller could not be initialised.
  */
@@ -239,16 +241,18 @@ init
         return r;
     };
 
-    self.kind_value     = make_value();
-    self.size_value     = make_value();
-    self.where_value    = make_value();
-    self.created_value  = make_value();
-    self.modified_value = make_value();
-    row(@"Kind:",     self.kind_value);
-    row(@"Size:",     self.size_value);
-    row(@"Where:",    self.where_value);
-    row(@"Created:",  self.created_value);
-    row(@"Modified:", self.modified_value);
+    self.kind_value       = make_value();
+    self.opens_with_value = make_value();
+    self.size_value       = make_value();
+    self.where_value      = make_value();
+    self.created_value    = make_value();
+    self.modified_value   = make_value();
+    row(@"Kind:",       self.kind_value);
+    row(@"Opens with:", self.opens_with_value);
+    row(@"Size:",       self.size_value);
+    row(@"Where:",      self.where_value);
+    row(@"Created:",    self.created_value);
+    row(@"Modified:",   self.modified_value);
 
     NSPopUpButton *owner = nil, *group = nil, *other = nil;
     NSStackView *perms = [NSStackView stackViewWithViews:@[
@@ -290,12 +294,7 @@ init
 
     self.lock_check = [NSButton checkboxWithTitle:@"Locked" target:self
                                            action:@selector(lock_toggled:)];
-    self.hash_check = [NSButton checkboxWithTitle:@"Show Hashes (SHA-256 / MD5)" target:self
-                                           action:@selector(hash_check_toggled:)];
-    self.hash_check.state = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_show_hashes]
-                            ? NSControlStateValueOn : NSControlStateValueOff;
     row(nil, self.lock_check);
-    row(nil, self.hash_check);
 
     /* Git section: a separator and a title across both columns, then rows. */
     NSBox *git_sep = [[NSBox alloc] init];
@@ -340,6 +339,16 @@ init
         [sep.widthAnchor    constraintEqualToAnchor:all.widthAnchor],
         [grid.widthAnchor   constraintEqualToAnchor:all.widthAnchor],
     ]];
+    /* Defaults can change on any thread; act on the main queue, and only
+     * when Show Hashes itself changed. */
+    self.hashes_on = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_show_hashes];
+    __weak FilesInfoPanel *ws = self;
+    [NSNotificationCenter.defaultCenter addObserverForName:NSUserDefaultsDidChangeNotification
+                                                    object:nil
+                                                     queue:NSOperationQueue.mainQueue
+                                                usingBlock:^(NSNotification *n) {
+        [ws show_hashes_changed];
+    }];
     [self fit_window];
     return self;
 }
@@ -440,7 +449,7 @@ populate_fields:(NSURL *)url
 
     NSArray<NSURLResourceKey> *keys = @[
         NSURLNameKey, NSURLFileSizeKey, NSURLFileAllocatedSizeKey,
-        NSURLIsDirectoryKey, NSURLLocalizedTypeDescriptionKey,
+        NSURLIsDirectoryKey,
         NSURLCreationDateKey, NSURLContentModificationDateKey,
         NSURLIsUserImmutableKey
     ];
@@ -457,10 +466,11 @@ populate_fields:(NSURL *)url
     /* Name */
     self.name_field.stringValue = res[NSURLNameKey] ?: url.lastPathComponent;
 
-    /* Kind: "Folder" for folders, "Application" for apps and so on. */
+    /* Kind: "Folder" for folders, "Application Container" for apps and so on. */
     BOOL is_dir = [res[NSURLIsDirectoryKey] boolValue];
     self.current_is_dir = is_dir;
-    self.kind_value.stringValue = res[NSURLLocalizedTypeDescriptionKey] ?: @"—";
+    self.kind_value.stringValue       = files_kind_text(fresh);
+    self.opens_with_value.stringValue = files_opens_with_text(fresh);
 
     /* Size */
     NSNumber *sz       = res[NSURLFileSizeKey];
@@ -655,17 +665,16 @@ copy_hash_action:(NSButton *)sender
 }
 
 /*
- * hash_check_toggled: — saves the show-hashes preference and starts or
- * stops hashing the current item (update_hashes); nothing else is re-read.
- *
- * Inputs:
- *   sender — the "Show Hashes" checkbox
+ * show_hashes_changed — when files_pref_show_hashes has changed since it
+ * was last applied, starts or stops hashing the current item
+ * (update_hashes); nothing else is re-read.
  */
-- (IBAction)
-hash_check_toggled:(NSButton *)sender
+- (void)
+show_hashes_changed
 {
-    BOOL on = (sender.state == NSControlStateValueOn);
-    [NSUserDefaults.standardUserDefaults setBool:on forKey:files_pref_show_hashes];
+    BOOL on = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_show_hashes];
+    if (on == self.hashes_on) return;
+    self.hashes_on = on;
     [self update_hashes];
 }
 

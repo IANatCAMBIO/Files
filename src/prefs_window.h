@@ -3,7 +3,8 @@
 /*
  * prefs_window — the Preferences tool window (Files ▸ Preferences…, ⌘,).
  *
- * View: the View menu's preferences, as checkboxes.
+ * View: the View menu's preferences, as checkboxes, and Show Hashes in
+ * Get Info (files_pref_show_hashes; FilesInfoPanel follows it).
  * Integration: the default file browser (its current choice and "Set
  * default file browser to Files" / "… to Finder" buttons, each opening a
  * change log; files_default_viewer_choose, which also sets whether Archive
