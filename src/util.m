@@ -12,6 +12,8 @@ NSString * const files_pref_simple_copies   = @"files.simple_copies";
 NSString * const files_pref_archive_reveal  = @"files.archive_reveal";
 NSString * const files_pref_default_viewer  = @"files.default_viewer";
 NSString * const files_pref_keep_running    = @"files.keep_running";
+NSString * const files_pref_hidden_columns  = @"files.hidden_columns";
+NSString * const files_pref_search_this_mac = @"files.search_this_mac";
 
 /*
  * files_register_defaults — registers non-NO preference defaults.
@@ -21,7 +23,7 @@ void
 files_register_defaults(void)
 {
     [NSUserDefaults.standardUserDefaults registerDefaults:@{
-        files_pref_simple_copies:  @YES,
+        files_pref_auto_fit:       @YES,
         files_pref_default_viewer: @YES,
     }];
 }
@@ -49,6 +51,18 @@ files_home_url(void)
 }
 
 /*
+ * files_icloud_drive_url — iCloud Drive folder if it exists.
+ * Inputs/output are documented in util.h.
+ */
+NSURL *
+files_icloud_drive_url(void)
+{
+    NSURL *url = [files_home_url() URLByAppendingPathComponent:
+                  @"Library/Mobile Documents/com~apple~CloudDocs" isDirectory:YES];
+    return [url checkResourceIsReachableAndReturnError:nil] ? url : nil;
+}
+
+/*
  * files_same_path — path equality after standardizing both URLs.
  * Inputs/output are documented in util.h.
  */
@@ -60,14 +74,15 @@ files_same_path(NSURL *a, NSURL *b)
 }
 
 /*
- * files_icon_for_url — git folder icon for git working trees, else the
- * Workspace icon. Inputs/output are documented in util.h.
+ * files_icon_for_url — Workspace icon, git-badged for working trees.
+ * Inputs/output are documented in util.h.
  */
 NSImage *
-files_icon_for_url(NSURL *url)
+files_icon_for_url(NSURL *url, CGFloat size)
 {
-    NSImage *git = files_is_git_repo(url) ? files_git_folder_icon() : nil;
-    return git ?: [NSWorkspace.sharedWorkspace iconForFile:url.path];
+    NSImage *icon = [NSWorkspace.sharedWorkspace iconForFile:url.path];
+    icon.size = NSMakeSize(size, size);
+    return files_is_git_repo(url) ? files_git_badged_icon(icon) : icon;
 }
 
 /*
@@ -200,6 +215,34 @@ files_format_date(NSDate *date, NSDateFormatterStyle date_style)
 }
 
 /*
+ * files_app_icon — folder.png, loaded once.
+ * Inputs/output are documented in util.h.
+ */
+NSImage *
+files_app_icon(void)
+{
+    static NSImage *icon;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        icon = [NSImage imageNamed:@"folder"];  /* Resources/folder.png */
+    });
+    return icon;
+}
+
+/*
+ * files_new_alert — NSAlert with the plain app icon.
+ * Inputs/output are documented in util.h.
+ */
+NSAlert *
+files_new_alert(void)
+{
+    NSAlert *alert = [[NSAlert alloc] init];
+    NSImage *icon  = files_app_icon();
+    if (icon) alert.icon = icon;
+    return alert;
+}
+
+/*
  * files_present_alert — alert as a sheet (or app-modal if no window).
  * Inputs/output are documented in util.h.
  */
@@ -221,7 +264,7 @@ files_present_alert(NSAlert *alert, NSWindow *window, void (^handler)(NSModalRes
 void
 files_show_error(NSString *title, NSError *err, NSWindow *window)
 {
-    NSAlert *alert        = [[NSAlert alloc] init];
+    NSAlert *alert        = files_new_alert();
     alert.messageText     = title;
     alert.informativeText = err.localizedDescription ?: @"Unknown error";
     files_present_alert(alert, window, nil);

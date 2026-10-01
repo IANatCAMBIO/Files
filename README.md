@@ -5,29 +5,37 @@ A minimalist macOS file manager written in Objective-C + AppKit.
 ## Features
 
 - List-view browser with Name, Size, Kind, Permissions and Date Modified
-  columns; click a header to sort (folders first, Finder-style name order)
-- Optional auto-fit columns (View ▸ Auto-Fit Columns) and double-height
-  rows with larger icons (View ▸ Large Rows)
+  columns; click a header to sort (folders first, Finder-style name order),
+  right-click the headers to show or hide columns (every list follows)
+- Auto-fit columns (View ▸ Auto-Fit Columns, on by default) and optional
+  double-height rows with larger icons (View ▸ Large Rows)
 - Single- or dual-pane browsing (View ▸ Dual Pane, ⇧⌘2; Tab switches panes)
 - Bookmarks bar (Home, Desktop, Downloads, Documents, Applications, Trash);
   ⌘D or the ★ button adds the current folder (before Trash, which is always
   last), right-click removes one
+- Quick Look: Space previews the selection (Space or Esc closes it; the
+  arrow keys move through the list and the preview follows)
 - Collapsible info sidebar with a Quick Look thumbnail and file details
 - Get Info panel: size, dates, owner/group, editable permissions, Locked
   flag, rename, and optional SHA-256 / MD5 checksums
-- Git folders: the top folder of a git working tree shows a GitHub folder
-  icon (light or dark to match the system appearance), and its Get Info
-  panel adds "Git folder detected", the current branch, and whether the
-  branch is pushed (compared with its upstream as of the last fetch —
-  commits ahead/behind, no upstream, detached HEAD)
+- Git folders: the top folder of a git working tree shows its usual folder
+  icon with a git badge centered on it. Inside a repository the list gains
+  a Git column that reads "tracked" for every file git tracks (including
+  newly added ones) and every folder containing one, and is blank for
+  untracked and ignored items; it updates when the index changes (add, rm,
+  commit, checkout). The repository's Get Info
+  panel adds a Git section: the current branch, whether it is pushed
+  (compared with its upstream as of the last fetch — commits
+  ahead/behind, no upstream, detached HEAD), and the remote URL (the
+  upstream's remote, else origin)
 - Copy, cut and paste, and drag and drop (moves by default; hold ⌥ to
   copy), with a progress panel (speed graph, transfer log, cancel), Keep
   Both / Replace prompts, and optional SHA-256 verification (View ▸
-  Validate Copies with SHA-256). View ▸ Simple Copies (on by default) skips
-  the panel: transfers run silently, keeping both on name clashes, and only
-  errors are shown; turn it off to get the full progress panel. Copies use APFS clones
-  when possible and keep extended attributes, tags, ACLs and dates; nothing
-  at the destination is replaced until the new copy is complete
+  Validate Copies with SHA-256). View ▸ Simple Copies (off by default)
+  skips the panel: transfers run silently, keeping both on name clashes,
+  and only errors are shown. Copies use APFS clones when possible and
+  keep extended attributes, tags, ACLs and dates; nothing at the
+  destination is replaced until the new copy is complete
 - Move to Trash, Empty Trash, New Folder and New File (File menu, right-click,
   or the toolbar's + button), inline rename (Return; the name
   without its extension is selected, ready to type)
@@ -36,13 +44,18 @@ A minimalist macOS file manager written in Objective-C + AppKit.
 - Opening a disk image (.dmg, .iso, …) mounts it and opens its volume in a
   new window; password-protected or licensed images are handed to the
   system's DiskImageMounter to ask, then open the same way
-- Spotlight search within the current folder
+- Spotlight search by name, in the current folder and its subfolders or
+  across the whole Mac (the search field's magnifying-glass menu: This
+  Folder / This Mac; the empty field shows which)
 - Live updates when the current folder changes
 - View ▸ Show Finder After Archive Operations (off by default) keeps
   Archive Utility's archive-reveal-after / dearchive-reveal-after in step
   with the menu (checked at every launch, including the first), so by
   default expanding or creating an archive does not pop open a Finder window
-- Devices menu and an All Mounts panel with per-volume unmount; at the root
+- Mounts menu: mounted volumes, then cloud storage (iCloud Drive and
+  File Provider accounts such as Google Drive); Go menu: Home, Desktop,
+  Downloads, Documents and Trash
+- An All Mounts panel with per-volume unmount; at the root
   of an unmountable volume (external disk, disk image, network share) a
   floating ⏏ button unmounts it (the status bar confirms), and any window
   showing it moves to /Volumes. If files on it are open, a sheet lists them

@@ -2,6 +2,9 @@
 #import "util.h"
 
 static NSString * const bookmarks_defaults_key = @"files.bookmarks";
+/* Set once iCloud Drive has been added to a saved bookmark list, so a user
+ * who later removes it does not get it back. */
+static NSString * const bookmarks_icloud_key   = @"files.bookmarks.icloud_added";
 static const CGFloat btn_gap     = 4.0;
 static const CGFloat btn_pad_left = 4.0;
 static const CGFloat star_btn_w   = 26.0;
@@ -39,18 +42,20 @@ init_with_frame:(NSRect)frame
 
 /*
  * load_bookmarks — fills _bookmarks from NSUserDefaults, or initialises
- * defaults (Home, Desktop, Downloads, Documents, Applications, Trash).
- * Trash is always the last bookmark: the saved list is rewritten only in
- * the rare case where it is missing or not last, so a normal launch does
- * no extra work and writes nothing.
+ * defaults (Home, Desktop, Downloads, Documents, Applications, iCloud
+ * Drive when set up, Trash). A saved list from before iCloud Drive was a
+ * default gets it once, before Trash. Trash is always the last bookmark.
+ * The saved list is rewritten only when one of these repairs changes it,
+ * so a normal launch does no extra work and writes nothing.
  */
 - (void)
 load_bookmarks
 {
-    NSURL *trash = files_directory_url(NSTrashDirectory);
+    NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
+    NSURL *trash  = files_directory_url(NSTrashDirectory);
+    NSURL *icloud = files_icloud_drive_url();
 
-    NSArray<NSString *> *saved =
-        [NSUserDefaults.standardUserDefaults arrayForKey:bookmarks_defaults_key];
+    NSArray<NSString *> *saved = [ud arrayForKey:bookmarks_defaults_key];
     if (saved.count == 0) {
         _bookmarks = [@[
             files_home_url(),
@@ -58,8 +63,10 @@ load_bookmarks
             files_directory_url(NSDownloadsDirectory),
             files_directory_url(NSDocumentDirectory),
             files_directory_url(NSApplicationDirectory),
-            trash,
         ] mutableCopy];
+        if (icloud) [_bookmarks addObject:icloud];
+        [_bookmarks addObject:trash];
+        [ud setBool:YES forKey:bookmarks_icloud_key];
         return;
     }
 
@@ -67,13 +74,25 @@ load_bookmarks
     for (NSString *path in saved) {
         [_bookmarks addObject:[NSURL fileURLWithPath:path]];
     }
-    if (files_same_path(_bookmarks.lastObject, trash)) return;
 
-    NSIndexSet *trash_rows = [_bookmarks indexesOfObjectsPassingTest:
-        ^BOOL(NSURL *u, NSUInteger idx, BOOL *stop) { return files_same_path(u, trash); }];
-    [_bookmarks removeObjectsAtIndexes:trash_rows];
-    [_bookmarks addObject:trash];
-    [self persist_bookmarks];
+    BOOL changed = NO;
+    if (!files_same_path(_bookmarks.lastObject, trash)) {
+        NSIndexSet *trash_rows = [_bookmarks indexesOfObjectsPassingTest:
+            ^BOOL(NSURL *u, NSUInteger idx, BOOL *stop) { return files_same_path(u, trash); }];
+        [_bookmarks removeObjectsAtIndexes:trash_rows];
+        [_bookmarks addObject:trash];
+        changed = YES;
+    }
+    if (icloud && ![ud boolForKey:bookmarks_icloud_key]) {
+        [ud setBool:YES forKey:bookmarks_icloud_key];
+        NSUInteger have = [_bookmarks indexOfObjectPassingTest:
+            ^BOOL(NSURL *u, NSUInteger idx, BOOL *stop) { return files_same_path(u, icloud); }];
+        if (have == NSNotFound) {
+            [_bookmarks insertObject:icloud atIndex:_bookmarks.count - 1];
+            changed = YES;
+        }
+    }
+    if (changed) [self persist_bookmarks];
 }
 
 /*
@@ -160,17 +179,19 @@ rebuild_buttons
         } else if (is_trash) {
             name = @"Trash";
         } else {
-            name = url.lastPathComponent;
+            /* The name Finder shows: "iCloud Drive", not com~apple~CloudDocs. */
+            NSString *localized = nil;
+            [url getResourceValue:&localized forKey:NSURLLocalizedNameKey error:nil];
+            name = localized ?: url.lastPathComponent;
         }
 
         NSImage *icon;
         if (is_trash) {
-            icon = [NSImage imageNamed:NSImageNameTrashEmpty];
+            icon = [[NSImage imageNamed:NSImageNameTrashEmpty] copy];
+            icon.size = NSMakeSize(14, 14);
         } else {
-            icon = files_icon_for_url(url);
+            icon = files_icon_for_url(url, 14);
         }
-        icon = [icon copy];
-        icon.size = NSMakeSize(14, 14);
 
         NSButton *btn = [[NSButton alloc] init];
         btn.title         = name;

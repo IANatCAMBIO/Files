@@ -280,7 +280,7 @@ files_default_viewer_choose(BOOL files, NSWindow *window, void (^finished)(void)
         [defaults setBool:files forKey:files_pref_default_viewer];
         [defaults setBool:!files forKey:files_pref_archive_reveal];
         files_default_viewer_sync(^(BOOL ok) {
-            NSAlert *done = [[NSAlert alloc] init];
+            NSAlert *done = files_new_alert();
             if (!ok) {
                 done.messageText     = files ? @"Some settings could not be changed"
                                              : @"Some settings could not be restored";
@@ -305,7 +305,7 @@ files_default_viewer_choose(BOOL files, NSWindow *window, void (^finished)(void)
         return;
     }
 
-    NSAlert *alert = [[NSAlert alloc] init];
+    NSAlert *alert = files_new_alert();
     alert.messageText     = @"Restore Finder as the default file viewer?";
     alert.informativeText = @"\"Show in Finder\" requests and opened folders will go to Finder "
                              "again, and the settings Files changed (desktop icons, Finder's "

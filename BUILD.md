@@ -21,6 +21,7 @@ No third-party libraries. All dependencies are Apple system frameworks:
 | Cocoa           | AppKit (UI), Foundation (collections, URLs)  |
 | CoreServices    | FSEventStream for folder watching            |
 | QuickLookThumbnailing | Thumbnails in the info sidebar         |
+| Quartz          | Quick Look panel (Space in the file list)    |
 | UniformTypeIdentifiers | Per-file-type icon lookup (icon cache) |
 | ServiceManagement | Login item for Keep Files running (`SMAppService`) |
 
@@ -50,8 +51,7 @@ files.app/
     ├── MacOS/
     │   └── files          ← compiled binary
     └── Resources/
-        ├── folder.png, documents.png, ribbon.png
-        └── gh_folder_light.icns, gh_folder_dark.icns  ← git folder icon
+        └── folder.png, documents.png, ribbon.png, git96.png  ← git badge
 ```
 
 The Makefile copies every `.png` and `.icns` in `images/` into `Resources/`,
@@ -92,7 +92,7 @@ a no-op `make`.
 src/
 ├── main.m                  — entry point
 ├── app_delegate.h/.m       — app lifecycle (incl. Keep Files running and
-│                             its login item), menu bar, Devices menu
+│                             its login item), menu bar, Mounts menu
 ├── main_window.h/.m        — window controller: toolbar, split views, pane
 │                             switching, Go-menu and view-preference actions
 ├── browser_pane.h/.m       — one pane: browser view + per-pane state

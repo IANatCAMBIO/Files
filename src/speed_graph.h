@@ -3,27 +3,29 @@
 /*
  * FilesSpeedGraph — NSView that draws a transfer speed graph.
  *
- * Draws a filled green area for the (EMA-smoothed) instantaneous speed and a
- * horizontal reference line marking the running average; the Y axis scales
- * to the largest sample.
+ * Draws a filled green area for the transfer rate over time and a
+ * horizontal line, labelled on the right, at the average rate. Both come
+ * from the same data — the bytes moved in each sampling interval — so the
+ * average line is exactly the time-weighted mean of the plotted area and
+ * always lies within it. The Y axis scales to the largest plotted rate.
  *
- * The whole transfer stays visible with bounded memory: samples go into a
- * fixed-capacity buffer, and when it fills, adjacent pairs are merged (keeping
- * the larger value) so each slot covers twice as many samples as before.
- * Long transfers therefore lose time resolution, never history or peaks.
+ * The whole transfer stays visible with bounded memory: intervals go into
+ * a fixed-capacity buffer, and when it fills, adjacent pairs are merged
+ * (bytes and seconds summed) so each slot covers twice as much time as
+ * before. Long transfers therefore lose time resolution, never history.
  *
- * Call add_sample:average: on the main thread each time a new measurement
- * arrives. The view redraws automatically after each sample.
+ * Call add_bytes:seconds: on the main thread once per sampling interval;
+ * the view redraws after each.
  */
 @interface FilesSpeedGraph : NSView
 
 /*
- * add_sample:average: — record a new speed measurement.
+ * add_bytes:seconds: — record one sampling interval.
  *
  * Inputs:
- *   bps     — instantaneous bytes per second (sliding window)
- *   avg_bps — running average bytes per second since copy started
+ *   bytes   — bytes transferred during the interval (≥ 0)
+ *   seconds — length of the interval; ignored unless > 0
  */
-- (void)add_sample:(double)bps average:(double)avg_bps;
+- (void)add_bytes:(int64_t)bytes seconds:(double)seconds;
 
 @end

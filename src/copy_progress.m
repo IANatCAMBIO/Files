@@ -3,9 +3,12 @@
 #import "speed_graph.h"
 #import "util.h"
 
-/* Minimum time between progress updates sent to the main queue, and between
- * speed samples; the engine reports every 1 MB, far more often on fast disks. */
+/* Minimum time between progress updates sent to the main queue; the engine
+ * reports every 1 MB, far more often on fast disks. */
 static const CFTimeInterval progress_interval = 0.1;
+
+/* The speed graph gets one interval (bytes moved, time taken) this often. */
+static const CFTimeInterval graph_interval = 0.25;
 
 static const CGFloat log_height    = 160.0; /* extra window height for the transfer log */
 static const CGFloat log_gap       = 8.0;   /* space above and below the log */
@@ -15,38 +18,6 @@ static const CGFloat button_margin = 12.0;  /* Cancel/Close inset from bottom an
  * extra lines have accumulated, the oldest are dropped in one edit. */
 static const NSUInteger log_max_lines  = 1000;
 static const NSUInteger log_trim_batch = 100;
-
-/* ── Speed sliding-window state ─────────────────────────────────────────── */
-
-/* Samples in the sliding window; samples are at least progress_interval
- * apart, so the window spans at least ~1.5 s of transfer. */
-enum { speed_ring_len = 16 };
-
-/*
- * speed_sample_t — one point of the speed sliding window.
- *
- * Fields:
- *   timestamp  — CFAbsoluteTime taken on the copy thread when reported
- *   total_done — bytes copied across the whole operation at that time
- */
-typedef struct {
-    CFAbsoluteTime timestamp;
-    int64_t        total_done;
-} speed_sample_t;
-
-/*
- * speed_ring_t — circular buffer of the last speed_ring_len samples.
- *
- * Fields:
- *   samples — sample storage
- *   head    — index the next sample is written to
- *   count   — valid samples (≤ speed_ring_len)
- */
-typedef struct {
-    speed_sample_t samples[speed_ring_len];
-    int            head;
-    int            count;
-} speed_ring_t;
 
 /* ── FilesCopyProgress implementation ───────────────────────────────────── */
 
@@ -64,29 +35,39 @@ typedef struct {
 
 @implementation FilesCopyProgress {
     atomic_int         _cancel;       /* non-zero = abort; address passed to the engine */
-    speed_ring_t       _speed;        /* speed sliding window (main thread only) */
+    NSTimer           *_graph_timer;  /* feeds the speed graph every graph_interval */
+    int64_t            _graph_bytes;  /* _total_done when the graph was last fed */
+    CFAbsoluteTime     _graph_time;   /* when the graph was last fed */
     NSString          *_dest_name;    /* destination folder name for labels */
+    NSString          *_ing;          /* "Copying" or "Moving", for the panel's text */
+    NSString          *_ed;           /* "Copied" or "Moved" */
+    NSString          *_noun;         /* "copy" or "move" */
     NSString          *_cur_name;     /* file most recently reported by the engine */
     int64_t            _total_done;   /* bytes copied so far across all files */
     CFAbsoluteTime     _start_time;   /* set when the copy is started */
     FilesCopyProgress *_self_ref;     /* retains self while window is on screen */
     NSUInteger         _log_lines;    /* lines currently in the transfer log */
+    NSMutableArray<NSString *> *_pending_log; /* engine lines awaiting the next tick */
     BOOL               _log_expanded; /* YES when the transfer log panel is open */
 }
 
 /* ── Panel construction ─────────────────────────────────────────────────── */
 
 /*
- * init_with_dest: — build the progress panel.
+ * init_with_dest:is_cut: — build the progress panel. Its text says
+ * "Moving"/"Moved"/"move" for a move and "Copying"/"Copied"/"copy"
+ * otherwise.
  *
  * Inputs:
- *   dest — destination directory URL
+ *   dest   — destination directory URL
+ *   is_cut — YES for a move
  *
  * Output: configured window controller or nil.
  */
 - (instancetype)
-init_with_dest:(NSURL *)dest
+init_with_dest:(NSURL *)dest is_cut:(BOOL)is_cut
 {
+    NSString *ing = is_cut ? @"Moving" : @"Copying";
     NSPanel *panel = [[NSPanel alloc]
         initWithContentRect:NSMakeRect(0, 0, 460, 210)
                   styleMask:NSWindowStyleMaskTitled
@@ -94,7 +75,7 @@ init_with_dest:(NSURL *)dest
                            | NSWindowStyleMaskUtilityWindow
                     backing:NSBackingStoreBuffered
                       defer:NO];
-    panel.title                  = @"Copying...";
+    panel.title                  = [ing stringByAppendingString:@"..."];
     panel.worksWhenModal         = YES;
     panel.becomesKeyOnlyIfNeeded = YES;
 
@@ -103,6 +84,9 @@ init_with_dest:(NSURL *)dest
 
     atomic_init(&_cancel, 0);
     _dest_name = dest.lastPathComponent;
+    _ing       = ing;
+    _ed        = is_cut ? @"Moved" : @"Copied";
+    _noun      = is_cut ? @"move"  : @"copy";
     _cur_name  = @"";
     _self_ref  = self;  /* broken in windowWillClose: */
 
@@ -131,7 +115,7 @@ build_views
     /* Status line */
     y -= 14;
     self.status_label = [NSTextField labelWithString:
-        [NSString stringWithFormat:@"Copying to \"%@\"...", _dest_name]];
+        [NSString stringWithFormat:@"%@ to \"%@\"...", _ing, _dest_name]];
     self.status_label.frame            = NSMakeRect(12, y, w - 24, 14);
     self.status_label.font             = [NSFont systemFontOfSize:12.0];
     self.status_label.lineBreakMode    = NSLineBreakByTruncatingMiddle;
@@ -261,18 +245,15 @@ toggle_log:(id)sender
 }
 
 /*
- * append_log: — append a timestamped line to the transfer log text view.
- *
- * Keeps at most log_max_lines lines: when log_trim_batch lines beyond that
- * have accumulated, the oldest ones are deleted from the start of the text
- * storage in a single edit. Scrolls to the new line only while the log is
- * expanded. Must be called on the main thread.
+ * stamped — line prefixed with the current time, as the log shows it.
  *
  * Inputs:
- *   line — text to append (no trailing newline needed)
+ *   line — log text
+ *
+ * Output: "[HH:mm:ss] line".
  */
-- (void)
-append_log:(NSString *)line
+static NSString *
+stamped(NSString *line)
 {
     static NSDateFormatter *fmt;
     static dispatch_once_t  once;
@@ -280,14 +261,33 @@ append_log:(NSString *)line
         fmt = [[NSDateFormatter alloc] init];
         fmt.dateFormat = @"HH:mm:ss";
     });
+    return [NSString stringWithFormat:@"[%@] %@", [fmt stringFromDate:NSDate.date], line];
+}
+
+/*
+ * append_log_lines: — append already-timestamped lines to the transfer log
+ * text view in one edit.
+ *
+ * Keeps at most log_max_lines lines: when log_trim_batch lines beyond that
+ * have accumulated, the oldest ones are deleted from the start of the text
+ * storage in a single edit. Scrolls to the end only while the log is
+ * expanded. Must be called on the main thread.
+ *
+ * Inputs:
+ *   lines — lines from stamped(), without trailing newlines
+ */
+- (void)
+append_log_lines:(NSArray<NSString *> *)lines
+{
+    if (lines.count == 0) return;
     NSTextStorage *ts  = self.log_text.textStorage;
     NSString      *sep = ts.length ? @"\n" : @"";
 
     [ts beginEditing];
     [ts replaceCharactersInRange:NSMakeRange(ts.length, 0)
-                      withString:[NSString stringWithFormat:@"%@[%@] %@",
-                                  sep, [fmt stringFromDate:NSDate.date], line]];
-    _log_lines++;
+                      withString:[sep stringByAppendingString:
+                                  [lines componentsJoinedByString:@"\n"]]];
+    _log_lines += lines.count;
 
     if (_log_lines > log_max_lines + log_trim_batch) {
         NSString  *text  = ts.string;
@@ -307,71 +307,100 @@ append_log:(NSString *)line
 }
 
 /*
- * show_progress:file_total:total_done:time: — apply one throttled progress
- * report to the panel. Updates the status label and logs the file when the
- * file name changes; adds a speed-graph sample when at least
- * progress_interval has passed since the previous one. Main thread only.
+ * append_log: — append one line to the transfer log now, timestamped.
+ * Main thread only.
+ *
+ * Inputs:
+ *   line — text to append (no trailing newline needed)
+ */
+- (void)
+append_log:(NSString *)line
+{
+    [self flush_log];  /* keep engine lines that arrived earlier in order */
+    [self append_log_lines:@[stamped(line)]];
+}
+
+/*
+ * queue_log: — timestamps an engine log line and holds it for the next
+ * flush_log, so a copy of thousands of small files costs one text edit per
+ * tick instead of one per line. Main thread only.
+ *
+ * Inputs:
+ *   line — engine log text
+ */
+- (void)
+queue_log:(NSString *)line
+{
+    if (!_pending_log) _pending_log = [NSMutableArray array];
+    [_pending_log addObject:stamped(line)];
+}
+
+/*
+ * flush_log — appends the queued engine lines to the log. Main thread only.
+ */
+- (void)
+flush_log
+{
+    if (_pending_log.count == 0) return;
+    NSArray<NSString *> *lines = _pending_log;
+    _pending_log = nil;
+    [self append_log_lines:lines];
+}
+
+/*
+ * show_progress:total_done: — apply one throttled progress
+ * report to the panel: records the byte count (feed_graph reads it) and
+ * updates the status label when the file name changes (the engine logs
+ * each file itself). Main thread only.
  *
  * Inputs:
  *   name       — current file name
- *   file_total — size of the current file in bytes
  *   total_done — bytes copied across all files so far
- *   now        — CFAbsoluteTime at which the engine reported this progress
  */
 - (void)
-show_progress:(NSString *)name
-   file_total:(int64_t)file_total
-   total_done:(int64_t)total_done
-         time:(CFAbsoluteTime)now
+show_progress:(NSString *)name total_done:(int64_t)total_done
 {
     _total_done = total_done;
 
     if (![name isEqualToString:_cur_name]) {
         _cur_name = name;
         self.status_label.stringValue = [NSString stringWithFormat:
-            @"Copying \"%@\" to %@", name, _dest_name];
-        if (name.length) {
-            [self append_log:file_total > 0
-                ? [NSString stringWithFormat:@"-> %@ (%@)", name,
-                   files_format_bytes(file_total)]
-                : [NSString stringWithFormat:@"-> %@", name]];
-        }
+            @"%@ \"%@\" to %@", _ing, name, _dest_name];
     }
+}
 
-    /* Speed via sliding window over time-spaced samples */
-    speed_ring_t *spd = &_speed;
-    if (spd->count > 0) {
-        int newest = (spd->head - 1 + speed_ring_len) % speed_ring_len;
-        if (now - spd->samples[newest].timestamp < progress_interval) return;
-    }
-    spd->samples[spd->head] = (speed_sample_t){now, total_done};
-    spd->head               = (spd->head + 1) % speed_ring_len;
-    if (spd->count < speed_ring_len) spd->count++;
+/*
+ * feed_graph — gives the speed graph the interval since it was last fed:
+ * the bytes copied in it and its length, and flushes the queued log lines.
+ * Called every graph_interval while copying, and once more when the copy
+ * ends, so the graph's intervals add up to the whole copy and its average
+ * line equals total bytes / elapsed.
+ */
+- (void)
+feed_graph
+{
+    [self flush_log];
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    [self.speed_graph add_bytes:_total_done - _graph_bytes seconds:now - _graph_time];
+    _graph_bytes = _total_done;
+    _graph_time  = now;
+}
 
-    double bps = 0;
-    if (spd->count >= 2) {
-        int oldest = (spd->head - spd->count + speed_ring_len) % speed_ring_len;
-        int newest = (spd->head - 1 + speed_ring_len) % speed_ring_len;
-        CFTimeInterval dt = spd->samples[newest].timestamp
-                          - spd->samples[oldest].timestamp;
-        int64_t        db = spd->samples[newest].total_done
-                          - spd->samples[oldest].total_done;
-        if (dt > 0.01) bps = (double)db / dt;
-    }
-
-    /* Running average: total bytes transferred / elapsed wall time */
-    CFTimeInterval elapsed = now - _start_time;
-    double avg_bps = (elapsed > 0.001 && total_done > 0)
-                   ? (double)total_done / elapsed : 0.0;
-
-    [self.speed_graph add_sample:bps average:avg_bps];
+/*
+ * stop_graph_timer — stops feeding the speed graph.
+ */
+- (void)
+stop_graph_timer
+{
+    [_graph_timer invalidate];
+    _graph_timer = nil;
 }
 
 /*
  * finish_with_error:hash_results: — show the final state after the copy
  * ends: logs the error and per-file hash results, sets the status line,
- * switches the button to "Close", adds a final average-speed graph sample
- * (so single-chunk copies still show something) and shows elapsed time.
+ * switches the button to "Close", feeds the graph its last interval and
+ * shows elapsed time.
  *
  * Inputs:
  *   err          — engine error, or nil on success
@@ -385,17 +414,13 @@ finish_with_error:(NSError *)err
     if (err) {
         [self append_log:[NSString stringWithFormat:@"✗ %@", err.localizedDescription]];
     }
-    for (NSURL *url in hash_results) {
-        BOOL match = [hash_results[url] boolValue];
-        if (!match) all_ok = NO;
-        [self append_log:[NSString stringWithFormat:@"%@ SHA256 Validation: %@ [%@]",
-            match ? @"✓" : @"✗", url.lastPathComponent,
-            match ? @"PASSED" : @"FAILED"]];
+    for (NSURL *url in hash_results) {   /* the engine logged each digest */
+        if (![hash_results[url] boolValue]) all_ok = NO;
     }
     self.status_label.stringValue = all_ok
-        ? [NSString stringWithFormat:@"Copied \"%@\" to %@",
+        ? [NSString stringWithFormat:@"%@ \"%@\" to %@", _ed,
            _cur_name.length ? _cur_name : @"files", _dest_name]
-        : @"Copy failed.";
+        : [NSString stringWithFormat:@"%@ failed.", _noun.capitalizedString];
 
     self.cancel_button.title         = @"Close";
     self.cancel_button.action        = @selector(close_clicked:);
@@ -407,12 +432,15 @@ finish_with_error:(NSError *)err
 
     double avg_bps = (_total_done > 0) ? (double)_total_done / elapsed : 0.0;
 
+    /* A move by rename copies no data, so it has no speed to report. */
+    NSString *rate = _total_done > 0
+        ? [NSString stringWithFormat:@"avg %@, ", files_format_rate(avg_bps)] : @"";
     [self append_log:all_ok
-        ? [NSString stringWithFormat:@"✓ Done — avg %@, %.1f sec total",
-           files_format_rate(avg_bps), elapsed]
-        : @"✗ Copy failed"];
+        ? [NSString stringWithFormat:@"✓ Done — %@%.1f sec total", rate, elapsed]
+        : [NSString stringWithFormat:@"✗ %@ failed", _noun.capitalizedString]];
 
-    [self.speed_graph add_sample:avg_bps average:avg_bps];
+    [self stop_graph_timer];
+    [self feed_graph];
 
     if (elapsed < 1.0) {
         self.elapsed_label.stringValue =
@@ -465,7 +493,7 @@ completion:(void (^)(NSError *))completion
         return;
     }
 
-    FilesCopyProgress *panel = [[FilesCopyProgress alloc] init_with_dest:dest];
+    FilesCopyProgress *panel = [[FilesCopyProgress alloc] init_with_dest:dest is_cut:is_cut];
     [panel showWindow:nil];
     [panel start_copy:srcs to:dest is_cut:is_cut
         hash_validate:hash_validate completion:completion];
@@ -502,13 +530,18 @@ completion:(void (^)(NSError *))completion
     FilesCopyProgress *alive = self;
     __weak FilesCopyProgress *weak_self = self;
 
-    _start_time = CFAbsoluteTimeGetCurrent();
+    _start_time  = CFAbsoluteTimeGetCurrent();
+    _graph_time  = _start_time;
+    _graph_bytes = 0;
+    _graph_timer = [NSTimer timerWithTimeInterval:graph_interval repeats:YES
+                                            block:^(NSTimer *t) { [weak_self feed_graph]; }];
+    [NSRunLoop.mainRunLoop addTimer:_graph_timer forMode:NSRunLoopCommonModes];
 
     NSString *src_desc = srcs.count == 1
         ? [NSString stringWithFormat:@"\"%@\"", srcs.firstObject.lastPathComponent]
         : [NSString stringWithFormat:@"%lu files", (unsigned long)srcs.count];
-    [self append_log:[NSString stringWithFormat:@"Copying %@ -> %@%@",
-        src_desc, _dest_name, hash_validate ? @" (SHA256)" : @""]];
+    [self append_log:[NSString stringWithFormat:@"%@ %@ -> %@%@",
+        _ing, src_desc, _dest_name, hash_validate ? @" (SHA256)" : @""]];
 
     __block CFAbsoluteTime last_sent = 0;  /* copy thread only */
     FileCopyProgressBlock progress = ^(NSString *name, int64_t f_done, int64_t f_total,
@@ -520,13 +553,19 @@ completion:(void (^)(NSError *))completion
         }
         last_sent = now;
         dispatch_async(dispatch_get_main_queue(), ^{
-            [weak_self show_progress:name file_total:f_total total_done:t_done time:now];
+            [weak_self show_progress:name total_done:t_done];
+        });
+    };
+
+    FileCopyLogBlock log = ^(NSString *line) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weak_self queue_log:line];
         });
     };
 
     [FilesFileOps run_copy_srcs:srcs to:dest is_cut:is_cut
                   hash_validate:hash_validate conflict:[self make_conflict_block]
-                    cancel_flag:&_cancel progress:progress
+                    cancel_flag:&_cancel progress:progress log:log
                      completion:^(NSError *err, NSDictionary<NSURL *, NSNumber *> *hash_results)
     {
         /* Called on main queue. alive keeps _cancel valid until here. */
@@ -571,12 +610,13 @@ make_conflict_block
                 dispatch_semaphore_signal(sem);
                 return;
             }
-            NSAlert *alert = [[NSAlert alloc] init];
+            NSAlert *alert = files_new_alert();
             alert.messageText =
                 [NSString stringWithFormat:@"\"%@\" already exists in this location.",
                  dst.lastPathComponent];
             alert.informativeText =
-                @"Keep both files, replace the existing one, or stop the copy?";
+                [NSString stringWithFormat:@"Keep both files, replace the existing one, "
+                                           @"or stop the %@?", p->_noun];
             [alert addButtonWithTitle:@"Keep Both"];
             [alert addButtonWithTitle:@"Replace"];
             [alert addButtonWithTitle:@"Cancel"];
@@ -612,7 +652,8 @@ cancel_clicked:(id)sender
 
 /*
  * windowWillClose: — set cancel flag so any in-flight copy drains cleanly,
- * and drop the self-reference that kept the panel alive while on screen.
+ * stop feeding the graph, and drop the self-reference that kept the panel
+ * alive while on screen.
  *
  * Inputs:
  *   n — NSWindowWillCloseNotification
@@ -621,6 +662,7 @@ cancel_clicked:(id)sender
 windowWillClose:(NSNotification *)n
 {
     atomic_store(&_cancel, 1);
+    [self stop_graph_timer];
     _self_ref = nil;
 }
 

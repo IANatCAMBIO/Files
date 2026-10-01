@@ -9,18 +9,23 @@
 /* ── NSUserDefaults keys (BOOL preferences) ─────────────────────────────── */
 
 extern NSString * const files_pref_show_hidden;     /* list dotfiles/hidden items */
-extern NSString * const files_pref_auto_fit;        /* auto-fit table columns */
+extern NSString * const files_pref_auto_fit;        /* auto-fit table columns (default on) */
 extern NSString * const files_pref_hash_validation; /* SHA-256 verify copies */
 extern NSString * const files_pref_show_hashes;     /* hashes in Get Info */
 extern NSString * const files_pref_large_rows;      /* double-height file rows */
-extern NSString * const files_pref_simple_copies;   /* copy/move without the progress panel (default on) */
+extern NSString * const files_pref_simple_copies;   /* copy/move without the progress panel */
 extern NSString * const files_pref_archive_reveal;  /* Archive Utility reveals results in Finder */
 extern NSString * const files_pref_default_viewer;  /* Files replaces Finder as file viewer (default on) */
 extern NSString * const files_pref_keep_running;    /* stay running with no windows; open at login */
+extern NSString * const files_pref_search_this_mac; /* search the whole Mac, not the current folder */
+
+/* NSUserDefaults key (array of column identifiers): file-list columns the
+ * user has hidden from the column-header menu. Absent = all shown. */
+extern NSString * const files_pref_hidden_columns;
 
 /*
  * files_register_defaults — registers the default value of every preference
- * whose default is not NO (currently: Simple Copies and Files as the
+ * whose default is not NO (currently: Auto-Fit Columns and Files as the
  * default file viewer on). A value the user
  * has set is never overridden. Call once at launch, before anything reads
  * preferences.
@@ -47,6 +52,14 @@ NSURL *files_directory_url(NSSearchPathDirectory dir);
 NSURL *files_home_url(void);
 
 /*
+ * files_icloud_drive_url — the user's iCloud Drive folder
+ * (~/Library/Mobile Documents/com~apple~CloudDocs).
+ *
+ * Output: folder URL, or nil if iCloud Drive is not set up on this Mac.
+ */
+NSURL *files_icloud_drive_url(void);
+
+/*
  * files_same_path — YES if a and b name the same file-system path, ignoring
  * differences NSURL -isEqual: is sensitive to (trailing slash, "..", base URL).
  *
@@ -58,17 +71,17 @@ NSURL *files_home_url(void);
 BOOL files_same_path(NSURL *a, NSURL *b);
 
 /*
- * files_icon_for_url — the icon Files shows for an item: the git folder
- * icon (light or dark to match the appearance) for the top folder of a git
- * working tree, otherwise the Workspace icon (custom icons included). The
- * caller owns the image and may resize it. Main thread.
+ * files_icon_for_url — the icon Files shows for an item at a given size:
+ * the Workspace icon (custom icons included), with the git badge centered
+ * on it for the top folder of a git working tree. Main thread.
  *
  * Inputs:
- *   url — file URL of the item
+ *   url  — file URL of the item
+ *   size — edge length in points
  *
- * Output: NSImage (never nil).
+ * Output: new NSImage of size×size (never nil); the caller owns it.
  */
-NSImage *files_icon_for_url(NSURL *url);
+NSImage *files_icon_for_url(NSURL *url, CGFloat size);
 
 /*
  * files_run_tool — runs a command-line tool with stdin and stderr at
@@ -153,6 +166,24 @@ NSString *files_format_rate(double bytes_per_sec);
  * Output: formatted string.
  */
 NSString *files_format_date(NSDate *date, NSDateFormatterStyle date_style);
+
+/*
+ * files_app_icon — Files' icon as drawn: folder.png from the app bundle.
+ * macOS 26 shows a bundle icon that is not its rounded-square shape on a
+ * grey rounded-square backdrop, in alerts and the About panel too; handing
+ * them this image explicitly shows just the folder. Loaded once.
+ *
+ * Output: shared NSImage, or nil if folder.png is missing.
+ */
+NSImage *files_app_icon(void);
+
+/*
+ * files_new_alert — a new NSAlert showing files_app_icon() instead of the
+ * backdropped app icon. Every alert in Files is made with this.
+ *
+ * Output: NSAlert (never nil).
+ */
+NSAlert *files_new_alert(void);
 
 /*
  * files_present_alert — shows alert as a sheet on window when given,

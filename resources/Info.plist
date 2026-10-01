@@ -24,6 +24,10 @@
     <string>14.0</string>
     <key>NSSupportsAutomaticTermination</key>
     <false/>
+    <!-- Shown when Files first asks Finder to empty the Trash
+         (FilesFileOps empty_trash_with_finder:). -->
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Files asks Finder to empty the Trash when it holds apps or other items that only Finder may delete.</string>
     <key>NSRequiresAquaSystemAppearance</key>
     <false/>
     <key>CFBundleIconFile</key>

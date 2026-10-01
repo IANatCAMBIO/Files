@@ -69,6 +69,24 @@ typedef void (^FileCopyProgressBlock)(NSString *current_file,
                                        int64_t   total_done);
 
 /*
+ * FileCopyLogBlock — transfer-log callback for copies and moves.
+ *
+ * Called on the background copy queue with one human-readable line per
+ * step, naming files by their full paths as they are at that moment —
+ * including the hidden staging item an item is copied into: each file
+ * started and finished ("15,000 bytes of 15,000 bytes copied", noting
+ * APFS clones), each SHA-256 being computed and then its digest, for the
+ * source and the copy, and whether they match, conflict decisions, every
+ * rename (staging item into place, an existing item set aside, a
+ * same-volume move) and every deletion (a replaced item, a staging item
+ * after a failure, the original after a move across volumes).
+ *
+ * Parameters:
+ *   line — log text, without timestamp or trailing newline
+ */
+typedef void (^FileCopyLogBlock)(NSString *line);
+
+/*
  * FilesConflictResolution — outcome of a per-item conflict prompt.
  * Overwrite replaces the existing file or folder only after the new item has
  * been fully copied (and verified, if requested).
@@ -91,7 +109,7 @@ typedef NS_ENUM(NSInteger, FilesConflictResolution) {
 typedef FilesConflictResolution (^FilesConflictBlock)(NSURL *src, NSURL *dst);
 
 /*
- * run_copy_srcs:to:is_cut:hash_validate:conflict:cancel_flag:progress:completion: —
+ * run_copy_srcs:to:is_cut:hash_validate:conflict:cancel_flag:progress:log:completion: —
  * core copy engine; takes source URLs directly (not from pasteboard).
  *
  * Runs on a background queue; calls completion on the main queue.
@@ -110,6 +128,7 @@ typedef FilesConflictResolution (^FilesConflictBlock)(NSURL *src, NSURL *dst);
  *   conflict      — called when a destination item already exists; nil = keep both
  *   cancel_flag   — set to non-zero (atomic_store) to abort; may be NULL
  *   progress      — progress callback; may be nil
+ *   log           — transfer-log callback; may be nil
  *   completion    — called on main queue with error and hash_results dict
  */
 + (void)run_copy_srcs:(NSArray<NSURL *> *)srcs
@@ -119,6 +138,7 @@ typedef FilesConflictResolution (^FilesConflictBlock)(NSURL *src, NSURL *dst);
              conflict:(FilesConflictBlock)conflict
           cancel_flag:(atomic_int *)cancel_flag
              progress:(FileCopyProgressBlock)progress
+                  log:(FileCopyLogBlock)log
            completion:(void (^)(NSError *err,
                                 NSDictionary<NSURL *, NSNumber *> *hash_results))completion;
 
@@ -159,5 +179,41 @@ typedef FilesConflictResolution (^FilesConflictBlock)(NSURL *src, NSURL *dst);
 + (void)rename_url:(NSURL *)url
                 to:(NSString *)new_name
         completion:(void (^)(NSURL *, NSError *))completion;
+
+/*
+ * empty_trash: — permanently deletes everything in the user's Trash
+ * (~/.Trash, dotfiles included) on a background queue. Like Finder, it
+ * deletes locked items and folders the user cannot write to: each item's
+ * tree is walked without following symbolic links, lock flags (uchg,
+ * uappnd) are cleared and folders get owner rwx before their contents are
+ * removed. Items it still cannot delete — typically ones owned by root or
+ * another user — are left in place and reported.
+ *
+ * Inputs:
+ *   completion — called on the main queue with the Trash items that could
+ *                not be fully deleted and, parallel to them, one line each
+ *                ("name — reason", naming the inner path when that is what
+ *                failed); both empty if the Trash is now empty
+ */
++ (void)empty_trash:(void (^)(NSArray<NSURL *> *failed,
+                              NSArray<NSString *> *reasons))completion;
+
+/*
+ * empty_trash_with_finder: — asks Finder to empty the Trash (the AppleScript
+ * `empty trash` command) for items Files itself may not delete: other
+ * developers' apps, which macOS's App Management protection reserves for
+ * Finder, and items owned by root, for which Finder asks for an
+ * administrator's password. Commands run as root from Files cannot do
+ * this: macOS attributes them to a system helper, which has neither App
+ * Management nor access to the Trash. The first use makes macOS ask
+ * whether Files may control Finder (NSAppleEventsUsageDescription).
+ *
+ * Inputs:
+ *   completion — called on the main queue with nil when Finder finished,
+ *                or a user-facing explanation of why it could not (Files
+ *                not allowed to control Finder, password prompt
+ *                cancelled, Finder's own error)
+ */
++ (void)empty_trash_with_finder:(void (^)(NSString *error))completion;
 
 @end

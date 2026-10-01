@@ -4,6 +4,8 @@
 #include <string.h>
 #include <unistd.h>
 
+static NSString * const git_tool = @"/usr/bin/git";
+
 /*
  * files_is_git_repo — directory, not a package, with a .git entry.
  * Inputs/output are documented in git_info.h.
@@ -21,44 +23,151 @@ files_is_git_repo(NSURL *url)
 }
 
 /*
- * load_bundle_icns — loads name.icns from the app bundle (all sizes).
- *
- * Inputs:
- *   name — resource name without extension
- *
- * Output: image, or nil if the file is missing or unreadable.
+ * files_git_work_tree — walk up from dir to the first folder with .git.
+ * Inputs/output are documented in git_info.h.
  */
-static NSImage *
-load_bundle_icns(NSString *name)
+NSURL *
+files_git_work_tree(NSURL *dir)
 {
-    NSString *path = [NSBundle.mainBundle pathForResource:name ofType:@"icns"];
-    return path ? [[NSImage alloc] initWithContentsOfFile:path] : nil;
+    NSString *path = dir.URLByStandardizingPath.path;
+    /* The repository's own .git folder is not part of the working tree. */
+    if ([path.pathComponents containsObject:@".git"]) return nil;
+    while (path.length > 0) {
+        NSString *dot_git = [path stringByAppendingPathComponent:@".git"];
+        if (access(dot_git.fileSystemRepresentation, F_OK) == 0) {
+            return [NSURL fileURLWithPath:path isDirectory:YES];
+        }
+        if ([path isEqualToString:@"/"]) break;
+        path = path.stringByDeletingLastPathComponent;
+    }
+    return nil;
 }
 
 /*
- * files_git_folder_icon — appearance-following git folder image.
+ * files_git_tracked_names — first path component of every `git ls-files`
+ * entry under dir. Inputs/output are documented in git_info.h.
+ */
+NSSet<NSString *> *
+files_git_tracked_names(NSURL *dir)
+{
+    NSData *data = nil;
+    if (!files_run_tool(git_tool, @[@"-C", dir.path, @"ls-files", @"-z"], &data)) return nil;
+
+    /* NUL-separated paths relative to dir; keep the part before the first
+     * '/', which is the name of the child of dir the file lives under. */
+    NSMutableSet<NSString *> *names = [NSMutableSet set];
+    const char *p   = data.bytes;
+    const char *end = p + data.length;
+    while (p < end) {
+        const char *entry_end = memchr(p, '\0', (size_t)(end - p));
+        if (!entry_end) entry_end = end;
+        const char *slash    = memchr(p, '/', (size_t)(entry_end - p));
+        const char *name_end = slash ? slash : entry_end;
+        if (name_end > p) {
+            NSString *name = [[NSString alloc] initWithBytes:p length:(NSUInteger)(name_end - p)
+                                                    encoding:NSUTF8StringEncoding];
+            if (name) [names addObject:name];
+        }
+        p = entry_end + 1;
+    }
+    return names;
+}
+
+/*
+ * files_git_index_path — <resolved work tree>/.git/index when .git is a folder.
+ * Inputs/output are documented in git_info.h.
+ */
+NSString *
+files_git_index_path(NSURL *work_tree)
+{
+    NSString *dot_git = [work_tree.URLByResolvingSymlinksInPath.path
+                            stringByAppendingPathComponent:@".git"];
+    BOOL is_dir = NO;
+    if (![NSFileManager.defaultManager fileExistsAtPath:dot_git isDirectory:&is_dir] || !is_dir) {
+        return nil;
+    }
+    return [dot_git stringByAppendingPathComponent:@"index"];
+}
+
+/* Git badge edge: at most git_badge_max points, and at most half the
+ * icon's width. */
+static const CGFloat git_badge_max = 16.0;
+
+/* The artwork's bounding box includes the folder's tab, so its center sits
+ * above the middle of the folder's front; the badge is lowered by this
+ * share of the icon's height (4 pt on Get Info's 64 pt icon). */
+static const CGFloat git_badge_drop = 1.0 / 16.0;
+
+/* Resolution of the alpha scan that finds an icon's artwork. */
+static const int art_scan_px = 64;
+
+/*
+ * artwork_center — the center of icon's opaque artwork, as fractions of the
+ * canvas. Icons do not fill their canvas (a folder leaves ~13% empty below
+ * it), so the badge is centered on the artwork rather than the canvas.
+ * Renders icon once at art_scan_px square.
+ *
+ * Inputs:
+ *   icon — the icon to measure
+ *
+ * Output: center, x from the left and y from the bottom, each 0…1;
+ *         (0.5, 0.5) if the icon is fully transparent.
+ */
+static NSPoint
+artwork_center(NSImage *icon)
+{
+    NSBitmapImageRep *rep = [[NSBitmapImageRep alloc]
+        initWithBitmapDataPlanes:NULL pixelsWide:art_scan_px pixelsHigh:art_scan_px
+                   bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO
+                  colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
+    [NSGraphicsContext saveGraphicsState];
+    NSGraphicsContext.currentContext = [NSGraphicsContext graphicsContextWithBitmapImageRep:rep];
+    [icon drawInRect:NSMakeRect(0, 0, art_scan_px, art_scan_px)];
+    [NSGraphicsContext restoreGraphicsState];
+
+    /* Rows run top to bottom; alpha is the fourth byte of each pixel. */
+    const unsigned char *px = rep.bitmapData;
+    NSInteger bpr   = rep.bytesPerRow;
+    int min_x = art_scan_px, max_x = -1, min_row = -1, max_row = -1;
+    for (int row = 0; row < art_scan_px; row++) {
+        for (int x = 0; x < art_scan_px; x++) {
+            if (px[row * bpr + x * 4 + 3] < 128) continue;
+            if (x < min_x) min_x = x;
+            if (x > max_x) max_x = x;
+            if (min_row < 0) min_row = row;
+            max_row = row;
+        }
+    }
+    if (max_x < 0) return NSMakePoint(0.5, 0.5);
+    return NSMakePoint((min_x + max_x + 1) / (2.0 * art_scan_px),
+                       1.0 - (min_row + max_row + 1) / (2.0 * art_scan_px));
+}
+
+/*
+ * files_git_badged_icon — icon with the git logo centered on its artwork.
  * Inputs/output are documented in git_info.h.
  */
 NSImage *
-files_git_folder_icon(void)
+files_git_badged_icon(NSImage *icon)
 {
-    static NSImage *light, *dark;
+    static NSImage *badge;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        light = load_bundle_icns(@"gh_folder_light");
-        dark  = load_bundle_icns(@"gh_folder_dark");
+        NSString *path = [NSBundle.mainBundle pathForResource:@"git96" ofType:@"png"];
+        badge = path ? [[NSImage alloc] initWithContentsOfFile:path] : nil;
     });
-    if (!light || !dark) return nil;
+    if (!badge) return icon;
 
     /* The handler runs whenever the image is rendered, under the appearance
-     * of the view drawing it, so one image serves both modes. */
-    return [NSImage imageWithSize:NSMakeSize(512, 512) flipped:NO
-                   drawingHandler:^BOOL(NSRect rect) {
-        NSAppearanceName match = [NSAppearance.currentDrawingAppearance
-            bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua,
-                                                NSAppearanceNameDarkAqua]];
-        NSImage *src = [match isEqualToString:NSAppearanceNameDarkAqua] ? dark : light;
-        [src drawInRect:rect];
+     * of the view drawing it, so the icon underneath stays light/dark
+     * correct. */
+    NSPoint center = artwork_center(icon);
+    return [NSImage imageWithSize:icon.size flipped:NO drawingHandler:^BOOL(NSRect rect) {
+        [icon drawInRect:rect];
+        CGFloat edge = MIN(git_badge_max, floor(NSWidth(rect) / 2.0));
+        CGFloat x    = NSMinX(rect) + NSWidth(rect) * center.x - edge / 2.0;
+        CGFloat y    = NSMinY(rect) + NSHeight(rect) * (center.y - git_badge_drop) - edge / 2.0;
+        [badge drawInRect:NSMakeRect(x, y, edge, edge)];
         return YES;
     }];
 }
@@ -77,7 +186,7 @@ run_git(NSURL *repo, NSArray<NSString *> *args)
 {
     NSData *data = nil;
     NSArray *full = [@[@"-C", repo.path] arrayByAddingObjectsFromArray:args];
-    if (!files_run_tool(@"/usr/bin/git", full, &data)) return nil;
+    if (!files_run_tool(git_tool, full, &data)) return nil;
     NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     /* Newlines only: a tab can be a meaningful (empty) leading field. */
     return [text stringByTrimmingCharactersInSet:NSCharacterSet.newlineCharacterSet];
@@ -122,11 +231,37 @@ describe_upstream(NSString *upstream, NSString *track)
 }
 
 /*
- * files_git_describe — branch via symbolic-ref, push state via for-each-ref.
- * Inputs/output are documented in git_info.h.
+ * describe_remote_url — the URL of the remote a branch pushes to: its
+ * upstream's remote, else "origin", else the first remote configured.
+ *
+ * Inputs:
+ *   repo     — working-tree root
+ *   upstream — name of the upstream's remote (e.g. "origin"); nil or empty
+ *              if the branch has none
+ *
+ * Output: the URL (insteadOf rewrites applied), or "None" if the
+ *         repository has no remotes.
+ */
+static NSString *
+describe_remote_url(NSURL *repo, NSString *upstream)
+{
+    NSString *name = upstream;
+    if (name.length == 0) {
+        NSArray<NSString *> *remotes =
+            [run_git(repo, @[@"remote"]) componentsSeparatedByString:@"\n"];
+        name = [remotes containsObject:@"origin"] ? @"origin" : remotes.firstObject;
+    }
+    NSString *url = name.length ? run_git(repo, @[@"remote", @"get-url", name]) : nil;
+    return url.length ? url : @"None";
+}
+
+/*
+ * files_git_describe — branch via symbolic-ref, push state via
+ * for-each-ref, remote URL via git remote. Inputs/output are documented in
+ * git_info.h.
  */
 BOOL
-files_git_describe(NSURL *repo, NSString **branch, NSString **pushed)
+files_git_describe(NSURL *repo, NSString **branch, NSString **pushed, NSString **remote_url)
 {
     NSString *ref = run_git(repo, @[@"symbolic-ref", @"--quiet", @"HEAD"]);
     if (!ref) {
@@ -140,22 +275,25 @@ files_git_describe(NSURL *repo, NSString **branch, NSString **pushed)
         *branch = [NSString stringWithFormat:@"Detached at %@", sha];
         *pushed = remote.length ? [NSString stringWithFormat:@"Yes — on %@", remote]
                                 : @"No — not on any remote branch";
+        *remote_url = describe_remote_url(repo, nil);
         return YES;
     }
 
-    NSString *line = run_git(repo, @[@"for-each-ref",
-                                     @"--format=%(upstream:short)%09%(upstream:track,nobracket)",
-                                     ref]);
+    NSString *format = @"--format=%(upstream:short)%09%(upstream:track,nobracket)"
+                       @"%09%(upstream:remotename)";
+    NSString *line   = run_git(repo, @[@"for-each-ref", format, ref]);
     if (!line) return NO;
 
     NSString *prefix = @"refs/heads/";
     *branch = [ref hasPrefix:prefix] ? [ref substringFromIndex:prefix.length] : ref;
     if (line.length == 0) {
         /* The branch ref does not exist yet: a new repository. */
-        *pushed = @"No — no commits yet";
+        *pushed     = @"No — no commits yet";
+        *remote_url = describe_remote_url(repo, nil);
         return YES;
     }
     NSArray<NSString *> *fields = [line componentsSeparatedByString:@"\t"];
-    *pushed = describe_upstream(fields[0], fields.count > 1 ? fields[1] : @"");
+    *pushed     = describe_upstream(fields[0], fields.count > 1 ? fields[1] : @"");
+    *remote_url = describe_remote_url(repo, fields.count > 2 ? fields[2] : nil);
     return YES;
 }

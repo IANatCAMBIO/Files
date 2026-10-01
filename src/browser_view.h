@@ -113,8 +113,10 @@
 - (NSArray<NSURL *> *)selected_urls;
 
 /*
- * set_search_filter: — triggers a Spotlight search for text within the current
- * directory. Pass nil or empty string to cancel and restore the directory listing.
+ * set_search_filter: — triggers a Spotlight search for names containing
+ * text, within the current directory (and its subfolders) or, with
+ * files_pref_search_this_mac on, the whole Mac. Pass nil or empty string
+ * to cancel and restore the directory listing.
  *
  * Inputs:
  *   text — search string; nil/empty restores normal listing

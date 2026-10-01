@@ -45,6 +45,7 @@ static void *first_responder_ctx = &first_responder_ctx;
 @property (nonatomic, strong) NSTextField *address_bar;
 
 /* Layout */
+@property (nonatomic, weak)   NSSearchField         *search_field;  /* toolbar search field */
 @property (nonatomic, strong) FilesBookmarksBar     *bookmarks_bar;
 @property (nonatomic, strong) NSSplitView           *pane_split;   /* holds 1 or 2 panes */
 @property (nonatomic, strong) NSSplitViewController *content_split_vc;
@@ -106,6 +107,10 @@ init_with_url:(NSURL *)url
     [NSNotificationCenter.defaultCenter addObserver:self
                                            selector:@selector(volumes_changed:)
                                                name:FilesVolumesChangedNotification
+                                             object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self
+                                           selector:@selector(update_search_placeholder)
+                                               name:NSUserDefaultsDidChangeNotification
                                              object:nil];
 
     __weak FilesMainWindow *ws = self;
@@ -679,8 +684,22 @@ willBeInsertedIntoToolbar:(BOOL)flag
         NSSearchToolbarItem *item = [[NSSearchToolbarItem alloc] initWithItemIdentifier:identifier];
         item.searchField.target            = self;
         item.searchField.action            = @selector(search_changed:);
-        item.searchField.placeholderString = @"Search";
         item.label                         = @"Search";
+
+        /* The magnifying glass offers where to search. */
+        NSMenu *scope = [[NSMenu alloc] initWithTitle:@"Search"];
+        NSString * const titles[] = { @"This Folder", @"This Mac" };
+        for (NSInteger tag = 0; tag < 2; tag++) {
+            NSMenuItem *mi = [[NSMenuItem alloc] initWithTitle:titles[tag]
+                                                        action:@selector(set_search_scope:)
+                                                 keyEquivalent:@""];
+            mi.target = self;
+            mi.tag    = tag;
+            [scope addItem:mi];
+        }
+        ((NSSearchFieldCell *)item.searchField.cell).searchMenuTemplate = scope;
+        self.search_field = item.searchField;
+        [self update_search_placeholder];
         return item;
     }
 
@@ -831,6 +850,18 @@ go_documents_action:(id)sender
 }
 
 /*
+ * go_trash_action: — Go ▸ Trash.
+ *
+ * Inputs:
+ *   sender — menu item (unused)
+ */
+- (IBAction)
+go_trash_action:(id)sender
+{
+    [[self active_browser] navigate_to:files_directory_url(NSTrashDirectory)];
+}
+
+/*
  * new_folder_action: — New Folder in the active pane (reached from the menu
  * or toolbar even when a text field, not the browser, has focus).
  *
@@ -916,6 +947,34 @@ find_action:(id)sender
             return;
         }
     }
+}
+
+/*
+ * update_search_placeholder — shows the search scope in the empty search
+ * field: "Search This Folder" or "Search This Mac" (files_pref_search_this_mac).
+ * Also run when preferences change, so every window stays in step.
+ */
+- (void)
+update_search_placeholder
+{
+    BOOL mac = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_search_this_mac];
+    self.search_field.placeholderString = mac ? @"Search This Mac" : @"Search This Folder";
+}
+
+/*
+ * set_search_scope: — search menu ▸ This Folder (tag 0) or This Mac (tag 1):
+ * saves the choice and re-runs the search in progress, if any.
+ *
+ * Inputs:
+ *   sender — the chosen menu item
+ */
+- (void)
+set_search_scope:(NSMenuItem *)sender
+{
+    [NSUserDefaults.standardUserDefaults setBool:(sender.tag == 1)
+                                          forKey:files_pref_search_this_mac];
+    [self update_search_placeholder];
+    if (self.search_field.stringValue.length > 0) [self search_changed:self.search_field];
 }
 
 /*
@@ -1038,7 +1097,7 @@ show_pending_unmount:(NSString *)name items:(NSArray<NSString *> *)items
         [lines addObject:[NSString stringWithFormat:@"…and %lu more",
                           (unsigned long)(items.count - pending_list_max)]];
     }
-    NSAlert *alert        = [[NSAlert alloc] init];
+    NSAlert *alert        = files_new_alert();
     alert.messageText     = [NSString stringWithFormat:@"Unmounting \"%@\" is pending", name];
     alert.informativeText = [NSString stringWithFormat:
         @"It will be unmounted automatically once these are closed:\n\n%@",
@@ -1132,8 +1191,8 @@ toggle_hidden_files_action:(id)sender
 }
 
 /*
- * validateMenuItem: — sets the Dual Pane checkmark and enables Back/Forward
- * only when possible.
+ * validateMenuItem: — sets the Dual Pane and search-scope checkmarks and
+ * enables Back/Forward only when possible.
  *
  * Inputs:
  *   item — the menu item being validated
@@ -1146,6 +1205,9 @@ validateMenuItem:(NSMenuItem *)item
     SEL action = item.action;
     if (action == @selector(toggle_dual_pane:)) {
         item.state = self.secondary_pane ? NSControlStateValueOn : NSControlStateValueOff;
+    } else if (action == @selector(set_search_scope:)) {
+        BOOL mac   = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_search_this_mac];
+        item.state = (item.tag == 1) == mac ? NSControlStateValueOn : NSControlStateValueOff;
     } else if (action == @selector(go_back_action:)) {
         return [[self active_browser] can_go_back];
     } else if (action == @selector(go_forward_action:)) {

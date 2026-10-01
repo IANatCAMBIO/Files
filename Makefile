@@ -36,7 +36,7 @@ CFLAGS   = -fobjc-arc -O2 -Wall -Wextra -Wno-unused-parameter \
            -Werror=unguarded-availability \
            -mmacosx-version-min=14.0 -I src -MMD -MP
 LDFLAGS  = -framework Cocoa -framework CoreServices -framework QuickLookThumbnailing \
-           -framework UniformTypeIdentifiers -framework ServiceManagement
+           -framework UniformTypeIdentifiers -framework ServiceManagement -framework Quartz
 SRCS     = $(wildcard src/*.m)
 OBJS     = $(patsubst src/%.m,build/%.o,$(SRCS))
 DEPS     = $(OBJS:.o=.d)
@@ -52,7 +52,7 @@ all: $(BUNDLE)
 IMAGES   = $(wildcard images/*.png images/*.icns)
 
 $(BUNDLE): $(MACOS)/$(APP) resources/Info.plist VERSION $(IMAGES)
-	@mkdir -p $(RSRC)
+	@rm -rf $(RSRC) && mkdir -p $(RSRC)  # fresh, so removed images do not linger
 	@cp resources/Info.plist $(CONTENTS)/Info.plist
 	@plutil -replace CFBundleShortVersionString -string "$(VERSION)" $(CONTENTS)/Info.plist
 	@plutil -replace CFBundleVersion -string "$(VERSION)" $(CONTENTS)/Info.plist
@@ -81,13 +81,33 @@ run: all
 
 # Per-user install: no sudo needed. The old bundle is removed first because
 # `cp -r` into an existing bundle directory would nest the new one inside it.
-INSTALL_DIR = $(HOME)/Applications
+#
+# If the installed Files is running — with Keep Files running it stays up
+# with no windows open — it is stopped first (SIGTERM; Files has nothing to
+# save on quit) and reopened afterwards, so the new build is what runs.
+# Install stops if it has not exited after 5 s.
+INSTALL_DIR   = $(HOME)/Applications
+INSTALLED_BIN = $(INSTALL_DIR)/$(BUNDLE)/Contents/MacOS/$(APP)
 
 install: all
 	@mkdir -p "$(INSTALL_DIR)"
-	@rm -rf "$(INSTALL_DIR)/$(BUNDLE)"
-	@cp -R $(BUNDLE) "$(INSTALL_DIR)/$(BUNDLE)"
-	@echo "Installed to $(INSTALL_DIR)/$(BUNDLE)"
+	@running=0; \
+	if pgrep -qxf "$(INSTALLED_BIN)"; then \
+	    running=1; \
+	    pkill -TERM -xf "$(INSTALLED_BIN)"; \
+	    for i in 1 2 3 4 5 6 7 8 9 10; do \
+	        pgrep -qxf "$(INSTALLED_BIN)" || break; sleep 0.5; \
+	    done; \
+	    if pgrep -qxf "$(INSTALLED_BIN)"; then \
+	        echo "Files did not quit; quit it (⌘Q) and run make install again" >&2; \
+	        exit 1; \
+	    fi; \
+	    echo "Quit the running Files"; \
+	fi; \
+	rm -rf "$(INSTALL_DIR)/$(BUNDLE)" && \
+	cp -R $(BUNDLE) "$(INSTALL_DIR)/$(BUNDLE)" && \
+	echo "Installed to $(INSTALL_DIR)/$(BUNDLE)" && \
+	if [ $$running = 1 ]; then open "$(INSTALL_DIR)/$(BUNDLE)" && echo "Reopened Files"; fi
 
 clean:
 	@rm -rf build $(BUNDLE)

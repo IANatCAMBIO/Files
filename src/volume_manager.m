@@ -1,4 +1,5 @@
 #import "volume_manager.h"
+#import "util.h"
 
 NSString * const FilesVolumesChangedNotification = @"FilesVolumesChangedNotification";
 
@@ -189,6 +190,37 @@ volumes_changed:(NSNotification *)note
     [NSNotificationCenter.defaultCenter
         postNotificationName:FilesVolumesChangedNotification
                       object:self];
+}
+
+/*
+ * cloud_storage_locations — iCloud Drive, then the visible folders in
+ * ~/Library/CloudStorage.
+ * Inputs/output are documented in volume_manager.h.
+ */
+- (NSArray<NSURL *> *)
+cloud_storage_locations
+{
+    NSURL *root = [files_home_url() URLByAppendingPathComponent:@"Library/CloudStorage"
+                                                    isDirectory:YES];
+    NSArray<NSURL *> *items =
+        [NSFileManager.defaultManager contentsOfDirectoryAtURL:root
+                                    includingPropertiesForKeys:@[NSURLIsDirectoryKey,
+                                                                 NSURLLocalizedNameKey]
+                                                       options:NSDirectoryEnumerationSkipsHiddenFiles
+                                                         error:nil];
+    NSMutableArray<NSURL *> *dirs = [NSMutableArray array];
+    for (NSURL *u in items) {
+        NSNumber *is_dir = nil;
+        [u getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
+        if (is_dir.boolValue) [dirs addObject:u];
+    }
+    [dirs sortUsingComparator:^NSComparisonResult(NSURL *a, NSURL *b) {
+        return [a.lastPathComponent localizedStandardCompare:b.lastPathComponent];
+    }];
+
+    NSURL *icloud = files_icloud_drive_url();
+    if (icloud) [dirs insertObject:icloud atIndex:0];
+    return dirs;
 }
 
 /*

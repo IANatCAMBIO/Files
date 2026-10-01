@@ -36,6 +36,18 @@ extern NSString * const FilesVolumesChangedNotification;
 - (NSArray<NSURL *> *)mounted_volumes;
 
 /*
+ * cloud_storage_locations — the cloud storage locations on this Mac:
+ * iCloud Drive (when set up) first, then the File Provider accounts
+ * (Google Drive, OneDrive, Dropbox, MountGoogle, …) — the folders macOS
+ * keeps in ~/Library/CloudStorage — sorted by name. Show them by their
+ * NSURLLocalizedNameKey ("iCloud Drive", not com~apple~CloudDocs). These
+ * are synced folders, not volumes, so mounted_volumes never lists them.
+ *
+ * Output: NSArray<NSURL *>, empty if there are none; never nil.
+ */
+- (NSArray<NSURL *> *)cloud_storage_locations;
+
+/*
  * display_name_for_volume: — returns the volume name as Finder shows it
  * (NSURLVolumeLocalizedNameKey).
  *

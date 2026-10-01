@@ -1,9 +1,11 @@
 #import "browser_view.h"
 #import "file_ops.h"
+#import "git_info.h"
 #import "info_panel.h"
 #import "util.h"
 #import "volume_manager.h"
 #import <CoreServices/CoreServices.h>
+#import <Quartz/Quartz.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <sys/stat.h>
 #include <limits.h>
@@ -15,6 +17,7 @@ static NSString * const col_size     = @"size";
 static NSString * const col_kind     = @"kind";
 static NSString * const col_perms    = @"perms";
 static NSString * const col_modified = @"modified";
+static NSString * const col_git      = @"git";   /* shown only inside a repo */
 
 /*
  * column_spec_t — static description of one table column.
@@ -32,6 +35,7 @@ static const column_spec_t column_specs[] = {
     { @"kind",     @"Kind",          120,  80 },
     { @"perms",    @"Permissions",    90,  70 },
     { @"modified", @"Date Modified", 160, 120 },
+    { @"git",      @"Git",            60,  40 },
 };
 #define COLUMN_COUNT (sizeof(column_specs) / sizeof(column_specs[0]))
 
@@ -96,7 +100,8 @@ column_title(NSString *col_id)
  * Inputs:
  *   col_id — column identifier
  *
- * Output: NSURLResourceKey (name for unknown columns).
+ * Output: NSURLResourceKey (name for unknown columns; the Git column sorts
+ *         by name within tracked / untracked, see apply_sort).
  */
 static NSURLResourceKey
 sort_resource_key(NSString *col_id)
@@ -171,9 +176,8 @@ perms_string_for_mode(mode_t mode)
  * icon_for_url — icon for a listed item at the given size, cached. Plain
  * files share one icon per type (keyed by UTI) so a folder of 10,000 JPEGs
  * costs one image; folders, packages and apps can carry custom icons (or
- * be git working trees), so they are cached per path. The git icon picks
- * light or dark when drawn, so cached icons follow appearance changes. The
- * cache is bounded and evictable under memory pressure.
+ * be git working trees), so they are cached per path. The cache is
+ * bounded and evictable under memory pressure.
  *
  * Inputs:
  *   url  — file URL from a listing (resource values prefetched)
@@ -201,10 +205,12 @@ icon_for_url(NSURL *url, CGFloat size)
     NSImage *icon = [cache objectForKey:key];
     if (!icon) {
         UTType *type = by_type ? [UTType typeWithIdentifier:uti] : nil;
-        icon = type ? [NSWorkspace.sharedWorkspace iconForContentType:type]
-                    : files_icon_for_url(url);
-        icon = [icon copy];
-        icon.size = NSMakeSize(size, size);
+        if (type) {
+            icon = [[NSWorkspace.sharedWorkspace iconForContentType:type] copy];
+            icon.size = NSMakeSize(size, size);
+        } else {
+            icon = files_icon_for_url(url, size);
+        }
         [cache setObject:icon forKey:key];
     }
     return icon;
@@ -214,7 +220,10 @@ icon_for_url(NSURL *url, CGFloat size)
 
 @interface FilesBrowserView () <NSTableViewDataSource,
                                 NSTableViewDelegate,
-                                NSTextFieldDelegate>
+                                NSTextFieldDelegate,
+                                NSMenuDelegate,
+                                QLPreviewPanelDataSource,
+                                QLPreviewPanelDelegate>
 
 @property (nonatomic, strong) NSTableView             *table;
 @property (nonatomic, strong) NSScrollView            *scroll;
@@ -227,6 +236,14 @@ icon_for_url(NSURL *url, CGFloat size)
 /* Folder watcher: stream plus the resolved path events are compared with. */
 @property (nonatomic, assign) FSEventStreamRef         fs_stream;
 @property (nonatomic, copy)   NSString                *watched_path;
+/* The index of the git repo the folder is in, also watched so badges
+ * follow add/rm/commit; nil outside a repo. */
+@property (nonatomic, copy)   NSString                *watched_git_index;
+/* The Quick Look panel while this browser controls it (Space); nil otherwise. */
+@property (nonatomic, strong) QLPreviewPanel          *preview_panel;
+/* Names in the listing that git tracks (the Git column); nil outside a
+ * repo and for Spotlight results, which hides the column. */
+@property (nonatomic, copy, readonly) NSSet<NSString *> *git_tracked; /* set_git_tracked: */
 @property (nonatomic, assign) BOOL                     reload_scheduled;
 
 /* Background listing: serial queue and a counter that discards stale results. */
@@ -265,7 +282,8 @@ icon_for_url(NSURL *url, CGFloat size)
 /*
  * fs_event_callback — FSEventStream callback (main queue). Schedules one
  * coalesced reload if any event concerns a direct child of the watched
- * folder (or the folder itself); events deeper in the tree are ignored.
+ * folder (or the folder itself), or the git index; events deeper in the
+ * tree are ignored.
  *
  * Inputs:
  *   client_info — the FilesBrowserView (unretained; the view stops the
@@ -290,7 +308,8 @@ fs_event_callback(ConstFSEventStreamRef stream, void *client_info,
             (event_flags[i] & (kFSEventStreamEventFlagMustScanSubDirs |
                                kFSEventStreamEventFlagRootChanged)) ||
             [path isEqualToString:watched] ||
-            [path.stringByDeletingLastPathComponent isEqualToString:watched];
+            [path.stringByDeletingLastPathComponent isEqualToString:watched] ||
+            [path isEqualToString:view.watched_git_index];
         if (relevant) {
             [view schedule_reload];
             return;
@@ -363,6 +382,7 @@ build_table
         tc.resizingMask   = NSTableColumnUserResizingMask | NSTableColumnAutoresizingMask;
         [self.table addTableColumn:tc];
     }
+    self.table.headerView.menu = [self build_header_menu];
 
     self.table.dataSource   = self;
     self.table.delegate     = self;
@@ -389,6 +409,82 @@ build_table
 }
 
 /*
+ * build_header_menu — the column headers' right-click menu: one checkbox
+ * item per column, toggling it (toggle_column:); validateMenuItem: sets
+ * the checkmarks. Name is always shown, so its item is checked and
+ * disabled.
+ *
+ * Output: configured NSMenu.
+ */
+- (NSMenu *)
+build_header_menu
+{
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@""];
+    for (size_t i = 0; i < COLUMN_COUNT; i++) {
+        NSString *title = [column_specs[i].id isEqualToString:col_git]
+            ? @"Git (inside repositories)" : column_specs[i].title;
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title
+                                                      action:@selector(toggle_column:)
+                                               keyEquivalent:@""];
+        item.target            = self;
+        item.representedObject = column_specs[i].id;
+        [menu addItem:item];
+    }
+    return menu;
+}
+
+/*
+ * toggle_column: — shows or hides a column in every file list: adds or
+ * removes its identifier in files_pref_hidden_columns, whose change every
+ * browser applies (apply_view_prefs).
+ *
+ * Inputs:
+ *   sender — header-menu item; representedObject = column identifier
+ */
+- (void)
+toggle_column:(NSMenuItem *)sender
+{
+    NSString *col_id = sender.representedObject;
+    if ([col_id isEqualToString:col_name]) return;
+    NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
+    NSMutableArray<NSString *> *hidden =
+        [[ud stringArrayForKey:files_pref_hidden_columns] mutableCopy] ?: [NSMutableArray array];
+    if ([hidden containsObject:col_id]) [hidden removeObject:col_id];
+    else                                [hidden addObject:col_id];
+    [ud setObject:hidden forKey:files_pref_hidden_columns];
+}
+
+/*
+ * update_column_visibility — hides each column the user has hidden
+ * (files_pref_hidden_columns), and the Git column outside a repository
+ * (git_tracked nil). Name always shows and gives up or takes back the
+ * width of columns that appear or disappear, so they are not pushed off
+ * the right edge; with Auto-Fit on, the columns are then refitted.
+ */
+- (void)
+update_column_visibility
+{
+    NSArray<NSString *> *hidden =
+        [NSUserDefaults.standardUserDefaults stringArrayForKey:files_pref_hidden_columns];
+    NSTableColumn *name_col = [self.table tableColumnWithIdentifier:col_name];
+    CGFloat delta   = 0.0;
+    BOOL    changed = NO;
+    for (NSTableColumn *col in self.table.tableColumns) {
+        if (col == name_col) continue;
+        BOOL hide = [hidden containsObject:col.identifier] ||
+                    ([col.identifier isEqualToString:col_git] && self.git_tracked == nil);
+        if (col.hidden == hide) continue;
+        col.hidden = hide;
+        changed    = YES;
+        CGFloat w  = col.width + self.table.intercellSpacing.width;
+        delta     += hide ? w : -w;
+    }
+    if (!changed) return;
+    name_col.width = MAX(name_col.minWidth, name_col.width + delta);
+    if (self.auto_fit) [self apply_auto_fit];
+}
+
+/*
  * build_context_menu — builds the right-click menu for the table.
  *
  * Output: configured NSMenu.
@@ -411,6 +507,7 @@ build_context_menu
     [menu addItem:NSMenuItem.separatorItem];
     add(@"Cut",           @selector(cut:));
     add(@"Copy",          @selector(copy:));
+    add(@"Copy Path to File", @selector(copy_path:));
     add(@"Paste",         @selector(paste:));
     [menu addItem:NSMenuItem.separatorItem];
     add(@"Move to Trash", @selector(move_to_trash_action:));
@@ -420,33 +517,41 @@ build_context_menu
     add(@"New Folder",    @selector(new_folder_action:));
     add(@"New File",      @selector(new_file_action:));
 
+    menu.delegate = self;  /* menuNeedsUpdate: selects the right-clicked row */
     return menu;
 }
 
 /* ── Folder watcher ──────────────────────────────────────────────────── */
 
 /*
- * start_watching: — watches dir with an FSEventStream (file-level events,
- * 0.3 s latency). fs_event_callback filters to direct children, so activity
- * deeper in the tree (e.g. ~/Library caches while viewing ~) is ignored.
+ * start_watching:git_index: — watches dir, and the folder holding git_index
+ * when given, with an FSEventStream (file-level events, 0.3 s latency).
+ * fs_event_callback filters to direct children and the index file, so
+ * activity deeper in the tree (e.g. ~/Library caches while viewing ~) is
+ * ignored.
  *
  * Inputs:
- *   dir — directory URL to watch
+ *   dir       — directory URL to watch
+ *   git_index — resolved path of the enclosing repo's index file, or nil
  */
 - (void)
-start_watching:(NSURL *)dir
+start_watching:(NSURL *)dir git_index:(NSString *)git_index
 {
     [self stop_watching];
 
     /* FSEvents reports resolved paths (/private/var, not /var). */
-    self.watched_path = dir.URLByResolvingSymlinksInPath.path;
+    self.watched_path      = dir.URLByResolvingSymlinksInPath.path;
+    self.watched_git_index = git_index;
+    NSArray<NSString *> *paths = git_index
+        ? @[self.watched_path, git_index.stringByDeletingLastPathComponent]
+        : @[self.watched_path];
 
     FSEventStreamContext ctx = { .info = (__bridge void *)self };
     self.fs_stream = FSEventStreamCreate(
         kCFAllocatorDefault,
         fs_event_callback,
         &ctx,
-        (__bridge CFArrayRef)@[self.watched_path],
+        (__bridge CFArrayRef)paths,
         kFSEventStreamEventIdSinceNow,
         0.3,
         kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagFileEvents
@@ -527,6 +632,7 @@ apply_view_prefs
         [self.table reloadData];
     }
     if (fit && (rows_changed || fit_turned_on)) [self apply_auto_fit];
+    [self update_column_visibility];
 }
 
 /*
@@ -571,7 +677,8 @@ push_history:(NSURL *)url onto:(NSMutableArray<NSURL *> *)stack
 
 /*
  * load_location: — makes url the displayed folder: ends any Spotlight search,
- * re-targets the watcher, starts a listing (auto-fit runs when it lands) and
+ * re-targets the watcher (the git index is added once the listing finds
+ * it), starts a listing (auto-fit runs when it lands) and
  * notifies the navigation handler. Shared by navigate_to:,
  * go_back and go_forward; does not touch the history stacks.
  *
@@ -584,7 +691,7 @@ load_location:(NSURL *)url
     [self stop_search_query];
     self.current_dir      = url;
     self.auto_fit_pending = YES;
-    [self start_watching:url];
+    [self start_watching:url git_index:nil];
     [self reload_directory];
 
     if (self.navigation_handler) self.navigation_handler(url);
@@ -776,6 +883,7 @@ reload_directory
  * reload_directory_then: — lists the current folder on a background queue
  * (so large or network folders never block the UI), then on the main queue
  * sorts, filters, reloads the table and restores the selection by path.
+ * Inside a git working tree it also asks git which items are tracked.
  * A generation counter drops results that a newer reload or navigation
  * has superseded. No-op while Spotlight results are displayed; postponed
  * (without calling done) while an inline rename is in progress.
@@ -805,9 +913,17 @@ reload_directory_then:(void (^)(void))done
                                                              error:&err];
         if (!items) NSLog(@"[browser] error reading %@: %@", dir.path, err);
 
+        NSURL *work_tree = files_git_work_tree(dir);
+        NSSet<NSString *> *tracked = work_tree ? files_git_tracked_names(dir) : nil;
+        NSString *git_index = work_tree ? files_git_index_path(work_tree) : nil;
+
         dispatch_async(dispatch_get_main_queue(), ^{
             FilesBrowserView *s = ws;
             if (!s || generation != s.list_generation || s.search_active) return;
+            if (git_index != s.watched_git_index && ![git_index isEqualToString:s.watched_git_index]) {
+                [s start_watching:dir git_index:git_index];
+            }
+            [s set_git_tracked:tracked];
             [s show_listing:items ?: @[]];
             if (done) done();
         });
@@ -815,8 +931,58 @@ reload_directory_then:(void (^)(void))done
 }
 
 /*
+ * set_git_tracked: — records which listed names git tracks; the Git
+ * column shows only inside a repository (tracked non-nil) and if the user
+ * has not hidden it (update_column_visibility).
+ *
+ * Inputs:
+ *   tracked — tracked names, or nil outside a repo / for search results
+ */
+- (void)
+set_git_tracked:(NSSet<NSString *> *)tracked
+{
+    _git_tracked = [tracked copy];
+    [self update_column_visibility];
+}
+
+/*
+ * selected_paths — the paths of the selected items, the key the selection
+ * is restored by after the rows are rebuilt or reordered.
+ *
+ * Output: set of paths, empty if nothing is selected.
+ */
+- (NSSet<NSString *> *)
+selected_paths
+{
+    return [NSSet setWithArray:[[self selected_urls] valueForKey:@"path"]];
+}
+
+/*
+ * reload_table_selecting:reveal: — reloads the table from filtered_items
+ * and selects the rows whose paths are in paths. AppKit keeps selected row
+ * numbers across reloadData, which point at other items once the rows are
+ * reordered (sorting) or rebuilt (refresh, search update); this re-selects
+ * by item instead.
+ *
+ * Inputs:
+ *   paths  — paths to select (from selected_paths, taken before the change)
+ *   reveal — YES to scroll the first selected row into view
+ */
+- (void)
+reload_table_selecting:(NSSet<NSString *> *)paths reveal:(BOOL)reveal
+{
+    [self.table reloadData];
+    NSIndexSet *rows = [self.filtered_items indexesOfObjectsPassingTest:
+        ^BOOL(NSURL *item, NSUInteger idx, BOOL *stop) {
+            return [paths containsObject:item.path];
+        }];
+    [self.table selectRowIndexes:rows byExtendingSelection:NO];
+    if (reveal && rows.count > 0) [self.table scrollRowToVisible:(NSInteger)rows.firstIndex];
+}
+
+/*
  * show_listing: — installs a fresh folder listing in the table, keeping the
- * selection (matched by name) and running a pending auto-fit. Names
+ * selection (matched by path) and running a pending auto-fit. Names
  * requested by reveal_items: are selected instead, and the first of them
  * scrolled into view.
  *
@@ -826,24 +992,21 @@ reload_directory_then:(void (^)(void))done
 - (void)
 show_listing:(NSArray<NSURL *> *)items
 {
-    NSSet<NSString *> *want = self.pending_names
-                              ?: [NSSet setWithArray:[[self selected_urls] valueForKey:@"lastPathComponent"]];
+    NSSet<NSString *> *want = [self selected_paths];
     BOOL reveal = self.pending_names != nil;
+    if (reveal) {
+        NSMutableSet<NSString *> *paths = [NSMutableSet set];
+        for (NSString *name in self.pending_names) {
+            [paths addObject:[self.current_dir URLByAppendingPathComponent:name].path];
+        }
+        want = paths;
+    }
     self.pending_names = nil;
 
     self.all_items = [items mutableCopy];
     [self apply_sort];
     [self apply_filter];
-    [self.table reloadData];
-
-    if (want.count > 0) {
-        NSIndexSet *rows = [self.filtered_items indexesOfObjectsPassingTest:
-            ^BOOL(NSURL *item, NSUInteger idx, BOOL *stop) {
-                return [want containsObject:item.lastPathComponent];
-            }];
-        [self.table selectRowIndexes:rows byExtendingSelection:NO];
-        if (reveal && rows.count > 0) [self.table scrollRowToVisible:(NSInteger)rows.firstIndex];
-    }
+    [self reload_table_selecting:want reveal:reveal];
 
     [self update_status_bar];
     if (self.auto_fit_pending) {
@@ -856,13 +1019,15 @@ show_listing:(NSArray<NSURL *> *)items
 
 /*
  * apply_sort — sorts all_items folders-first, then by the sort column using
- * prefetched values (Finder-style natural order for names and kinds).
+ * prefetched values (Finder-style natural order for names and kinds). The
+ * Git column sorts tracked items first (ascending), then by name.
  */
 - (void)
 apply_sort
 {
     NSURLResourceKey key = sort_resource_key(self.sort_key);
     BOOL ascending       = self.sort_ascending;
+    NSSet<NSString *> *tracked = [self.sort_key isEqualToString:col_git] ? self.git_tracked : nil;
 
     [self.all_items sortUsingComparator:^NSComparisonResult(NSURL *a, NSURL *b) {
         NSNumber *a_dir = nil, *b_dir = nil;
@@ -870,6 +1035,13 @@ apply_sort
         [b getResourceValue:&b_dir forKey:NSURLIsDirectoryKey error:nil];
         if (a_dir.boolValue != b_dir.boolValue) {
             return a_dir.boolValue ? NSOrderedAscending : NSOrderedDescending;
+        }
+        if (tracked) {
+            BOOL a_git = [tracked containsObject:a.lastPathComponent];
+            BOOL b_git = [tracked containsObject:b.lastPathComponent];
+            if (a_git != b_git) {
+                return (a_git == ascending) ? NSOrderedAscending : NSOrderedDescending;
+            }
         }
 
         id av = nil, bv = nil;
@@ -950,7 +1122,8 @@ stop_search_query
 
 /*
  * begin_spotlight_search: — starts an NSMetadataQuery for items whose display
- * name contains query, anywhere under the current folder.
+ * name contains query: anywhere under the current folder, or anywhere on
+ * the Mac when files_pref_search_this_mac is on.
  *
  * Inputs:
  *   query — search term (case- and diacritic-insensitive)
@@ -963,6 +1136,7 @@ begin_spotlight_search:(NSString *)query
 
     self.search_active    = YES;
     self.auto_fit_pending = YES;
+    [self set_git_tracked:nil];
     self.filtered_items   = [NSMutableArray array];
     [self.table reloadData];
     [self update_status_bar];
@@ -970,7 +1144,9 @@ begin_spotlight_search:(NSString *)query
     self.search_query = [[NSMetadataQuery alloc] init];
     self.search_query.predicate =
         [NSPredicate predicateWithFormat:@"kMDItemDisplayName CONTAINS[cd] %@", query];
-    self.search_query.searchScopes = @[self.current_dir];
+    self.search_query.searchScopes =
+        [NSUserDefaults.standardUserDefaults boolForKey:files_pref_search_this_mac]
+            ? @[NSMetadataQueryLocalComputerScope] : @[self.current_dir];
 
     [NSNotificationCenter.defaultCenter addObserver:self
         selector:@selector(search_results_updated:)
@@ -998,7 +1174,8 @@ end_spotlight_search
 
 /*
  * search_results_updated: — NSMetadataQuery notification handler; shows the
- * results (sorted and hidden-filtered like a listing) in the table.
+ * results (sorted and hidden-filtered like a listing) in the table, keeping
+ * the selected results selected.
  *
  * Inputs:
  *   note — NSMetadataQueryDidUpdateNotification or DidFinishGatheringNotification
@@ -1015,10 +1192,11 @@ search_results_updated:(NSNotification *)note
         if (path) [results addObject:[NSURL fileURLWithPath:path]];
     }
 
+    NSSet<NSString *> *keep = [self selected_paths];
     self.all_items = results;
     [self apply_sort];
     [self apply_filter];
-    [self.table reloadData];
+    [self reload_table_selecting:keep reveal:NO];
     [self update_status_bar];
     if (self.auto_fit_pending && results.count > 0) {
         self.auto_fit_pending = NO;
@@ -1095,6 +1273,9 @@ cell_text_for_column:(NSString *)col_id
         NSDate *date = nil;
         [url getResourceValue:&date forKey:NSURLContentModificationDateKey error:nil];
         return files_format_date(date, NSDateFormatterShortStyle);
+
+    } else if ([col_id isEqualToString:col_git]) {
+        return [self.git_tracked containsObject:url.lastPathComponent] ? @"tracked" : @"";
     }
     return @"";
 }
@@ -1129,14 +1310,18 @@ cell_font_for_column(NSString *col_id)
 - (void)
 apply_auto_fit
 {
-    /* Extra fixed pixels: icon+gap for Name col; cell left+right padding elsewhere. */
-    CGFloat name_extra = [self icon_size] + 4 + 2 + 2; /* icon + gap + l-pad + r-pad */
-    static const CGFloat cell_extra = 2 + 2;           /* l-pad + r-pad */
-    static const CGFloat header_pad = 10;              /* header side padding + margin */
+    /* Extra fixed pixels: icon+gap for Name col; cell left+right padding
+     * elsewhere. Each also loses the intercell spacing, which the table
+     * takes out of a column's width before laying out its cell view. */
+    CGFloat spacing    = self.table.intercellSpacing.width;
+    CGFloat name_extra = [self icon_size] + 4 + 2 + 2 + spacing; /* icon + gap + pads */
+    CGFloat cell_extra = 2 + 2 + spacing;                        /* l-pad + r-pad */
+    static const CGFloat header_pad = 10;                        /* header padding + margin */
 
     NSUInteger rows = MIN(self.filtered_items.count, (NSUInteger)AUTO_FIT_ROW_LIMIT);
     CGFloat total = 0;
     for (NSTableColumn *col in self.table.tableColumns) {
+        if (col.hidden) continue;
         NSString *col_id = col.identifier;
 
         CGFloat max_w = [col.title sizeWithAttributes:
@@ -1146,7 +1331,9 @@ apply_auto_fit
         CGFloat extra = [col_id isEqualToString:col_name] ? name_extra : cell_extra;
         for (NSUInteger i = 0; i < rows; i++) {
             NSString *text = [self cell_text_for_column:col_id url:self.filtered_items[i]];
-            CGFloat w = [text sizeWithAttributes:attrs].width + extra;
+            /* Text fields need whole points: 42.3 pt of text does not fit
+             * in 42.3 pt, it is truncated. */
+            CGFloat w = ceil([text sizeWithAttributes:attrs].width) + extra;
             if (w > max_w) max_w = w;
         }
 
@@ -1174,9 +1361,9 @@ apply_auto_fit
 /* ── Trash and status ────────────────────────────────────────────────── */
 
 /*
- * empty_trash_action: — confirms, then permanently deletes everything in the
- * Trash (including dotfiles such as .DS_Store) on a background queue, and
- * reports any items that could not be removed.
+ * empty_trash_action: — confirms, then empties the Trash with
+ * FilesFileOps empty_trash: (locked and read-only items included) and lists
+ * any items that could not be removed, with the reason.
  *
  * Inputs:
  *   sender — the Empty Trash button (unused)
@@ -1184,7 +1371,7 @@ apply_auto_fit
 - (IBAction)
 empty_trash_action:(id)sender
 {
-    NSAlert *alert        = [[NSAlert alloc] init];
+    NSAlert *alert        = files_new_alert();
     alert.messageText     = @"Permanently delete the items in the Trash?";
     alert.informativeText = @"You cannot undo this action.";
     alert.alertStyle      = NSAlertStyleWarning;
@@ -1194,25 +1381,48 @@ empty_trash_action:(id)sender
     __weak FilesBrowserView *ws = self;
     [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse resp) {
         if (resp != NSAlertFirstButtonReturn) return;
-        NSURL *trash = files_directory_url(NSTrashDirectory);
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            NSError *first_err = nil;
-            NSArray<NSURL *> *items = [NSFileManager.defaultManager
-                contentsOfDirectoryAtURL:trash includingPropertiesForKeys:nil
-                                 options:0 error:&first_err];
-            for (NSURL *item in items) {
-                NSError *err = nil;
-                if (![NSFileManager.defaultManager removeItemAtURL:item error:&err] && !first_err) {
-                    first_err = err;
-                }
-            }
-            dispatch_async(dispatch_get_main_queue(), ^{
-                FilesBrowserView *s = ws;
-                if (!s) return;
-                if (first_err) files_show_error(@"Some items could not be deleted", first_err, s.window);
-                [s reload_directory];
+        [FilesFileOps empty_trash:^(NSArray<NSURL *> *failed, NSArray<NSString *> *reasons) {
+            FilesBrowserView *s = ws;
+            if (!s) return;
+            [s reload_directory];
+            if (failed.count == 0) return;
+
+            NSAlert *report        = files_new_alert();
+            report.messageText     = failed.count == 1
+                ? @"1 item could not be deleted"
+                : [NSString stringWithFormat:@"%lu items could not be deleted",
+                   (unsigned long)failed.count];
+            report.informativeText = [[reasons componentsJoinedByString:@"\n"]
+                stringByAppendingString:@"\n\nmacOS lets only Finder delete other "
+                                        @"developers' apps and items owned by root. "
+                                        @"Empty with Finder hands the rest of the Trash "
+                                        @"to Finder, which may ask for your password."];
+            [report addButtonWithTitle:@"Empty with Finder"];
+            [report addButtonWithTitle:@"Cancel"];
+            files_present_alert(report, s.window, ^(NSModalResponse r) {
+                if (r == NSAlertFirstButtonReturn) [ws empty_trash_with_finder];
             });
-        });
+        }];
+    }];
+}
+
+/*
+ * empty_trash_with_finder — hands the Trash to Finder for the items Files
+ * could not delete, then refreshes and reports anything Finder declined.
+ */
+- (void)
+empty_trash_with_finder
+{
+    __weak FilesBrowserView *ws = self;
+    [FilesFileOps empty_trash_with_finder:^(NSString *error) {
+        FilesBrowserView *s = ws;
+        if (!s) return;
+        [s reload_directory];
+        if (!error) return;
+        NSAlert *alert        = files_new_alert();
+        alert.messageText     = @"The Trash was not emptied";
+        alert.informativeText = error;
+        files_present_alert(alert, s.window, nil);
     }];
 }
 
@@ -1322,6 +1532,8 @@ viewForTableColumn:(NSTableColumn *)col
  * tableView:didClickTableColumn: — handles column header clicks for sorting.
  * Clicking the active sort column flips ascending/descending; clicking another
  * column sorts by it ascending. Works for folder listings and search results.
+ * The selection follows its items to their new rows, and the first of them
+ * is scrolled into view, as in Finder.
  *
  * Inputs:
  *   tv  — the table view
@@ -1338,9 +1550,10 @@ didClickTableColumn:(NSTableColumn *)col
         self.sort_key       = new_key;
         self.sort_ascending = YES;
     }
+    NSSet<NSString *> *keep = [self selected_paths];
     [self apply_sort];
     [self apply_filter];
-    [tv reloadData];
+    [self reload_table_selecting:keep reveal:YES];
     [self update_sort_indicators];
 }
 
@@ -1356,6 +1569,7 @@ tableViewSelectionDidChange:(NSNotification *)note
 {
     [self update_status_bar];
     if (self.sidebar_handler) self.sidebar_handler([self selected_urls]);
+    [self.preview_panel reloadData];  /* Quick Look follows the selection */
 }
 
 /* ── Opening items ───────────────────────────────────────────────────── */
@@ -1376,25 +1590,30 @@ row_double_clicked:(id)sender
 }
 
 /*
- * context_urls — the items a context-menu command applies to: the
- * right-clicked row when it is not part of the selection (AppKit leaves the
- * selection unchanged on right-click), otherwise the selection.
+ * menuNeedsUpdate: — NSMenuDelegate for the context menu, called before it
+ * opens. AppKit leaves the selection unchanged on right-click, so, as in
+ * Finder, a right-clicked row that is not already selected becomes the
+ * selection, and a right-click on empty space clears it. Every command
+ * then acts on the selection — the same items its menu-bar and keyboard
+ * versions use.
  *
- * Output: array of file URLs, possibly empty.
+ * Inputs:
+ *   menu — the table's context menu (unused)
  */
-- (NSArray<NSURL *> *)
-context_urls
+- (void)
+menuNeedsUpdate:(NSMenu *)menu
 {
     NSInteger row = self.table.clickedRow;
-    if (row >= 0 && (NSUInteger)row < self.filtered_items.count &&
-        ![self.table isRowSelected:row]) {
-        return @[self.filtered_items[row]];
+    if (row < 0) {
+        [self.table deselectAll:nil];
+    } else if (![self.table isRowSelected:row]) {
+        [self.table selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row]
+                byExtendingSelection:NO];
     }
-    return [self selected_urls];
 }
 
 /*
- * open_selected: — opens every targeted item via navigate_to: (folders,
+ * open_selected: — opens every selected item via navigate_to: (folders,
  * including app bundles, are shown; files open in their default app).
  *
  * Inputs:
@@ -1403,7 +1622,7 @@ context_urls
 - (void)
 open_selected:(id)sender
 {
-    for (NSURL *url in [self context_urls]) {
+    for (NSURL *url in [self selected_urls]) {
         [self navigate_to:url];
     }
 }
@@ -1428,7 +1647,7 @@ application_urls(NSArray<NSURL *> *urls)
 }
 
 /*
- * run_application: — launches the targeted application bundle(s) with
+ * run_application: — launches the selected application bundle(s) with
  * NSWorkspace (double-click shows an app bundle's contents instead).
  *
  * Inputs:
@@ -1438,7 +1657,7 @@ application_urls(NSArray<NSURL *> *urls)
 run_application:(id)sender
 {
     __weak NSWindow *win = self.window;
-    for (NSURL *app in application_urls([self context_urls])) {
+    for (NSURL *app in application_urls([self selected_urls])) {
         [NSWorkspace.sharedWorkspace openApplicationAtURL:app
                                             configuration:[NSWorkspaceOpenConfiguration configuration]
                                         completionHandler:^(NSRunningApplication *ra, NSError *err) {
@@ -1451,8 +1670,12 @@ run_application:(id)sender
 }
 
 /*
- * validateMenuItem: — shows "Run Application" in the context menu only when
- * the targeted items include an application.
+ * validateMenuItem: — checks each column-header menu item whose column
+ * the user shows (Name: always, disabled); shows "Run Application" in the
+ * context menu only when
+ * the selected items include an application, and shows the path item
+ * only for a single selected item, titled "Copy Path to File" for a file
+ * (packages such as apps count as files) and "Copy Path" for a folder.
  *
  * Inputs:
  *   item — menu item being validated
@@ -1463,9 +1686,27 @@ run_application:(id)sender
 validateMenuItem:(NSMenuItem *)item
 {
     if (item.action == @selector(run_application:)) {
-        BOOL has_app = application_urls([self context_urls]).count > 0;
+        BOOL has_app = application_urls([self selected_urls]).count > 0;
         item.hidden  = !has_app;
         return has_app;
+    }
+    if (item.action == @selector(toggle_column:)) {
+        NSString *col_id = item.representedObject;
+        NSArray<NSString *> *hidden =
+            [NSUserDefaults.standardUserDefaults stringArrayForKey:files_pref_hidden_columns];
+        item.state = [hidden containsObject:col_id] ? NSControlStateValueOff
+                                                    : NSControlStateValueOn;
+        return ![col_id isEqualToString:col_name];
+    }
+    if (item.action == @selector(copy_path:)) {
+        NSArray<NSURL *> *sel = [self selected_urls];
+        item.hidden = (sel.count != 1);
+        if (item.hidden) return NO;
+        NSNumber *dir = nil, *pkg = nil;
+        [sel.firstObject getResourceValue:&dir forKey:NSURLIsDirectoryKey error:nil];
+        [sel.firstObject getResourceValue:&pkg forKey:NSURLIsPackageKey error:nil];
+        item.title = (dir.boolValue && !pkg.boolValue) ? @"Copy Path" : @"Copy Path to File";
+        return YES;
     }
     return YES;
 }
@@ -1485,9 +1726,10 @@ acceptsFirstResponder
 }
 
 /*
- * keyDown: — Return/Enter begins an inline rename. Move to Trash is
- * deliberately not bound to a bare Delete key: it is only reachable via ⌘⌫
- * (Edit menu key equivalent), matching Finder.
+ * keyDown: — Return/Enter begins an inline rename; Space opens or closes
+ * Quick Look for the selection. Move to Trash is deliberately not bound
+ * to a bare Delete key: it is only reachable via ⌘⌫ (Edit menu key
+ * equivalent), matching Finder.
  *
  * Inputs:
  *   event — key-down event; unhandled keys are passed to super
@@ -1500,7 +1742,152 @@ keyDown:(NSEvent *)event
         [self begin_rename:nil];
         return;
     }
+    NSEventModifierFlags mods = event.modifierFlags & (NSEventModifierFlagCommand |
+                                                       NSEventModifierFlagControl |
+                                                       NSEventModifierFlagOption);
+    if ([chars isEqualToString:@" "] && mods == 0) {
+        [self toggle_quick_look];
+        return;
+    }
     [super keyDown:event];
+}
+
+/* ── Quick Look ──────────────────────────────────────────────────────── */
+
+/*
+ * toggle_quick_look — closes the Quick Look panel if it is open, otherwise
+ * opens it for the selection (nothing happens with nothing selected). The
+ * panel then asks the responder chain for a controller and finds this
+ * browser (acceptsPreviewPanelControl:).
+ */
+- (void)
+toggle_quick_look
+{
+    if ([QLPreviewPanel sharedPreviewPanelExists] && QLPreviewPanel.sharedPreviewPanel.isVisible) {
+        [QLPreviewPanel.sharedPreviewPanel orderOut:nil];
+    } else if ([self selected_urls].count > 0) {
+        [QLPreviewPanel.sharedPreviewPanel makeKeyAndOrderFront:nil];
+    }
+}
+
+/*
+ * acceptsPreviewPanelControl: — this browser supplies Quick Look's items
+ * while it is in the key window's responder chain.
+ *
+ * Inputs:
+ *   panel — the shared Quick Look panel
+ *
+ * Output: YES.
+ */
+- (BOOL)
+acceptsPreviewPanelControl:(QLPreviewPanel *)panel
+{
+    return YES;
+}
+
+/*
+ * beginPreviewPanelControl: — takes over the panel: becomes its data
+ * source and delegate.
+ *
+ * Inputs:
+ *   panel — the shared Quick Look panel
+ */
+- (void)
+beginPreviewPanelControl:(QLPreviewPanel *)panel
+{
+    self.preview_panel = panel;
+    panel.dataSource   = self;
+    panel.delegate     = self;
+}
+
+/*
+ * endPreviewPanelControl: — lets go of the panel (it closed, or another
+ * controller took it).
+ *
+ * Inputs:
+ *   panel — the shared Quick Look panel (unused)
+ */
+- (void)
+endPreviewPanelControl:(QLPreviewPanel *)panel
+{
+    self.preview_panel = nil;
+}
+
+/*
+ * numberOfPreviewItemsInPreviewPanel: — Quick Look shows the selection.
+ *
+ * Inputs:
+ *   panel — the Quick Look panel (unused)
+ *
+ * Output: number of selected items.
+ */
+- (NSInteger)
+numberOfPreviewItemsInPreviewPanel:(QLPreviewPanel *)panel
+{
+    return (NSInteger)[self selected_urls].count;
+}
+
+/*
+ * previewPanel:previewItemAtIndex: — the idx-th selected item (NSURL is a
+ * QLPreviewItem).
+ *
+ * Inputs:
+ *   panel — the Quick Look panel (unused)
+ *   idx   — item index
+ *
+ * Output: file URL, or nil if the selection has shrunk.
+ */
+- (id<QLPreviewItem>)
+previewPanel:(QLPreviewPanel *)panel previewItemAtIndex:(NSInteger)idx
+{
+    NSArray<NSURL *> *sel = [self selected_urls];
+    return (idx >= 0 && (NSUInteger)idx < sel.count) ? sel[(NSUInteger)idx] : nil;
+}
+
+/*
+ * previewPanel:handleEvent: — while the panel is key, the arrow keys move
+ * the list's selection (Quick Look follows via
+ * tableViewSelectionDidChange:), as in Finder; Space reaches keyDown:
+ * through the table and closes the panel.
+ *
+ * Inputs:
+ *   panel — the Quick Look panel (unused)
+ *   event — event the panel received
+ *
+ * Output: YES if the event was passed to the table.
+ */
+- (BOOL)
+previewPanel:(QLPreviewPanel *)panel handleEvent:(NSEvent *)event
+{
+    if (event.type != NSEventTypeKeyDown) return NO;
+    unichar ch = event.charactersIgnoringModifiers.length
+               ? [event.charactersIgnoringModifiers characterAtIndex:0] : 0;
+    if (ch != NSUpArrowFunctionKey && ch != NSDownArrowFunctionKey && ch != ' ') return NO;
+    [self.table keyDown:event];
+    return YES;
+}
+
+/*
+ * previewPanel:sourceFrameOnScreenForPreviewItem: — the item's icon on
+ * screen, which the panel zooms from and back to.
+ *
+ * Inputs:
+ *   panel — the Quick Look panel (unused)
+ *   item  — the item being shown
+ *
+ * Output: icon rect in screen coordinates, or NSZeroRect when its row is
+ *         not visible (the panel then fades instead).
+ */
+- (NSRect)
+previewPanel:(QLPreviewPanel *)panel sourceFrameOnScreenForPreviewItem:(id<QLPreviewItem>)item
+{
+    NSInteger row = (NSInteger)[self.filtered_items indexOfObject:(NSURL *)item];
+    if (row == NSNotFound) return NSZeroRect;
+    NSRect icon = [self.table frameOfCellAtColumn:[self.table columnWithIdentifier:col_name]
+                                              row:row];
+    icon.size.width = [self icon_size];
+    if (!NSIntersectsRect(icon, self.table.visibleRect)) return NSZeroRect;
+    return [self.window convertRectToScreen:[self.table convertRect:icon toView:nil]];
 }
 
 /* ── Edit / File actions ─────────────────────────────────────────────── */
@@ -1516,6 +1903,24 @@ copy:(id)sender
 {
     NSArray<NSURL *> *sel = [self selected_urls];
     if (sel.count > 0) [FilesFileOps copy_urls:sel is_cut:NO];
+}
+
+/*
+ * copy_path: — puts the full path of the selected item (filename
+ * included) on the pasteboard as plain text, e.g.
+ * "/Users/me/Documents/report.pdf". Only for a single selected item.
+ *
+ * Inputs:
+ *   sender — menu item (unused)
+ */
+- (IBAction)
+copy_path:(id)sender
+{
+    NSArray<NSURL *> *sel = [self selected_urls];
+    if (sel.count != 1) return;
+    NSPasteboard *pb = NSPasteboard.generalPasteboard;
+    [pb clearContents];
+    [pb setString:sel.firstObject.path forType:NSPasteboardTypeString];
 }
 
 /*

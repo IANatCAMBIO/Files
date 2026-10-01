@@ -23,9 +23,18 @@ static NSString * const archive_utility_domain = @"com.apple.archiveutility";
 @implementation FilesAppDelegate
 
 /*
- * applicationWillFinishLaunching: — registers preference defaults and
- * prepares window tracking. Runs before application:openURLs:, which a
- * launch to reveal files delivers ahead of applicationDidFinishLaunching:.
+ * applicationWillFinishLaunching: — registers preference defaults,
+ * prepares window tracking and sets the running app's icon. Runs before
+ * application:openURLs:, which a launch to reveal files delivers ahead of
+ * applicationDidFinishLaunching:.
+ *
+ * The icon: macOS 26 draws a bundle icon that is not its rounded-square
+ * shape on a grey rounded-square backdrop. The running app's icon (the
+ * Dock tile while Files runs) is set to folder.png itself; alerts and the
+ * About panel are handed it explicitly (files_new_alert, show_about:),
+ * since they would add the backdrop to the app icon themselves. Finder,
+ * and the Dock while Files is not running, use the bundle icon and keep
+ * the backdrop; only redrawn artwork avoids that.
  *
  * Inputs:
  *   n — NSApplicationWillFinishLaunchingNotification (unused)
@@ -34,6 +43,7 @@ static NSString * const archive_utility_domain = @"com.apple.archiveutility";
 applicationWillFinishLaunching:(NSNotification *)n
 {
     files_register_defaults();
+    if (files_app_icon()) NSApp.applicationIconImage = files_app_icon();
     self.windows = [NSMutableArray array];
     [NSNotificationCenter.defaultCenter addObserver:self
                                            selector:@selector(window_will_close:)
@@ -188,7 +198,7 @@ sync_keep_running_reporting:(BOOL)report
     }
     if (svc.status != SMAppServiceStatusRequiresApproval || !report) return;
 
-    NSAlert *alert        = [[NSAlert alloc] init];
+    NSAlert *alert        = files_new_alert();
     alert.messageText     = @"Allow Files to open at login";
     alert.informativeText = @"Files is turned off in Login Items. Turn it on in System "
                              "Settings ▸ General ▸ Login Items so Files starts at login.";
@@ -259,7 +269,7 @@ sync_archive_utility_reporting:(BOOL)report
 prompt_full_disk_access:(NSString *)reason
 {
     NSString *app_path = NSBundle.mainBundle.bundlePath;
-    NSAlert *alert     = [[NSAlert alloc] init];
+    NSAlert *alert     = files_new_alert();
     alert.messageText  = @"Files needs Full Disk Access";
     alert.informativeText = [NSString stringWithFormat:
         @"%@\n\nTo grant it:\n"
@@ -492,7 +502,8 @@ about_credits(void)
  * 8601), both written by the Makefile; without a readable build date the
  * line is just the version. The copyright line is Info.plist's
  * NSHumanReadableCopyright, and the credits link to camb.io and the
- * license (about_credits).
+ * license (about_credits). The icon is files_app_icon(), passed explicitly
+ * so the panel does not put it on the grey backdrop.
  *
  * Inputs:
  *   sender — menu item (unused)
@@ -502,6 +513,7 @@ show_about:(id)sender
 {
     NSMutableDictionary *options = [NSMutableDictionary dictionary];
     options[NSAboutPanelOptionCredits] = about_credits();
+    if (files_app_icon()) options[NSAboutPanelOptionApplicationIcon] = files_app_icon();
 
     NSString *stamp = NSBundle.mainBundle.infoDictionary[@"FilesBuildDate"];
     NSDate *built   = stamp ? [[[NSISO8601DateFormatter alloc] init] dateFromString:stamp] : nil;
@@ -611,16 +623,42 @@ validateMenuItem:(NSMenuItem *)item
     return YES;
 }
 
-/* ── Devices menu ────────────────────────────────────────────────────────── */
+/* ── Mounts menu ────────────────────────────────────────────────────────── */
 
 /*
- * menuNeedsUpdate: — NSMenuDelegate; repopulates the Devices menu from the
- * mounted volumes each time it opens, so it never needs mount observers.
- * Each volume item navigates the front window's active pane; a separator
- * and "All Mounts…" follow.
+ * add_mount_item:url:name: — appends a Mounts menu item that navigates
+ * the front window's active pane to url, with url's icon.
  *
  * Inputs:
- *   menu — the Devices menu
+ *   menu — the Mounts menu
+ *   url  — volume root or cloud storage folder
+ *   name — item title
+ */
+- (void)
+add_mount_item:(NSMenu *)menu url:(NSURL *)url name:(NSString *)name
+{
+    NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:name
+                                                  action:@selector(mount_menu_item_clicked:)
+                                           keyEquivalent:@""];
+    item.target            = self;
+    item.representedObject = url;
+
+    NSImage *icon = [NSWorkspace.sharedWorkspace iconForFile:url.path];
+    icon.size     = NSMakeSize(16, 16);
+    item.image    = icon;
+
+    [menu addItem:item];
+}
+
+/*
+ * menuNeedsUpdate: — NSMenuDelegate; repopulates the Mounts menu each time
+ * it opens, so it never needs mount observers: the mounted volumes, then
+ * (after a separator) the cloud storage locations — iCloud Drive and File
+ * Provider accounts such as Google Drive — then "All Mounts…". Each location item navigates the front window's
+ * active pane.
+ *
+ * Inputs:
+ *   menu — the Mounts menu
  */
 - (void)
 menuNeedsUpdate:(NSMenu *)menu
@@ -629,18 +667,15 @@ menuNeedsUpdate:(NSMenu *)menu
 
     FilesVolumeManager *vm = FilesVolumeManager.shared;
     for (NSURL *vol in vm.mounted_volumes) {
-        NSString *name  = [vm display_name_for_volume:vol];
-        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:name
-                                                      action:@selector(device_menu_item_clicked:)
-                                               keyEquivalent:@""];
-        item.target           = self;
-        item.representedObject = vol;
+        [self add_mount_item:menu url:vol name:[vm display_name_for_volume:vol]];
+    }
 
-        NSImage *icon = [NSWorkspace.sharedWorkspace iconForFile:vol.path];
-        icon.size     = NSMakeSize(16, 16);
-        item.image    = icon;
-
-        [menu addItem:item];
+    NSArray<NSURL *> *clouds = vm.cloud_storage_locations;
+    if (clouds.count > 0) [menu addItem:NSMenuItem.separatorItem];
+    for (NSURL *cloud in clouds) {
+        NSString *name = nil;
+        [cloud getResourceValue:&name forKey:NSURLLocalizedNameKey error:nil];
+        [self add_mount_item:menu url:cloud name:name ?: cloud.lastPathComponent];
     }
 
     [menu addItem:NSMenuItem.separatorItem];
@@ -653,14 +688,14 @@ menuNeedsUpdate:(NSMenu *)menu
 }
 
 /*
- * device_menu_item_clicked: — navigates the front window's active pane to the
- * volume URL stored in the menu item's representedObject.
+ * mount_menu_item_clicked: — navigates the front window's active pane to the
+ * location stored in the menu item's representedObject.
  *
  * Inputs:
- *   sender — NSMenuItem with representedObject = volume NSURL
+ *   sender — NSMenuItem with representedObject = volume or cloud folder URL
  */
 - (void)
-device_menu_item_clicked:(NSMenuItem *)sender
+mount_menu_item_clicked:(NSMenuItem *)sender
 {
     NSURL *vol = sender.representedObject;
     if (!vol) return;
@@ -786,15 +821,19 @@ build_menu_bar
                                @selector(go_downloads_action:), @"l", NSEventModifierFlagShift)];
     [go_menu addItem:make_item(@"Documents",
                                @selector(go_documents_action:), @"o", NSEventModifierFlagShift)];
+    [go_menu addItem:NSMenuItem.separatorItem];
+    /* No shortcut: ⇧⌘T is File ▸ Open in Terminal. */
+    [go_menu addItem:make_item(@"Trash",
+                               @selector(go_trash_action:),     @"",  0)];
     go_mi.submenu = go_menu;
     [bar addItem:go_mi];
 
-    /* ── Devices menu ── */
-    NSMenuItem *dev_mi = [[NSMenuItem alloc] init];
-    NSMenu *devices_menu  = [[NSMenu alloc] initWithTitle:@"Devices"];
-    devices_menu.delegate = self;  /* rebuilt on open: menuNeedsUpdate: */
-    dev_mi.submenu        = devices_menu;
-    [bar addItem:dev_mi];
+    /* ── Mounts menu ── */
+    NSMenuItem *mounts_mi   = [[NSMenuItem alloc] init];
+    NSMenu     *mounts_menu = [[NSMenu alloc] initWithTitle:@"Mounts"];
+    mounts_menu.delegate    = self;  /* rebuilt on open: menuNeedsUpdate: */
+    mounts_mi.submenu       = mounts_menu;
+    [bar addItem:mounts_mi];
 
     NSApp.mainMenu = bar;
 }
