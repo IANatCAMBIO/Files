@@ -1779,7 +1779,12 @@ viewForTableColumn:(NSTableColumn *)col
         [cell addSubview:tf];
 
         if ([ident isEqualToString:col_name]) {
-            NSImageView *iv = [[NSImageView alloc] init];
+            /* Sized up front: an image set on a zero-frame image view (Auto
+             * Layout has not run yet) is rendered from the icon's largest
+             * representation, a 1024 px bitmap of 4 MB that stays cached
+             * with the icon and is copied again into the view's layer. */
+            NSImageView *iv = [[NSImageView alloc]
+                initWithFrame:NSMakeRect(0, 0, icon_sz, icon_sz)];
             iv.imageScaling = NSImageScaleProportionallyUpOrDown;
             iv.translatesAutoresizingMaskIntoConstraints = NO;
             cell.imageView  = iv;
