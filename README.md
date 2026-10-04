@@ -150,10 +150,10 @@ settings:
 
 | Setting | Files sets | Effect |
 |---------|------------|--------|
-| `NSGlobalDomain NSFileViewer` | `com.cambio.files` | "Show in Finder" / "Reveal in Finder" in other apps (browser downloads, editors, `open -R`) opens Files, with the item selected in its folder |
+| `NSGlobalDomain NSFileViewer` | `com.cambio.files` | "Show in Finder" / "Reveal in Finder" in other apps (browser downloads, editors, System Settings' reveal buttons, `open -R`) opens Files, with the item selected in its folder |
 | `com.apple.finder CreateDesktop` | `false` | Finder draws no desktop icons |
 | `com.apple.finder QuitMenuItem` | `true` | Finder ▸ Quit Finder exists |
-| LaunchServices `LSHandlers` entry for `public.folder` | `com.cambio.files` | Folders opened from other apps (`open ~/Downloads`, Dock folders, Spotlight folder results) open in Files, **after you log out and back in** |
+| `~/.zshrc` block between `# BEGIN Files: open folders in Files` and `# END Files: …` | an `open` shell function | `open <folder>` in Terminal opens Files. Anything else (files, options, `.app` and other packages) goes to the real `open`, as does a folder if Files can't be opened. Added only if zsh is your login shell, takes effect in new Terminal windows, and is removed when Finder is made the default again |
 | `com.apple.archiveutility dearchive-reveal-after`, `archive-reveal-after` | `false` | Archive Utility opens no Finder window on what it expands or creates (needs Full Disk Access; set back to `true`, Archive Utility's default, when Finder is made the default again) |
 
 Files quits Finder when it changes Finder's settings. Finder only reads
@@ -164,19 +164,19 @@ Files records each setting's original value (or that it was not set)
 before changing it. Every launch re-checks the settings and puts back any
 that something else reset.
 
-macOS refuses to change the default app for folders through its API.
-Files therefore writes the LaunchServices setting directly, the way
-ForkLift does (the `com.apple.launchservices.secure` preferences).
-LaunchServices reads it only at login. After logging back in, check it
-with:
+Files can't become the default app for folders. The LaunchServices API
+refuses (`LSSetDefaultRoleHandlerForContentType` returns `paramErr` for
+`public.folder`). macOS 26 also ignores a `public.folder` entry written
+straight into the `com.apple.launchservices.secure` preferences (the way
+ForkLift documents), even after logging out and back in, and later drops
+it. So Files doesn't write one.
 
-```sh
-swift -e 'import AppKit; print(NSWorkspace.shared.urlForApplication(toOpen: .folder)!)'
-```
-
-The result should end in `Files.app/`. If it still shows Finder, this
-macOS version ignores the setting. Everything else keeps working, and
-folders keep opening in Finder.
+This is a different request from a reveal. Revealing an item ("Show in
+Finder", System Settings' reveal buttons) goes to the app named in
+`NSFileViewer`, which is Files. Opening a folder (a Dock folder's "Open in
+Finder", Return on a Spotlight folder result, an app opening a folder
+rather than revealing it) goes to the default app for folders, which
+stays Finder. In zsh, the `open` function sends `open <folder>` to Files.
 
 A revealed folder opens to show its contents. macOS sends reveals as plain
 "open" requests, so Files can't tell them apart. Hidden items are only
@@ -184,6 +184,8 @@ selected while hidden files are shown.
 
 Some things still go to Finder, because macOS gives other apps no way to
 take them:
+- a folder another app opens rather than reveals: a Dock folder's "Open
+  in Finder", a Spotlight folder result (the default app for folders)
 - double-clicking a folder inside a Finder window
 - the Finder and Trash icons in the Dock
 - AirDrop and Connect to Server
@@ -195,15 +197,14 @@ Before removing Files, open **Files ▸ Preferences…**, click **Set default
 file browser to Finder**, and turn off **Keep Files running for faster
 startup** so it is no longer a login item. Files writes every recorded setting back exactly as it was,
 turns Archive Utility's reveal back on, and relaunches Finder. Then quit
-Files, delete `~/Applications/Files.app`, and log out and back in so
-LaunchServices sends folders to Finder again. **Set default file browser
+Files and delete `~/Applications/Files.app`. **Set default file browser
 to Files** switches back.
 
 Either button opens a change log (in Console, from
 `~/Library/Logs/Files/default-file-browser-<date>.log`) listing every
 setting it checked or changed: its value before and after, the Terminal
-command that makes the same change (`defaults write …`, or PlistBuddy and
-`defaults … -array-add` for the LaunchServices folder handler), and
+command that makes the same change (`defaults write …`, or `cat >>` /
+`sed` for the `~/.zshrc` function), and
 whether the new value was confirmed by reading it back. The summary at
 the end lists each check with the `defaults read` command that shows it.
 Clicking the button for the current choice re-checks and repairs every

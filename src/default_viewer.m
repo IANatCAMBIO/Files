@@ -1,5 +1,6 @@
 #import "default_viewer.h"
 #import "util.h"
+#include <pwd.h>
 #include <signal.h>
 #include <unistd.h>
 
@@ -7,11 +8,6 @@
  * domain → key → wrapped original (@[value], or @[] if the key was absent),
  * the form files_sync_prefs reports and accepts. */
 static NSString * const originals_key = @"files.default_viewer.originals";
-
-/* Files' own defaults key holding the LSHandlers entries for folders that
- * the takeover removed (an empty array if there were none). Present only
- * while Files' entry is installed. */
-static NSString * const folder_originals_key = @"files.default_viewer.folder_handlers";
 
 static NSString * const finder_domain = @"com.apple.finder";
 static NSString * const finder_path   = @"/System/Library/CoreServices/Finder.app";
@@ -22,36 +18,32 @@ static NSString * const finder_path   = @"/System/Library/CoreServices/Finder.ap
  * (Archive Utility's own default) while Finder is. */
 static NSString * const archive_utility_domain = @"com.apple.archiveutility";
 
-/* LaunchServices' per-user default-app choices: LSHandlers, an array of
- * { LSHandlerContentType or LSHandlerURLScheme, LSHandlerRole… = bundle ID }.
- * Too large (~0.5 MB) for `defaults write` arguments, so it is edited
- * through CFPreferences, which reaches this non-sandboxed domain. */
-static NSString * const ls_domain     = @"com.apple.LaunchServices/com.apple.launchservices.secure";
-static NSString * const ls_plist_path = @"~/Library/Preferences/com.apple.LaunchServices/"
-                                         "com.apple.launchservices.secure.plist";
-static CFStringRef const ls_handlers  = CFSTR("LSHandlers");
-static NSString * const folder_type   = @"public.folder";
-
 /* Change logs written by files_default_viewer_choose, under ~/Library/Logs. */
 static NSString * const log_folder = @"Logs/Files";
 
 /* Titles of the logged steps both directions share. */
-static NSString * const folder_title           = @"Folders opened from other apps — `open "
-                                                  "~/Downloads`, Dock folders, Spotlight "
-                                                  "(LaunchServices folder handler; takes effect "
-                                                  "after you log out and back in)";
 static NSString * const originals_title        = @"Files' saved copy of the original values "
                                                   "(saved when Files takes over, used and "
                                                   "removed when Finder is restored)";
-static NSString * const folder_originals_title = @"Files' saved copy of the original folder "
-                                                  "handler (saved when Files takes over, used "
-                                                  "and removed when Finder is restored)";
 static NSString * const quit_title             = @"Quit Finder, so it rereads its settings "
                                                   "when it next starts";
 static NSString * const launch_title           = @"Start Finder again, so the desktop and "
                                                   "menus show its settings";
 static NSString * const quit_command           = @"osascript -e 'quit app \"Finder\"'";
 static NSString * const launch_command         = @"open -g -a Finder";
+
+/* The zsh startup file that gets Files' `open` function, which sends
+ * `open <folder>` in Terminal to Files. macOS gives no way to make Files
+ * the default app for folders (LaunchServices rejects public.folder
+ * handlers other than Finder), so this is how Terminal gets it. The
+ * block between the marker lines is Files' own: added while Files is the
+ * default file browser, removed when Finder is. */
+static NSString * const zshrc_path   = @"~/.zshrc";
+static NSString * const shell_begin  = @"# BEGIN Files: open folders in Files";
+static NSString * const shell_end    = @"# END Files: open folders in Files";
+static NSString * const shell_title  = @"Terminal: `open <folder>` in zsh opens Files (a shell "
+                                        "function in ~/.zshrc; new Terminal windows pick it up)";
+static NSString * const shell_verify = @"grep -A14 'BEGIN Files:' ~/.zshrc";
 
 /*
  * FilesChangeLog — the record files_default_viewer_choose shows the user:
@@ -481,99 +473,6 @@ launch_finder(FilesChangeLog *log)
 }
 
 /*
- * folder_handlers — reads LSHandlers, split into the entries that choose
- * the default app for folders and all the others.
- *
- * Inputs:
- *   others — if non-NULL, receives every non-folder entry, in order
- *   where  — if non-NULL, receives the folder entries' indexes in LSHandlers
- *
- * Output: the folder entries (possibly empty), or nil if LSHandlers is not
- *         an array.
- */
-static NSArray<NSDictionary *> *
-folder_handlers(NSMutableArray **others, NSIndexSet **where)
-{
-    id all = CFBridgingRelease(CFPreferencesCopyAppValue(ls_handlers, (__bridge CFStringRef)ls_domain));
-    if (all && ![all isKindOfClass:NSArray.class]) return nil;
-
-    NSMutableArray *folder = [NSMutableArray array], *rest = [NSMutableArray array];
-    NSMutableIndexSet *at  = [NSMutableIndexSet indexSet];
-    NSUInteger i = 0;
-    for (id entry in all) {
-        BOOL is_folder = [entry isKindOfClass:NSDictionary.class] &&
-                         [entry[@"LSHandlerContentType"] isEqual:folder_type];
-        if (is_folder) [at addIndex:i];
-        [(is_folder ? folder : rest) addObject:entry];
-        i++;
-    }
-    if (others) *others = rest;
-    if (where)  *where  = at;
-    return folder;
-}
-
-/*
- * names_files — whether a LaunchServices handler entry sends its type to
- * Files.
- *
- * Inputs:
- *   entry — LSHandlers entry
- *
- * Output: YES if LSHandlerRoleAll or LSHandlerRoleViewer names Files.
- */
-static BOOL
-names_files(NSDictionary *entry)
-{
-    NSString *me = NSBundle.mainBundle.bundleIdentifier;
-    return [entry[@"LSHandlerRoleAll"] isEqual:me] || [entry[@"LSHandlerRoleViewer"] isEqual:me];
-}
-
-/*
- * handlers_text — folder entries for the log.
- *
- * Inputs:
- *   entries — folder entries; nil = could not be read
- *
- * Output: one line per entry naming the app, or what an empty list means.
- */
-static NSString *
-handlers_text(NSArray<NSDictionary *> *entries)
-{
-    if (!entries)            return @"(could not be read)";
-    if (entries.count == 0)  return @"(no entry — macOS uses Finder)";
-    NSMutableArray<NSString *> *lines = [NSMutableArray array];
-    for (NSDictionary *e in entries) {
-        NSString *app = e[@"LSHandlerRoleAll"] ?: e[@"LSHandlerRoleViewer"] ?: @"?";
-        [lines addObject:[NSString stringWithFormat:@"public.folder → %@", app]];
-    }
-    return [lines componentsJoinedByString:@"\n"];
-}
-
-/*
- * folder_setting_text — the folder handler setting's name, for the log.
- *
- * Output: domain, key and which entries.
- */
-static NSString *
-folder_setting_text(void)
-{
-    return [ls_domain stringByAppendingString:@" LSHandlers (public.folder entries)"];
-}
-
-/*
- * folder_read_command — the Terminal command that shows the folder
- * handler entries.
- *
- * Output: the command line.
- */
-static NSString *
-folder_read_command(void)
-{
-    return [NSString stringWithFormat:@"defaults read %@ LSHandlers | grep -B1 -A4 public.folder",
-            ls_domain];
-}
-
-/*
  * skip_step — logs a step this run does not need, so every run lists the
  * same steps: its title, the command it would run, and why it was not
  * needed.
@@ -594,156 +493,160 @@ skip_step(NSString *title, NSString *command, NSString *what, NSString *why, Fil
 }
 
 /*
- * set_folder_handlers — makes entries the only folder entries in
- * LSHandlers, leaving every other entry as it is. LaunchServices reads the
- * file at login, so the change takes effect after logging out and in.
+ * shell_block — Files' block for ~/.zshrc: an `open` function that sends
+ * one or more plain folders to Files and anything else (files, options,
+ * packages such as .app bundles) to the real `open`, which it also falls
+ * back to if Files cannot be opened.
+ *
+ * Output: the block, marker lines included, ending in a newline.
+ */
+static NSString *
+shell_block(void)
+{
+    return [NSString stringWithFormat:
+        @"%@\n"
+         "# Added by Files while it is the default file browser; \"Set default file\n"
+         "# browser to Finder\" in Files' Preferences removes it.\n"
+         "open() {\n"
+         "    local arg\n"
+         "    (( $# )) || { command open; return; }\n"
+         "    for arg in \"$@\"; do\n"
+         "        [[ -d $arg && $(mdls -raw -name kMDItemContentTypeTree -- \"$arg\" 2>/dev/null) == *'\"public.folder\"'* ]] ||\n"
+         "            { command open \"$@\"; return; }\n"
+         "    done\n"
+         "    command open -b %@ \"$@\" 2>/dev/null || command open \"$@\"\n"
+         "}\n"
+         "%@\n",
+        shell_begin, NSBundle.mainBundle.bundleIdentifier, shell_end];
+}
+
+/*
+ * without_shell_block — a zsh startup file's text with Files' block (and
+ * the blank line Files put before it) taken out.
  *
  * Inputs:
- *   entries — folder entries to install (empty: none, i.e. Finder)
+ *   text — file contents
+ *
+ * Output: text unchanged if it has no complete block, else without it.
+ */
+static NSString *
+without_shell_block(NSString *text)
+{
+    /* The nearest begin marker before the end marker, so a stray begin
+     * line above the block never takes the user's lines with it. */
+    NSRange end   = [text rangeOfString:shell_end];
+    if (end.location == NSNotFound) return text;
+    NSRange begin = [text rangeOfString:shell_begin options:NSBackwardsSearch
+                                  range:NSMakeRange(0, end.location)];
+    if (begin.location == NSNotFound) return text;
+
+    NSUInteger from = begin.location, to = NSMaxRange(end);
+    if (to < text.length && [text characterAtIndex:to] == '\n') to++;
+    if (from >= 2 && [[text substringWithRange:NSMakeRange(from - 2, 2)] isEqualToString:@"\n\n"]) from--;
+    return [text stringByReplacingCharactersInRange:NSMakeRange(from, to - from) withString:@""];
+}
+
+/*
+ * shell_state_text — whether a zsh startup file holds Files' block, for
+ * the log.
+ *
+ * Inputs:
+ *   text — file contents; nil = could not be read
+ *   want — Files' current block
+ *
+ * Output: plain-words state.
+ */
+static NSString *
+shell_state_text(NSString *text, NSString *want)
+{
+    if (!text)                                return @"(could not be read)";
+    if ([text containsString:want])           return @"Files' open function is in ~/.zshrc";
+    if ([text containsString:shell_begin])    return @"an older or edited copy of Files' open function is in ~/.zshrc";
+    return @"no open function from Files";
+}
+
+/*
+ * login_shell — the user's login shell.
+ *
+ * Output: its path, e.g. @"/bin/zsh", or nil if unknown.
+ */
+static NSString *
+login_shell(void)
+{
+    struct passwd *pw = getpwuid(getuid());
+    return pw && pw->pw_shell ? @(pw->pw_shell) : nil;
+}
+
+/*
+ * sync_shell_function — adds Files' `open` function to ~/.zshrc (install,
+ * replacing an older copy) or takes it out, leaving the rest of the file as
+ * it is, logged. The file is written in place, so a symlinked ~/.zshrc
+ * keeps its link. Installing is skipped when the login shell is not zsh;
+ * removing always runs.
+ *
+ * Inputs:
+ *   install — YES: add the function; NO: remove it
  *   log     — change log; may be nil
  *
- * Output: YES if LSHandlers now holds exactly these folder entries.
+ * Output: YES if ~/.zshrc now holds (install) or lacks (remove) the block,
+ *         or installing was not needed.
  */
 static BOOL
-set_folder_handlers(NSArray<NSDictionary *> *entries, FilesChangeLog *log)
+sync_shell_function(BOOL install, FilesChangeLog *log)
 {
-    NSMutableArray *others = nil;
-    NSIndexSet *where      = nil;
-    NSArray *current = folder_handlers(&others, &where);
-    BOOL needed = current && ![current isEqualToArray:entries];
-    if (needed) {
-        [others addObjectsFromArray:entries];
-        CFPreferencesSetAppValue(ls_handlers, (__bridge CFArrayRef)others,
-                                 (__bridge CFStringRef)ls_domain);
-        CFPreferencesAppSynchronize((__bridge CFStringRef)ls_domain);
-    }
-    NSArray *after = folder_handlers(NULL, NULL);
-    BOOL ok = [after isEqualToArray:entries];
-    if (!log) return ok;
+    NSString *path  = zshrc_path.stringByExpandingTildeInPath.stringByResolvingSymlinksInPath;
+    NSString *block = shell_block();
+    NSString *shell = login_shell();
+    NSString *add   = [NSString stringWithFormat:@"cat >> ~/.zshrc <<'EOF'\n\n%@EOF", block];
+    NSString *drop  = [NSString stringWithFormat:@"sed -i '' '/^%@$/,/^%@$/d' ~/.zshrc",
+                       shell_begin, shell_end];
 
-    /* The same edit by hand: PlistBuddy removes array items (defaults
-     * cannot), then cfprefsd is restarted so it rereads the file before
-     * defaults appends the new entries. */
-    NSMutableArray<NSString *> *cmds = [NSMutableArray array];
-    [where enumerateIndexesWithOptions:NSEnumerationReverse usingBlock:^(NSUInteger i, BOOL *stop) {
-        [cmds addObject:[NSString stringWithFormat:@"/usr/libexec/PlistBuddy -c 'Delete :LSHandlers:%lu' %@",
-                         (unsigned long)i, ls_plist_path]];
-    }];
-    if (cmds.count > 0) [cmds addObject:@"killall cfprefsd"];
-    for (NSDictionary *e in entries) {
-        [cmds addObject:[NSString stringWithFormat:@"defaults write %@ LSHandlers -array-add %@",
-                         ls_domain, shell_quote(plist_text(e))]];
-    }
-    if (cmds.count == 0) [cmds addObject:@"(none)"];
-
-    BOOL to_files = entries.count > 0;
-    [log step:folder_title];
-    [log note:@"Setting" text:folder_setting_text()];
-    [log note:@"Before" text:handlers_text(current)];
-    [log note:@"After" text:handlers_text(after)];
-    NSString *cmd_text = [cmds componentsJoinedByString:@"\n"];
-    [log note:@"Command" text:needed ? cmd_text : @"(none run: already set)"];
-    [log check:ok
-          what:to_files ? @"Folders open in Files (after you log out and back in)"
-                        : @"No folder handler entry left from Files (folders open in Finder "
-                           "after you log out and back in)"
-        verify:folder_read_command()];
-    return ok;
-}
-
-/*
- * take_over_folders — makes Files the default app for folders in
- * LSHandlers (the approach ForkLift documents; the LaunchServices API
- * rejects public.folder). On the first change it records the folder
- * entries it replaced, less any of Files' own (so a lost record is never
- * rebuilt from Files' entry).
- *
- * Inputs:
- *   log — change log; may be nil
- *
- * Output: YES if Files' entry is installed.
- */
-static BOOL
-take_over_folders(FilesChangeLog *log)
-{
-    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
-    NSString *me       = NSBundle.mainBundle.bundleIdentifier;
-    NSDictionary *mine = @{ @"LSHandlerContentType":       folder_type,
-                            @"LSHandlerRoleAll":           me,
-                            @"LSHandlerPreferredVersions": @{ @"LSHandlerRoleAll": @"-" } };
-    NSArray *current   = folder_handlers(NULL, NULL);
-    BOOL recorded      = [defaults arrayForKey:folder_originals_key] != nil;
-    BOOL record        = current && ![current isEqualToArray:@[mine]] && !recorded;
-
-    BOOL ok = set_folder_handlers(@[mine], log);
-    if (!record) {
-        skip_step(folder_originals_title, defaults_command(me, folder_originals_key, @[@[]]),
-                  @"Original folder handler saved in Files' preferences",
-                  recorded ? @"it was saved earlier, and is kept until Finder is restored"
-                  : current ? @"Files already handles folders, so there is nothing to save"
-                            : @"LaunchServices' settings could not be read", log);
-        return ok;
-    }
-
-    NSArray *saved = [current filteredArrayUsingPredicate:
-                      [NSPredicate predicateWithBlock:^BOOL(NSDictionary *e, NSDictionary *b) {
-        return !names_files(e);
-    }]];
-    [defaults setObject:saved forKey:folder_originals_key];
-    [log step:folder_originals_title];
-    [log note:@"Saved" text:handlers_text(saved)];
-    [log note:@"Command" text:defaults_command(me, folder_originals_key, @[saved])];
-    [log check:[[defaults arrayForKey:folder_originals_key] isEqualToArray:saved]
-          what:@"Original folder handler saved in Files' preferences"
-        verify:read_command(me, folder_originals_key)];
-    return ok;
-}
-
-/*
- * give_back_folders — puts back the folder entries take_over_folders
- * recorded, then forgets the record (kept if the write failed). With no
- * record, the folder handler is left as it is.
- *
- * Inputs:
- *   log — change log; may be nil
- *
- * Output: YES if nothing was recorded or the originals are back.
- */
-static BOOL
-give_back_folders(FilesChangeLog *log)
-{
-    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
-    NSString *me       = NSBundle.mainBundle.bundleIdentifier;
-    NSArray *originals = [defaults arrayForKey:folder_originals_key];
-    NSString *forget   = defaults_command(me, folder_originals_key, @[]);
-    if (!originals) {
-        [log step:folder_title];
-        [log note:@"Setting" text:folder_setting_text()];
-        [log note:@"Value" text:handlers_text(folder_handlers(NULL, NULL))];
-        [log note:@"Command" text:@"(none run)"];
-        [log skip:@"Original folder handler put back"
-              why:@"Files has no saved folder handler, so it did not change it"];
-        skip_step(folder_originals_title, forget,
-                  @"Saved folder handler removed from Files' preferences",
-                  @"nothing was saved", log);
+    if (install && ![shell.lastPathComponent isEqualToString:@"zsh"]) {
+        skip_step(shell_title, add, @"~/.zshrc has Files' open function",
+                  [NSString stringWithFormat:@"your login shell is %@; Files only sets up zsh",
+                   shell ?: @"unknown"], log);
         return YES;
     }
 
-    BOOL ok = set_folder_handlers(originals, log);
-    if (!ok) {
-        skip_step(folder_originals_title, forget,
-                  @"Saved folder handler removed from Files' preferences",
-                  @"kept, because the folder handler could not be put back; Files tries "
-                   "again the next time it opens", log);
-        return NO;
+    BOOL exists      = [NSFileManager.defaultManager fileExistsAtPath:path];
+    NSString *before = exists ? [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding
+                                                             error:nil]
+                              : @"";
+    NSString *want   = nil;
+    if (before) {
+        want = without_shell_block(before);
+        if (install) {
+            if (want.length > 0 && ![want hasSuffix:@"\n"]) want = [want stringByAppendingString:@"\n"];
+            want = [want stringByAppendingFormat:@"%@%@", want.length > 0 ? @"\n" : @"", block];
+        }
     }
-    [defaults removeObjectForKey:folder_originals_key];
-    [log step:folder_originals_title];
-    [log note:@"Command" text:forget];
-    [log check:[defaults objectForKey:folder_originals_key] == nil
-          what:@"Saved folder handler removed from Files' preferences"
-        verify:read_command(me, folder_originals_key)];
-    return YES;
+    BOOL needed = before && ![want isEqualToString:before];
+    if (needed) {
+        [want writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    }
+    NSString *after = [NSFileManager.defaultManager fileExistsAtPath:path]
+                      ? [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil]
+                      : @"";
+    BOOL ok = after && (install ? [after containsString:block] : ![after containsString:shell_begin]);
+    if (!log) return ok;
+
+    [log step:shell_title];
+    [log note:@"Setting" text:[NSString stringWithFormat:@"%@ (%@ … %@)", zshrc_path,
+                               shell_begin, shell_end]];
+    [log note:@"Before" text:shell_state_text(before, block)];
+    [log note:@"After" text:shell_state_text(after, block)];
+    NSString *cmd = install ? ([before containsString:shell_begin]
+                               ? [NSString stringWithFormat:@"%@\n%@", drop, add] : add)
+                            : drop;
+    [log note:@"Command" text:needed ? cmd : [cmd stringByAppendingString:@"\n(not run: already set)"]];
+    [log check:ok
+          what:install ? @"~/.zshrc has Files' open function" : @"~/.zshrc has no open function from Files"
+        verify:shell_verify];
+    if (needed) {
+        [log note:@"Note" text:@"Open a new Terminal window, or run `source ~/.zshrc`, for it to "
+                                "take effect in a shell that is already open."];
+    }
+    return ok;
 }
 
 /*
@@ -770,9 +673,9 @@ sync_archive_reveal(BOOL reveal, FilesChangeLog *log)
  * value each one replaced unless a record already exists (the first
  * original wins, so re-applying after something reset a key keeps the
  * pre-Files value). Records are saved per domain as soon as it is written.
- * Also makes Files the default app for folders (take_over_folders) and
- * stops Archive Utility opening Finder on its results. Quits Finder if one
- * of its settings changed, since Finder reads them only at launch; it
+ * Also adds the `open` function to ~/.zshrc and stops Archive Utility
+ * opening Finder on its results. Quits Finder if one of its settings
+ * changed, since Finder reads them only at launch; it
  * stays quit until something asks for it.
  *
  * Inputs:
@@ -822,7 +725,7 @@ take_over(FilesChangeLog *log)
                   : @"Files changed no setting, so there is nothing to save", log);
     }
 
-    ok = take_over_folders(log) && ok;
+    ok = sync_shell_function(YES, log) && ok;
     ok = sync_archive_reveal(NO, log) && ok;
 
     if (finder_changed) {
@@ -837,9 +740,9 @@ take_over(FilesChangeLog *log)
 }
 
 /*
- * give_back — writes every recorded original back, including the folder
- * handlers (give_back_folders), then forgets the records (kept if a write
- * failed, so the next sync retries), and turns Archive Utility's
+ * give_back — writes every recorded original back, then forgets the records (kept if a write
+ * failed, so the next sync retries), takes the `open` function out of
+ * ~/.zshrc, and turns Archive Utility's
  * reveal-in-Finder back on. Restarts Finder if one of its settings
  * changed, so the desktop and menus match.
  *
@@ -890,7 +793,7 @@ give_back(FilesChangeLog *log)
             verify:read_command(me, originals_key)];
     }
 
-    ok = give_back_folders(log) && ok;
+    ok = sync_shell_function(NO, log) && ok;
     ok = sync_archive_reveal(YES, log) && ok;
 
     if (finder_changed) {
@@ -905,9 +808,9 @@ give_back(FilesChangeLog *log)
 }
 
 /*
- * check_final — confirms, whatever was recorded, that both settings that
- * send files and folders to an app name the chosen one: Files, or (for
- * Finder) anything but Files.
+ * check_final — confirms, whatever was recorded, that "Show in Finder"
+ * requests go to the chosen app: Files, or (for Finder) anything but
+ * Files.
  *
  * Inputs:
  *   files — YES for Files, NO for Finder
@@ -927,17 +830,6 @@ check_final(BOOL files, FilesChangeLog *log)
           what:files ? @"NSGlobalDomain NSFileViewer names Files"
                      : @"NSGlobalDomain NSFileViewer does not name Files"
         verify:read_command(@"NSGlobalDomain", @"NSFileViewer")];
-
-    NSArray<NSDictionary *> *handlers = folder_handlers(NULL, NULL);
-    BOOL handlers_me = NO;
-    for (NSDictionary *e in handlers) handlers_me = handlers_me || names_files(e);
-    [log step:[NSString stringWithFormat:@"Final check: folders go to %@ "
-                                          "(after you log out and back in)", who]];
-    [log note:@"Value" text:handlers_text(handlers)];
-    [log check:handlers && handlers_me == files
-          what:files ? @"A LaunchServices folder handler names Files"
-                     : @"No LaunchServices folder handler names Files"
-        verify:folder_read_command()];
 }
 
 /*
@@ -1035,12 +927,17 @@ write_log(BOOL files, FilesChangeLog *log, NSError **err)
     }
     [out appendString:@"\nChecks (run the \"check\" commands in Terminal to see each value yourself):\n"];
     [out appendString:[log.checks componentsJoinedByString:@"\n"]];
-    [out appendString:files
-        ? @"\n\n\"Show in Finder\" requests from other apps open in Files now. Folders opened\n"
-           "from other apps open in Files after you log out and back in.\n"
-        : @"\n\n\"Show in Finder\" requests go to Finder now. Folders opened from other apps\n"
-           "open in Finder after you log out and back in. Files can now be quit and\n"
-           "uninstalled.\n"];
+    if (files) {
+        [out appendString:@"\n\n\"Show in Finder\" and other reveal requests from other apps open in\n"
+                           "Files now, and in zsh, `open <folder>` opens Files in new Terminal\n"
+                           "windows. A folder that another app opens (rather than reveals) - a\n"
+                           "Dock folder's \"Open in Finder\", a Spotlight result - still opens in\n"
+                           "Finder: macOS lets no other app be the default for folders.\n"];
+    } else {
+        [out appendString:@"\n\n\"Show in Finder\" requests go to Finder now, and `open` in new\n"
+                           "Terminal windows is the plain macOS command again. Files can now be\n"
+                           "quit and uninstalled.\n"];
+    }
 
     return [out writeToURL:url atomically:YES encoding:NSUTF8StringEncoding error:err] ? url : nil;
 }
@@ -1083,9 +980,10 @@ files_default_viewer_choose(BOOL files, NSWindow *window, void (^finished)(void)
 
     NSAlert *alert = files_new_alert();
     alert.messageText     = @"Restore Finder as the default file browser?";
-    alert.informativeText = @"\"Show in Finder\" requests and opened folders will go to Finder "
-                             "again, and the settings Files changed (desktop icons, Finder's "
-                             "Quit menu item, Archive Utility revealing its results) go back "
+    alert.informativeText = @"\"Show in Finder\" requests will go to Finder again, `open` in "
+                             "Terminal loses Files' shell function, and the settings Files "
+                             "changed (desktop icons, Finder's Quit menu item, Archive Utility "
+                             "revealing its results) go back "
                              "to what they were before Files. Do this before uninstalling "
                              "Files. A log of every change opens when it is done.";
     [alert addButtonWithTitle:@"Restore Finder"];

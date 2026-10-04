@@ -175,11 +175,13 @@ build_content
     [rows addObject:self.browser_label];
     [rows addObject:self.files_button];
     [rows addObject:self.finder_button];
-    [rows addObject:note_label(@"\"Show in Finder\" and folders opened from other apps "
-                                "go to the default file browser, and Archive Utility opens "
+    [rows addObject:note_label(@"\"Show in Finder\" and other reveal requests from other apps go to the "
+                                "default file browser, and Archive Utility opens "
                                 "a Finder window on what it creates or expands only while "
-                                "Finder is the default. Folders switch over after "
-                                "you log out and back in. Each button opens a log of every "
+                                "Finder is the default. In zsh, `open <folder>` follows the "
+                                "default too. A folder another app opens rather than reveals "
+                                "(a Dock folder, a Spotlight result) always opens in Finder. "
+                                "Each button opens a log of every "
                                 "setting it checked or changed, the matching Terminal "
                                 "command, and whether the change took effect.")];
 

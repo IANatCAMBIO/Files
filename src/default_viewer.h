@@ -11,19 +11,22 @@
  *                                    apps (NSWorkspace) come to Files
  *   com.apple.finder CreateDesktop = NO  — Finder draws no desktop icons
  *   com.apple.finder QuitMenuItem  = YES — Finder ▸ Quit Finder exists
- *   LaunchServices LSHandlers public.folder → Files — folders opened from
- *                                    other apps (`open ~/Downloads`, Dock
- *                                    folders, Spotlight) open in Files
+ *   ~/.zshrc `open` function     — `open <folder>` in zsh opens Files,
+ *                                    whatever LaunchServices says (a marked
+ *                                    block; added only if zsh is the login
+ *                                    shell, removed whenever Finder is chosen)
  *   com.apple.archiveutility dearchive-reveal-after, archive-reveal-after
  *                                  = NO — Archive Utility opens no Finder
  *                                    window on what it creates or expands
  *                                    (set back to YES, its own default,
  *                                    rather than recorded; needs Full Disk
  *                                    Access, as Archive Utility is sandboxed)
- * The LaunchServices API rejects public.folder (paramErr), so the
- * LSHandlers entry is written directly, as ForkLift does; LaunchServices
- * reads it at login, so it (and its removal) takes effect after logging
- * out and back in.
+ * Files does not try to become the default app for folders: the
+ * LaunchServices API rejects public.folder (paramErr), and macOS 26
+ * ignores (and later drops) an LSHandlers entry written directly. A folder
+ * another app opens (rather than reveals, which NSFileViewer covers) — a
+ * Dock folder, a Spotlight result — goes to Finder; the ~/.zshrc function
+ * covers `open` in Terminal.
  *
  * The first time Files changes a setting it records the value it replaced
  * (or that the key was absent). Turning the preference off writes every
