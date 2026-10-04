@@ -585,9 +585,10 @@ build_context_menu
     add(@"Move to Trash", @selector(move_to_trash_action:));
     add(@"Rename",        @selector(begin_rename:));
     [menu addItem:NSMenuItem.separatorItem];
-    add(@"Get Info",      @selector(get_info_action:));
-    add(@"New Folder",    @selector(new_folder_action:));
-    add(@"New File",      @selector(new_file_action:));
+    add(@"Get Info",            @selector(get_info_action:));
+    add(@"New Terminal Here",   @selector(new_terminal_here:));
+    add(@"New Folder",          @selector(new_folder_action:));
+    add(@"New File",            @selector(new_file_action:));
 
     menu.delegate = self;  /* menuNeedsUpdate: selects the right-clicked row */
     return menu;
@@ -1983,6 +1984,26 @@ add_to_bookmarks:(id)sender
 }
 
 /*
+ * new_terminal_here: — opens a new Terminal window at the selected folder, or
+ * at the current directory when nothing is selected or the right-click landed
+ * on empty space.
+ *
+ * Inputs:
+ *   sender — context-menu item (unused)
+ */
+- (void)
+new_terminal_here:(id)sender
+{
+    (void)sender;
+    NSURL *target = [self selected_folder] ?: self.current_url;
+    if (!target) return;
+    NSTask *task         = [[NSTask alloc] init];
+    task.executableURL   = [NSURL fileURLWithPath:@"/usr/bin/open"];
+    task.arguments       = @[@"-a", @"Terminal", target.path];
+    [task launchAndReturnError:nil];
+}
+
+/*
  * validateMenuItem: — checks each column-header menu item whose column
  * the user shows (Name: always, disabled); shows "Run Application" in the
  * context menu only when
@@ -2016,6 +2037,14 @@ validateMenuItem:(NSMenuItem *)item
         BOOL folder = [self selected_folder] != nil;
         item.hidden = !folder;
         return folder;
+    }
+    if (item.action == @selector(new_terminal_here:)) {
+        /* Show when a single folder is selected or when right-clicking empty
+         * space (target becomes the current directory). */
+        NSArray<NSURL *> *sel = [self selected_urls];
+        BOOL ok = (sel.count == 0 || [self selected_folder] != nil);
+        item.hidden = !ok;
+        return ok;
     }
     if (item.action == @selector(copy_path:)) {
         item.hidden = ([self selected_urls].count != 1);
