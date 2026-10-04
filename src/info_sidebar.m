@@ -6,6 +6,11 @@
 static const CGFloat pad          = 8.0;
 static const CGFloat prev_h       = 150.0;   /* thumbnail area height */
 static const CGFloat icon_edge    = 128.0;   /* an item's icon in that area */
+
+/* How long a thumbnail may take before the item's icon stands in for it.
+ * Quick Look usually answers well inside this, so moving through a folder
+ * goes from thumbnail to thumbnail without the icon flashing in between. */
+static const NSTimeInterval icon_grace = 0.15;
 static const CGFloat row_h        = 18.0;    /* metadata row height */
 static const CGFloat name_h       = 34.0;    /* name label (up to 2 lines) */
 static const CGFloat key_w        = 62.0;    /* key column width */
@@ -196,9 +201,27 @@ cancel_pending
 }
 
 /*
+ * show_icon_for: — shows url's icon in the thumbnail area at icon_edge, not
+ * enlarged to the area's height: enlarged, it is drawn from the icon's
+ * 512 px representation, 1 MB plus a layer copy that stay loaded for each
+ * file type ever selected, because the file list's icon cache keeps the
+ * type's icon alive.
+ *
+ * Inputs:
+ *   url — item whose icon to show
+ */
+- (void)
+show_icon_for:(NSURL *)url
+{
+    [self show_preview:files_icon_for_url(url, icon_edge, NO) scale_up:NO];
+}
+
+/*
  * request_thumbnail: — asks Quick Look for a thumbnail of url sized to the
  * preview view (in points, at the window's backing scale) and shows it when
  * it arrives, unless a newer request or clear/cancel has superseded it.
+ * Until then the area keeps what it showed; url's icon replaces that if
+ * Quick Look has no thumbnail, or has not answered within icon_grace.
  *
  * Inputs:
  *   url — item to thumbnail
@@ -224,23 +247,28 @@ request_thumbnail:(NSURL *)url
                 FilesInfoSidebar *s = ws;
                 if (!s || s->_pending_request != req) return;
                 s->_pending_request = nil;
-                if (rep) [s show_preview:rep.NSImage scale_up:YES];
+                if (rep) {
+                    [s show_preview:rep.NSImage scale_up:YES];
+                } else {
+                    [s show_icon_for:url];
+                }
             });
         }];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(icon_grace * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        FilesInfoSidebar *s = ws;
+        if (s && s->_pending_request == req) [s show_icon_for:url];
+    });
 }
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
 
 /*
  * show_url: — shows the QL thumbnail and metadata for a single item.
- * Immediately sets the item's icon, then, for files and packages, replaces
- * it with the QL thumbnail when the system cache delivers it. A plain
- * folder keeps its icon: its thumbnail would be that icon anyway (minus
- * the git badge of a working tree). The icon is shown at icon_edge, not
- * enlarged to the area's height: enlarged, it is drawn from the icon's
- * 512 px representation, 1 MB plus a layer copy that stay loaded for each
- * file type ever selected, because the file list's icon cache keeps the
- * type's icon alive.
+ * Files and packages show their QL thumbnail, or their icon when there is
+ * none (request_thumbnail:). A plain folder shows its icon at once: its
+ * thumbnail would be that icon anyway (minus the git badge of a working
+ * tree).
  *
  * Inputs:
  *   url — file-system URL of the item to inspect
@@ -271,9 +299,12 @@ show_url:(NSURL *)url
     _row_vals[row_modified].stringValue =
         files_format_date(res[NSURLContentModificationDateKey], NSDateFormatterMediumStyle);
 
-    [self show_preview:files_icon_for_url(url, icon_edge, NO) scale_up:NO];
     BOOL plain_folder = [res[NSURLIsDirectoryKey] boolValue] && ![res[NSURLIsPackageKey] boolValue];
-    if (!plain_folder) [self request_thumbnail:url];
+    if (plain_folder) {
+        [self show_icon_for:url];
+    } else {
+        [self request_thumbnail:url];
+    }
 }
 
 /*
