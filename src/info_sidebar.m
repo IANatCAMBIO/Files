@@ -5,6 +5,7 @@
 /* ── Layout constants (isFlipped = YES: y=0 at top, increases downward) ─── */
 static const CGFloat pad          = 8.0;
 static const CGFloat prev_h       = 150.0;   /* thumbnail area height */
+static const CGFloat icon_edge    = 128.0;   /* an item's icon in that area */
 static const CGFloat row_h        = 18.0;    /* metadata row height */
 static const CGFloat name_h       = 34.0;    /* name label (up to 2 lines) */
 static const CGFloat key_w        = 62.0;    /* key column width */
@@ -115,7 +116,6 @@ build_views
     /* ── Thumbnail ── */
     _preview_view = [[NSImageView alloc]
         initWithFrame:NSMakeRect(pad, pad, content_w, prev_h)];
-    _preview_view.imageScaling   = NSImageScaleProportionallyUpOrDown;
     _preview_view.imageAlignment = NSImageAlignCenter;
     _preview_view.autoresizingMask = NSViewWidthSizable;
     [self addSubview:_preview_view];
@@ -167,6 +167,22 @@ build_views
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 
 /*
+ * show_preview:scale_up: — puts an image in the thumbnail area.
+ *
+ * Inputs:
+ *   image    — image to show
+ *   scale_up — YES to enlarge an image smaller than the area until it fits
+ *              it, NO to show it no larger than its own size
+ */
+- (void)
+show_preview:(NSImage *)image scale_up:(BOOL)scale_up
+{
+    _preview_view.imageScaling = scale_up ? NSImageScaleProportionallyUpOrDown
+                                          : NSImageScaleProportionallyDown;
+    _preview_view.image = image;
+}
+
+/*
  * cancel_pending — cancels any in-flight QL thumbnail request. A completion
  * that still arrives afterwards fails the identity check in show_url:.
  */
@@ -208,7 +224,7 @@ request_thumbnail:(NSURL *)url
                 FilesInfoSidebar *s = ws;
                 if (!s || s->_pending_request != req) return;
                 s->_pending_request = nil;
-                if (rep) s->_preview_view.image = rep.NSImage;
+                if (rep) [s show_preview:rep.NSImage scale_up:YES];
             });
         }];
 }
@@ -220,7 +236,11 @@ request_thumbnail:(NSURL *)url
  * Immediately sets the item's icon, then, for files and packages, replaces
  * it with the QL thumbnail when the system cache delivers it. A plain
  * folder keeps its icon: its thumbnail would be that icon anyway (minus
- * the git badge of a working tree).
+ * the git badge of a working tree). The icon is shown at icon_edge, not
+ * enlarged to the area's height: enlarged, it is drawn from the icon's
+ * 512 px representation, 1 MB plus a layer copy that stay loaded for each
+ * file type ever selected, because the file list's icon cache keeps the
+ * type's icon alive.
  *
  * Inputs:
  *   url — file-system URL of the item to inspect
@@ -251,7 +271,7 @@ show_url:(NSURL *)url
     _row_vals[row_modified].stringValue =
         files_format_date(res[NSURLContentModificationDateKey], NSDateFormatterMediumStyle);
 
-    _preview_view.image = files_icon_for_url(url, 128, NO);
+    [self show_preview:files_icon_for_url(url, icon_edge, NO) scale_up:NO];
     BOOL plain_folder = [res[NSURLIsDirectoryKey] boolValue] && ![res[NSURLIsPackageKey] boolValue];
     if (!plain_folder) [self request_thumbnail:url];
 }
@@ -270,7 +290,7 @@ show_urls:(NSArray<NSURL *> *)urls
 {
     [self cancel_pending];
 
-    _preview_view.image = multi_selection_icon();
+    [self show_preview:multi_selection_icon() scale_up:YES];
     _name_label.stringValue  = [NSString stringWithFormat:@"%lu items selected",
                                  (unsigned long)urls.count];
     _row_vals[row_kind].stringValue       = @"—";
