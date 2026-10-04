@@ -208,6 +208,32 @@ NSDictionary<NSString *, NSArray *> *files_read_prefs(NSString *domain, NSArray<
 
 
 /*
+ * files_get_finder_comment — reads the Spotlight/Finder comment on a file by
+ * decoding the com.apple.metadata:kMDItemFinderComment xattr (a binary
+ * property list). Thread-safe; blocks only for the xattr syscall.
+ *
+ * Inputs:
+ *   url — file URL; may be nil
+ *
+ * Output: the comment string, or nil if none is set or the read fails.
+ */
+NSString *files_get_finder_comment(NSURL *url);
+
+/*
+ * files_set_finder_comment — writes or removes the Spotlight/Finder comment
+ * on a file by setting or removing the com.apple.metadata:kMDItemFinderComment
+ * xattr. An empty or nil comment removes the attribute. Thread-safe; blocks
+ * only for the xattr syscall.
+ *
+ * Inputs:
+ *   url     — file URL
+ *   comment — new comment text, or nil / empty to clear
+ *
+ * Output: YES on success.
+ */
+BOOL files_set_finder_comment(NSURL *url, NSString *comment);
+
+/*
  * files_format_bytes — formats a byte count the way Finder does
  * (NSByteCountFormatter, file style, base 1000). Thread-safe.
  *

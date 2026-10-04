@@ -17,6 +17,7 @@ static NSString * const col_size     = @"size";
 static NSString * const col_kind     = @"kind";
 static NSString * const col_perms    = @"perms";
 static NSString * const col_modified = @"modified";
+static NSString * const col_comment  = @"comment";
 static NSString * const col_git      = @"git";   /* shown only inside a repo */
 
 /*
@@ -35,6 +36,7 @@ static const column_spec_t column_specs[] = {
     { @"kind",     @"Kind",          120,  80 },
     { @"perms",    @"Permissions",    90,  70 },
     { @"modified", @"Date Modified", 160, 120 },
+    { @"comment",  @"Comment",       200, 100 },
     { @"git",      @"Git",            60,  40 },
 };
 #define COLUMN_COUNT (sizeof(column_specs) / sizeof(column_specs[0]))
@@ -1541,6 +1543,9 @@ cell_text_for_column:(NSString *)col_id
         [url getResourceValue:&date forKey:NSURLContentModificationDateKey error:nil];
         return files_format_date(date, NSDateFormatterShortStyle);
 
+    } else if ([col_id isEqualToString:col_comment]) {
+        return files_get_finder_comment(url) ?: @"";
+
     } else if ([col_id isEqualToString:col_git]) {
         return [self.git_tracked containsObject:url.lastPathComponent] ? @"tracked" : @"";
     }
@@ -1790,6 +1795,7 @@ viewForTableColumn:(NSTableColumn *)col
         tf.editable        = NO;
         tf.bordered        = NO;
         tf.drawsBackground = NO;
+        tf.focusRingType   = NSFocusRingTypeNone;
         tf.font            = cell_font_for_column(ident);
         tf.alignment       = [ident isEqualToString:col_size]
                              ? NSTextAlignmentRight : NSTextAlignmentLeft;

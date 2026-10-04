@@ -184,6 +184,8 @@ make_perm_popup(NSString *caption, id target, NSPopUpButton **popup)
 @property (nonatomic, assign) BOOL         current_is_dir;
 @property (nonatomic, strong) NSImageView *icon_view;
 @property (nonatomic, strong) NSTextField *name_field;
+@property (nonatomic, strong) NSTextField *comment_field;
+@property (nonatomic, copy)   NSString    *comment_original; /* value when editing began */
 @property (nonatomic, strong) NSTextField *kind_value;
 @property (nonatomic, strong) NSTextField *opens_with_value;
 @property (nonatomic, strong) NSTextField *size_value;
@@ -279,6 +281,7 @@ init
     self.name_field.bezelStyle    = NSTextFieldRoundedBezel;
     self.name_field.font          = [NSFont boldSystemFontOfSize:13.0];
     self.name_field.delegate      = self;
+    self.name_field.focusRingType = NSFocusRingTypeNone;
     self.name_field.lineBreakMode = NSLineBreakByTruncatingMiddle;
     [self.name_field setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
                                               forOrientation:NSLayoutConstraintOrientationHorizontal];
@@ -303,12 +306,23 @@ init
     self.where_value      = make_value();
     self.created_value    = make_value();
     self.modified_value   = make_value();
+    self.comment_field = [NSTextField textFieldWithString:@""];
+    self.comment_field.placeholderString = @"Add a comment…";
+    self.comment_field.font             = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
+    self.comment_field.delegate         = self;
+    self.comment_field.focusRingType    = NSFocusRingTypeNone;
+    self.comment_field.usesSingleLineMode = NO;
+    self.comment_field.cell.wraps       = YES;
+    [self.comment_field setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                                 forOrientation:NSLayoutConstraintOrientationHorizontal];
+
     row(@"Kind:",       self.kind_value);
     row(@"Opens with:", self.opens_with_value);
     row(@"Size:",       self.size_value);
     row(@"Where:",      self.where_value);
     row(@"Created:",    self.created_value);
     row(@"Modified:",   self.modified_value);
+    row(@"Comments:",   self.comment_field);
 
     NSPopUpButton *owner = nil, *group = nil, *other = nil;
     NSStackView *perms = [NSStackView stackViewWithViews:@[
@@ -595,6 +609,11 @@ populate_fields:(NSURL *)url
     [self set_git_section_visible:is_git];
     if (is_git) [self start_git_job:url];
 
+    /* Spotlight / Finder comment */
+    NSString *comment = files_get_finder_comment(fresh) ?: @"";
+    self.comment_field.stringValue = comment;
+    self.comment_original = comment;
+
     /* Extended attributes */
     [self reload_xattrs];
 }
@@ -808,6 +827,15 @@ controlTextDidEndEditing:(NSNotification *)obj
         return;
     }
 
+    if (obj.object == self.comment_field) {
+        NSString *comment = self.comment_field.stringValue;
+        if (self.current_url && ![comment isEqualToString:self.comment_original]) {
+            files_set_finder_comment(self.current_url, comment);
+            self.comment_original = comment;
+        }
+        return;
+    }
+
     /* xattr table cell */
     NSInteger row = self.xattr_editing_row;
     NSInteger col = self.xattr_editing_col;
@@ -842,6 +870,16 @@ doCommandBySelector:(SEL)cmd
         if (cmd == @selector(cancelOperation:)) {
             [self.name_field abortEditing];
             self.name_field.stringValue = self.current_url.lastPathComponent ?: @"";
+        } else if (cmd != @selector(insertNewline:)) {
+            return NO;
+        }
+        [self.window makeFirstResponder:nil];
+        return YES;
+    }
+    if (control == self.comment_field) {
+        if (cmd == @selector(cancelOperation:)) {
+            [self.comment_field abortEditing];
+            self.comment_field.stringValue = self.comment_original ?: @"";
         } else if (cmd != @selector(insertNewline:)) {
             return NO;
         }

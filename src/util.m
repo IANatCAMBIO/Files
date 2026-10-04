@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/xattr.h>
 #include <errno.h>
 
 NSString * const files_pref_show_hidden     = @"files.show_hidden_files";
@@ -344,6 +345,52 @@ files_opens_with_text(NSURL *url)
     [app getResourceValue:&name forKey:NSURLLocalizedNameKey error:nil];
     name = name ?: app.lastPathComponent;
     return [name.pathExtension isEqualToString:@"app"] ? name.stringByDeletingPathExtension : name;
+}
+
+/*
+ * files_get_finder_comment — reads the Spotlight/Finder comment on a file.
+ * Inputs/output are documented in util.h.
+ */
+NSString *
+files_get_finder_comment(NSURL *url)
+{
+    const char *path = url.fileSystemRepresentation;
+    if (!path) return nil;
+    ssize_t sz = getxattr(path, "com.apple.metadata:kMDItemFinderComment",
+                          NULL, 0, 0, XATTR_NOFOLLOW);
+    if (sz <= 0) return nil;
+    NSMutableData *buf = [NSMutableData dataWithLength:(NSUInteger)sz];
+    if (getxattr(path, "com.apple.metadata:kMDItemFinderComment",
+                 buf.mutableBytes, (size_t)sz, 0, XATTR_NOFOLLOW) != sz) return nil;
+    id obj = [NSPropertyListSerialization propertyListWithData:buf
+                                                       options:0
+                                                        format:nil
+                                                         error:nil];
+    if (![obj isKindOfClass:NSString.class]) return nil;
+    NSString *s = obj;
+    return s.length > 0 ? s : nil;
+}
+
+/*
+ * files_set_finder_comment — writes or removes the Spotlight/Finder comment.
+ * Inputs/output are documented in util.h.
+ */
+BOOL
+files_set_finder_comment(NSURL *url, NSString *comment)
+{
+    const char *path = url.fileSystemRepresentation;
+    if (!path) return NO;
+    if (comment.length == 0) {
+        int r = removexattr(path, "com.apple.metadata:kMDItemFinderComment", XATTR_NOFOLLOW);
+        return r == 0 || errno == ENOATTR;
+    }
+    NSData *plist = [NSPropertyListSerialization dataWithPropertyList:comment
+                                                               format:NSPropertyListBinaryFormat_v1_0
+                                                              options:0
+                                                                error:nil];
+    if (!plist) return NO;
+    return setxattr(path, "com.apple.metadata:kMDItemFinderComment",
+                    plist.bytes, plist.length, 0, XATTR_NOFOLLOW) == 0;
 }
 
 /*
