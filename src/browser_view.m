@@ -760,6 +760,7 @@ apply_view_prefs
     if (human != self.human_readable_sizes) {
         self.human_readable_sizes = human;
         [self refresh_size_column];
+        if (self.auto_fit) [self apply_auto_fit];
     }
     BOOL cols_changed = [self update_column_visibility];
     if (fit && (rows_changed || fit_turned_on || cols_changed)) [self apply_auto_fit];

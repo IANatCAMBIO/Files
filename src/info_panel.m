@@ -5,6 +5,8 @@
 #import "util.h"
 #include <sys/stat.h>
 #include <sys/xattr.h>
+#include <pwd.h>
+#include <grp.h>
 #include <errno.h>
 #include <stdatomic.h>
 
@@ -175,6 +177,63 @@ make_perm_popup(NSString *caption, id target, NSPopUpButton **popup)
     return stack;
 }
 
+/* ── Ownership helpers ───────────────────────────────────────────────── */
+
+/*
+ * local_user_names — sorted list of all local POSIX user account names.
+ *
+ * Output: alphabetically sorted NSArray of NSString.
+ */
+static NSArray<NSString *> *
+local_user_names(void)
+{
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    setpwent();
+    struct passwd *pw;
+    while ((pw = getpwent()) != NULL) [names addObject:@(pw->pw_name)];
+    endpwent();
+    [names sortUsingSelector:@selector(compare:)];
+    return names;
+}
+
+/*
+ * local_group_names — sorted list of all local POSIX group names.
+ *
+ * Output: alphabetically sorted NSArray of NSString.
+ */
+static NSArray<NSString *> *
+local_group_names(void)
+{
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    setgrent();
+    struct group *gr;
+    while ((gr = getgrent()) != NULL) [names addObject:@(gr->gr_name)];
+    endgrent();
+    [names sortUsingSelector:@selector(compare:)];
+    return names;
+}
+
+/*
+ * make_ownership_popup — a small popup pre-populated with the given names.
+ *
+ * Inputs:
+ *   names  — items to add
+ *   target — action target
+ *   action — selector called on selection change
+ *
+ * Output: configured NSPopUpButton.
+ */
+static NSPopUpButton *
+make_ownership_popup(NSArray<NSString *> *names, id target, SEL action)
+{
+    NSPopUpButton *btn = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    btn.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
+    for (NSString *name in names) [btn addItemWithTitle:name];
+    btn.target = target;
+    btn.action = action;
+    return btn;
+}
+
 /* ── FilesInfoPanel ──────────────────────────────────────────────────── */
 
 @interface FilesInfoPanel () <NSTextFieldDelegate, NSWindowDelegate,
@@ -195,8 +254,8 @@ make_perm_popup(NSString *caption, id target, NSPopUpButton **popup)
 @property (nonatomic, strong) NSPopUpButton *owner_perms_popup;
 @property (nonatomic, strong) NSPopUpButton *group_perms_popup;
 @property (nonatomic, strong) NSPopUpButton *other_perms_popup;
-@property (nonatomic, strong) NSTextField *owner_value;
-@property (nonatomic, strong) NSTextField *group_value;
+@property (nonatomic, strong) NSPopUpButton *owner_popup;
+@property (nonatomic, strong) NSPopUpButton *group_popup;
 @property (nonatomic, strong) NSTextField *sha256_value;
 @property (nonatomic, strong) NSTextField *md5_value;
 @property (nonatomic, strong) NSButton    *lock_check;
@@ -214,6 +273,7 @@ make_perm_popup(NSString *caption, id target, NSPopUpButton **popup)
 @property (nonatomic, strong) NSTableView                *xattr_table;
 @property (nonatomic, strong) NSView                     *xattr_container;
 @property (nonatomic, strong) NSButton                   *xattr_disclosure;
+@property (nonatomic, strong) NSButton                   *xattr_add_btn;
 @property (nonatomic, strong) NSButton                   *xattr_delete_btn;
 @property (nonatomic, strong) NSButton                   *xattr_clear_btn;
 @property (nonatomic, assign) NSInteger                   xattr_editing_row;
@@ -341,10 +401,10 @@ init
     perm_row.rowAlignment = NSGridRowAlignmentNone;
     perm_row.yPlacement   = NSGridCellPlacementTop;
 
-    self.owner_value = make_value();
-    self.group_value = make_value();
-    row(@"Owner:", self.owner_value);
-    row(@"Group:", self.group_value);
+    self.owner_popup = make_ownership_popup(local_user_names(),  self, @selector(ownership_popup_changed:));
+    self.group_popup = make_ownership_popup(local_group_names(), self, @selector(ownership_popup_changed:));
+    row(@"Owner:", self.owner_popup);
+    row(@"Group:", self.group_popup);
 
     /* Hash fields: monospaced, tail-truncated with "…", selectable to copy. */
     self.sha256_value = make_value();
@@ -364,7 +424,6 @@ init
 
     self.lock_check = [NSButton checkboxWithTitle:@"Locked" target:self
                                            action:@selector(lock_toggled:)];
-    row(nil, self.lock_check);
 
     /* Git section: a separator and a title across both columns, then rows. */
     NSBox *git_sep = [[NSBox alloc] init];
@@ -404,6 +463,14 @@ init
     [all addArrangedSubview:xattr_sep];
     [all addArrangedSubview:xattr_section];
 
+    /* Lock checkbox pinned to the bottom-right: a spacer pushes it trailing. */
+    NSView *lock_spacer = [[NSView alloc] init];
+    [lock_spacer setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                            forOrientation:NSLayoutConstraintOrientationHorizontal];
+    NSStackView *lock_row = [NSStackView stackViewWithViews:@[lock_spacer, self.lock_check]];
+    lock_row.spacing = 0;
+    [all addArrangedSubview:lock_row];
+
     NSView *cv = panel.contentView;
     [cv addSubview:all];
     [NSLayoutConstraint activateConstraints:@[
@@ -417,6 +484,7 @@ init
         [grid.widthAnchor         constraintEqualToAnchor:all.widthAnchor],
         [xattr_sep.widthAnchor    constraintEqualToAnchor:all.widthAnchor],
         [xattr_section.widthAnchor constraintEqualToAnchor:all.widthAnchor],
+        [lock_row.widthAnchor      constraintEqualToAnchor:all.widthAnchor],
     ]];
     /* Defaults can change on any thread; act on the main queue, and only
      * when Show Hashes itself changed. */
@@ -583,14 +651,17 @@ populate_fields:(NSURL *)url
             [self.group_perms_popup selectItemWithTag:(m >> 3) & 7];
             [self.other_perms_popup selectItemWithTag:m & 7];
         }
-        self.owner_value.stringValue = attrs[NSFileOwnerAccountName] ?: @"—";
-        self.group_value.stringValue = attrs[NSFileGroupOwnerAccountName] ?: @"—";
+        void (^select_or_insert)(NSPopUpButton *, NSString *) = ^(NSPopUpButton *popup, NSString *name) {
+            if (!name || name.length == 0) return;
+            if ([popup indexOfItemWithTitle:name] < 0) [popup insertItemWithTitle:name atIndex:0];
+            [popup selectItemWithTitle:name];
+        };
+        select_or_insert(self.owner_popup, attrs[NSFileOwnerAccountName]);
+        select_or_insert(self.group_popup, attrs[NSFileGroupOwnerAccountName]);
     } else {
         [self.owner_perms_popup selectItemWithTag:0];
         [self.group_perms_popup selectItemWithTag:0];
         [self.other_perms_popup selectItemWithTag:0];
-        self.owner_value.stringValue = @"—";
-        self.group_value.stringValue = @"—";
     }
 
     /* Lock — the user-immutable flag (uchg), same flag lock_toggled: sets.
@@ -598,6 +669,7 @@ populate_fields:(NSURL *)url
     self.lock_check.state = [res[NSURLIsUserImmutableKey] boolValue]
                             ? NSControlStateValueOn
                             : NSControlStateValueOff;
+    [self update_editable_state];
 
     /* Hashes — computed asynchronously when enabled and item is a file. The
      * tooltip doubles as "a real digest is present" for copy_hash_action:. */
@@ -616,6 +688,25 @@ populate_fields:(NSURL *)url
 
     /* Extended attributes */
     [self reload_xattrs];
+}
+
+/*
+ * update_editable_state — enables or disables every editable control to
+ * match the current lock state. When locked, all fields are read-only; the
+ * lock checkbox itself is always enabled so the user can unlock.
+ */
+- (void)
+update_editable_state
+{
+    BOOL editable = (self.lock_check.state != NSControlStateValueOn);
+    self.name_field.editable          = editable;
+    self.comment_field.editable       = editable;
+    self.owner_popup.enabled          = editable;
+    self.group_popup.enabled          = editable;
+    self.owner_perms_popup.enabled    = editable;
+    self.group_perms_popup.enabled    = editable;
+    self.other_perms_popup.enabled    = editable;
+    [self update_xattr_buttons];
 }
 
 /*
@@ -732,6 +823,40 @@ perms_popup_changed:(id)sender
 }
 
 /*
+ * ownership_popup_changed: — applies the current owner and group popup
+ * selections to the current item via lchown(2). Acts on a symlink itself
+ * rather than its target. On failure shows an error sheet and reverts
+ * both popups to match the item's current on-disk ownership.
+ *
+ * Inputs:
+ *   sender — either the owner or group NSPopUpButton (both are read)
+ */
+- (IBAction)
+ownership_popup_changed:(id)sender
+{
+    (void)sender;
+    if (!self.current_url) return;
+
+    const char *path = self.current_url.fileSystemRepresentation;
+    struct stat st;
+    if (lstat(path, &st) != 0) return;
+
+    struct passwd *pw = getpwnam(self.owner_popup.selectedItem.title.UTF8String);
+    struct group  *gr = getgrnam(self.group_popup.selectedItem.title.UTF8String);
+    if (!pw || !gr) return;
+
+    if (lchown(path, pw->pw_uid, gr->gr_gid) != 0) {
+        NSError *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil];
+        files_show_error(@"Could not change ownership", err, self.window);
+        /* Revert popups to the actual on-disk owner and group. */
+        struct passwd *cur_pw = getpwuid(st.st_uid);
+        struct group  *cur_gr = getgrgid(st.st_gid);
+        if (cur_pw) [self.owner_popup selectItemWithTitle:@(cur_pw->pw_name)];
+        if (cur_gr) [self.group_popup selectItemWithTitle:@(cur_gr->gr_name)];
+    }
+}
+
+/*
  * copy_hash_action: — copies the SHA-256 or MD5 digest (chosen by the
  * sender's tag) to the general pasteboard. Does nothing unless a digest has
  * actually been computed (placeholders like "Computing…" or "Error" are never
@@ -787,6 +912,7 @@ lock_toggled:(NSButton *)sender
         files_show_error(@"Could not change lock status", err, self.window);
         sender.state = lock ? NSControlStateValueOff : NSControlStateValueOn;
     }
+    [self update_editable_state];
 }
 
 /*
@@ -1014,7 +1140,8 @@ build_xattr_section
     [scroll.heightAnchor constraintEqualToConstant:120.0].active = YES;
 
     /* Toolbar: leading spacer pushes buttons to the right */
-    NSButton *add_btn     = make_xattr_btn(@"+",        self, @selector(xattr_add:));
+    self.xattr_add_btn    = make_xattr_btn(@"+",        self, @selector(xattr_add:));
+    NSButton *add_btn     = self.xattr_add_btn;
     self.xattr_delete_btn = make_xattr_btn(@"−",        self, @selector(xattr_delete:));
     self.xattr_clear_btn  = make_xattr_btn(@"Clear All", self, @selector(xattr_clear:));
     self.xattr_delete_btn.enabled = NO;
@@ -1119,8 +1246,10 @@ reload_xattrs
 - (void)
 update_xattr_buttons
 {
-    self.xattr_delete_btn.enabled = (self.xattr_table.selectedRowIndexes.count > 0);
-    self.xattr_clear_btn.enabled  = (self.xattr_keys.count > 0);
+    BOOL editable = (self.lock_check.state != NSControlStateValueOn);
+    self.xattr_add_btn.enabled    = editable;
+    self.xattr_delete_btn.enabled = editable && (self.xattr_table.selectedRowIndexes.count > 0);
+    self.xattr_clear_btn.enabled  = editable && (self.xattr_keys.count > 0);
 }
 
 /*
@@ -1133,6 +1262,7 @@ update_xattr_buttons
 xattr_double_click:(id)sender
 {
     (void)sender;
+    if (self.lock_check.state == NSControlStateValueOn) return;
     NSInteger row = self.xattr_table.clickedRow;
     NSInteger col = self.xattr_table.clickedColumn;
     if (row < 0 || row >= (NSInteger)self.xattr_keys.count) return;
