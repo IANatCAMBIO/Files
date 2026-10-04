@@ -126,7 +126,7 @@ files_git_index_path(NSURL *work_tree)
 
 /* Git badge edge: at most git_badge_max points, and at most half the
  * icon's width. */
-static const CGFloat git_badge_max = 16.0;
+static const CGFloat git_badge_max = 32.0;
 
 /* The artwork's bounding box includes the folder's tab, so its center sits
  * above the middle of the folder's front; the badge is lowered by this
