@@ -367,7 +367,7 @@ init
         [self.icon_view.heightAnchor constraintEqualToConstant:icon_size],
     ]];
     self.name_field               = [NSTextField textFieldWithString:@""];
-    self.name_field.bezelStyle    = NSTextFieldRoundedBezel;
+    self.name_field.bezelStyle    = NSTextFieldSquareBezel;
     self.name_field.font          = [NSFont boldSystemFontOfSize:13.0];
     self.name_field.delegate      = self;
     self.name_field.focusRingType = NSFocusRingTypeNone;
