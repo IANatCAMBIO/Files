@@ -4,6 +4,7 @@
 #import "git_info.h"
 #import "util.h"
 #include <sys/stat.h>
+#include <sys/xattr.h>
 #include <errno.h>
 #include <stdatomic.h>
 
@@ -88,6 +89,48 @@ make_copy_btn(id target, SEL action, NSInteger tag)
     return btn;
 }
 
+/* ── xattr helpers ───────────────────────────────────────────────────── */
+
+/*
+ * xattr_val_string — formats an xattr value for display: the raw bytes if
+ * they are valid UTF-8, otherwise a hex dump.
+ *
+ * Inputs:
+ *   data — raw xattr bytes
+ *
+ * Output: display string (never nil)
+ */
+static NSString *
+xattr_val_string(NSData *data)
+{
+    if (data.length == 0) return @"";
+    NSString *s = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (s) return s;
+    NSMutableString *hex = [NSMutableString stringWithCapacity:data.length * 2];
+    const uint8_t *b = data.bytes;
+    for (NSUInteger i = 0; i < data.length; i++) [hex appendFormat:@"%02x", b[i]];
+    return hex;
+}
+
+/*
+ * make_xattr_btn — a small titled button for the xattr row toolbar.
+ *
+ * Inputs:
+ *   title  — button label
+ *   target — action target
+ *   action — action selector
+ *
+ * Output: configured NSButton.
+ */
+static NSButton *
+make_xattr_btn(NSString *title, id target, SEL action)
+{
+    NSButton *btn   = [NSButton buttonWithTitle:title target:target action:action];
+    btn.controlSize = NSControlSizeSmall;
+    btn.bezelStyle  = NSBezelStyleRounded;
+    return btn;
+}
+
 /* ── permissions helper ──────────────────────────────────────────────── */
 
 /*
@@ -134,7 +177,8 @@ make_perm_popup(NSString *caption, id target, NSPopUpButton **popup)
 
 /* ── FilesInfoPanel ──────────────────────────────────────────────────── */
 
-@interface FilesInfoPanel () <NSTextFieldDelegate, NSWindowDelegate>
+@interface FilesInfoPanel () <NSTextFieldDelegate, NSWindowDelegate,
+                               NSTableViewDataSource, NSTableViewDelegate>
 
 @property (nonatomic, strong) NSURL       *current_url;
 @property (nonatomic, assign) BOOL         current_is_dir;
@@ -161,6 +205,17 @@ make_perm_popup(NSString *caption, id target, NSPopUpButton **popup)
 @property (nonatomic, strong) NSTextField *remote_value;
 @property (nonatomic, assign) NSUInteger   git_generation; /* stale guard for git reads */
 @property (nonatomic, strong) NSArray<NSGridRow *> *git_rows; /* separator, header, rows */
+
+/* Extended-attributes section */
+@property (nonatomic, strong) NSMutableArray<NSString *> *xattr_keys;
+@property (nonatomic, strong) NSMutableArray<NSData *>   *xattr_vals;
+@property (nonatomic, strong) NSTableView                *xattr_table;
+@property (nonatomic, strong) NSView                     *xattr_container;
+@property (nonatomic, strong) NSButton                   *xattr_disclosure;
+@property (nonatomic, strong) NSButton                   *xattr_delete_btn;
+@property (nonatomic, strong) NSButton                   *xattr_clear_btn;
+@property (nonatomic, assign) NSInteger                   xattr_editing_row;
+@property (nonatomic, assign) NSInteger                   xattr_editing_col;
 
 @end
 
@@ -322,11 +377,18 @@ init
 
     NSBox *sep = [[NSBox alloc] init];
     sep.boxType = NSBoxSeparator;
+
+    NSBox *xattr_sep    = [[NSBox alloc] init];
+    xattr_sep.boxType   = NSBoxSeparator;
+    NSView *xattr_section = [self build_xattr_section];
+
     NSStackView *all = [NSStackView stackViewWithViews:@[top, sep, grid]];
     all.orientation = NSUserInterfaceLayoutOrientationVertical;
     all.alignment   = NSLayoutAttributeLeading;
     all.spacing     = 10.0;
     all.translatesAutoresizingMaskIntoConstraints = NO;
+    [all addArrangedSubview:xattr_sep];
+    [all addArrangedSubview:xattr_section];
 
     NSView *cv = panel.contentView;
     [cv addSubview:all];
@@ -336,9 +398,11 @@ init
         [all.trailingAnchor constraintEqualToAnchor:cv.trailingAnchor constant:-margin],
         [all.bottomAnchor   constraintEqualToAnchor:cv.bottomAnchor constant:-margin],
         [cv.widthAnchor     constraintEqualToConstant:panel_width],
-        [top.widthAnchor    constraintEqualToAnchor:all.widthAnchor],
-        [sep.widthAnchor    constraintEqualToAnchor:all.widthAnchor],
-        [grid.widthAnchor   constraintEqualToAnchor:all.widthAnchor],
+        [top.widthAnchor          constraintEqualToAnchor:all.widthAnchor],
+        [sep.widthAnchor          constraintEqualToAnchor:all.widthAnchor],
+        [grid.widthAnchor         constraintEqualToAnchor:all.widthAnchor],
+        [xattr_sep.widthAnchor    constraintEqualToAnchor:all.widthAnchor],
+        [xattr_section.widthAnchor constraintEqualToAnchor:all.widthAnchor],
     ]];
     /* Defaults can change on any thread; act on the main queue, and only
      * when Show Hashes itself changed. */
@@ -530,6 +594,9 @@ populate_fields:(NSURL *)url
     BOOL is_git = files_is_git_repo(url);
     [self set_git_section_visible:is_git];
     if (is_git) [self start_git_job:url];
+
+    /* Extended attributes */
+    [self reload_xattrs];
 }
 
 /*
@@ -704,34 +771,53 @@ lock_toggled:(NSButton *)sender
 }
 
 /*
- * controlTextDidEndEditing: — renames the file when the name field loses focus.
- * On failure shows an error sheet and restores the old name. The rename
- * finishes asynchronously; if the panel has moved on to another item by
- * then, its result is not applied to that item.
+ * controlTextDidEndEditing: — commits edits from the name field (rename) or
+ * an xattr table cell (key rename or value update). Escape (NSCancelTextMovement)
+ * is a no-op here because doCommandBySelector: already reverted and aborted.
  *
  * Inputs:
- *   obj — notification from the name text field
+ *   obj — notification from the text field that finished editing
  */
 - (void)
 controlTextDidEndEditing:(NSNotification *)obj
 {
-    if (obj.object != self.name_field) return;
-    NSString *new_name = self.name_field.stringValue;
-    NSURL *old_url     = self.current_url;
-    if (!old_url || new_name.length == 0) return;
-    if ([new_name isEqualToString:old_url.lastPathComponent]) return;
+    /* Escape: the field already reverted its text; nothing to commit. */
+    if ([obj.userInfo[@"NSTextMovement"] integerValue] == NSCancelTextMovement) {
+        self.xattr_editing_row = -1;
+        self.xattr_editing_col = -1;
+        return;
+    }
 
-    [FilesFileOps rename_url:old_url
-                          to:new_name
-                  completion:^(NSURL *new_url, NSError *err) {
-        if (err) files_show_error(@"Rename failed", err, self.window);
-        if (![self.current_url isEqual:old_url]) return;  /* showing another item */
-        if (err) {
-            self.name_field.stringValue = old_url.lastPathComponent;
-        } else {
-            self.current_url = new_url;
-        }
-    }];
+    if (obj.object == self.name_field) {
+        NSString *new_name = self.name_field.stringValue;
+        NSURL *old_url     = self.current_url;
+        if (!old_url || new_name.length == 0) return;
+        if ([new_name isEqualToString:old_url.lastPathComponent]) return;
+
+        [FilesFileOps rename_url:old_url
+                              to:new_name
+                      completion:^(NSURL *new_url, NSError *err) {
+            if (err) files_show_error(@"Rename failed", err, self.window);
+            if (![self.current_url isEqual:old_url]) return;
+            if (err) {
+                self.name_field.stringValue = old_url.lastPathComponent;
+            } else {
+                self.current_url = new_url;
+            }
+        }];
+        return;
+    }
+
+    /* xattr table cell */
+    NSInteger row = self.xattr_editing_row;
+    NSInteger col = self.xattr_editing_col;
+    self.xattr_editing_row = -1;
+    self.xattr_editing_col = -1;
+    if (row < 0 || row >= (NSInteger)self.xattr_keys.count) return;
+
+    NSTextField *tf = (NSTextField *)obj.object;
+    if (![self xattr_commit_edit:row col:col text:tf.stringValue])
+        [self xattr_revert_cell:row col:col];
 }
 
 /*
@@ -751,15 +837,28 @@ control:(NSControl *)control
 textView:(NSTextView *)textView
 doCommandBySelector:(SEL)cmd
 {
-    if (control != self.name_field) return NO;
-    if (cmd == @selector(cancelOperation:)) {
-        [self.name_field abortEditing];
-        self.name_field.stringValue = self.current_url.lastPathComponent ?: @"";
-    } else if (cmd != @selector(insertNewline:)) {
-        return NO;
+    (void)textView;
+    if (control == self.name_field) {
+        if (cmd == @selector(cancelOperation:)) {
+            [self.name_field abortEditing];
+            self.name_field.stringValue = self.current_url.lastPathComponent ?: @"";
+        } else if (cmd != @selector(insertNewline:)) {
+            return NO;
+        }
+        [self.window makeFirstResponder:nil];
+        return YES;
     }
-    [self.window makeFirstResponder:nil];  /* Return: ends editing -> rename */
-    return YES;
+    /* Escape in an xattr cell: revert text and abort editing. */
+    if (cmd == @selector(cancelOperation:) && self.xattr_editing_row >= 0) {
+        NSInteger row = self.xattr_editing_row;
+        NSInteger col = self.xattr_editing_col;
+        self.xattr_editing_row = -1;
+        self.xattr_editing_col = -1;
+        [self xattr_revert_cell:row col:col];
+        [self.xattr_table abortEditing];
+        return YES;
+    }
+    return NO;
 }
 
 /*
@@ -773,6 +872,433 @@ doCommandBySelector:(SEL)cmd
 windowWillClose:(NSNotification *)notification
 {
     [self cancel_hash_job];
+}
+
+/* ── Extended Attributes ─────────────────────────────────────────────── */
+
+/*
+ * make_xattr_cell_view — creates a reusable NSTableCellView with an editable
+ * text field that has self as its delegate.
+ *
+ * Output: configured NSTableCellView.
+ */
+- (NSTableCellView *)
+make_xattr_cell_view
+{
+    NSTableCellView *cell = [[NSTableCellView alloc] init];
+    NSTextField *tf = [NSTextField textFieldWithString:@""];
+    tf.font            = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
+    tf.bordered        = NO;
+    tf.drawsBackground = NO;
+    tf.lineBreakMode   = NSLineBreakByTruncatingTail;
+    tf.delegate        = self;
+    tf.translatesAutoresizingMaskIntoConstraints = NO;
+    [cell addSubview:tf];
+    cell.textField = tf;
+    [NSLayoutConstraint activateConstraints:@[
+        [tf.leadingAnchor  constraintEqualToAnchor:cell.leadingAnchor  constant:2.0],
+        [tf.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-2.0],
+        [tf.centerYAnchor  constraintEqualToAnchor:cell.centerYAnchor],
+    ]];
+    return cell;
+}
+
+/*
+ * xattr_update_disclosure_title — sets the disclosure button title to reflect
+ * whether the section is expanded or collapsed.
+ */
+- (void)
+xattr_update_disclosure_title
+{
+    BOOL open = (self.xattr_disclosure.state == NSControlStateValueOn);
+    self.xattr_disclosure.title = open ? @"▾  Extended Attributes"
+                                       : @"▸  Extended Attributes";
+}
+
+/*
+ * build_xattr_section — creates the Extended Attributes collapsible section:
+ * a disclosure toggle, a two-column table in a scroll view, and an +/−/
+ * Clear All toolbar below it. Returns the section's root view.
+ *
+ * Output: root NSView to add to the panel's main stack.
+ */
+- (NSView *)
+build_xattr_section
+{
+    self.xattr_editing_row = -1;
+    self.xattr_editing_col = -1;
+    self.xattr_keys = [NSMutableArray array];
+    self.xattr_vals = [NSMutableArray array];
+
+    /* Disclosure toggle */
+    self.xattr_disclosure             = [[NSButton alloc] init];
+    self.xattr_disclosure.buttonType  = NSButtonTypeOnOff;
+    self.xattr_disclosure.bordered    = NO;
+    self.xattr_disclosure.font        = [NSFont boldSystemFontOfSize:NSFont.smallSystemFontSize];
+    self.xattr_disclosure.alignment   = NSTextAlignmentLeft;
+    self.xattr_disclosure.target      = self;
+    self.xattr_disclosure.action      = @selector(xattr_disclosure_toggled:);
+    [self xattr_update_disclosure_title];
+
+    /* Table */
+    NSTableView *tv       = [[NSTableView alloc] initWithFrame:NSZeroRect];
+    tv.dataSource         = self;
+    tv.delegate           = self;
+    tv.rowHeight          = 18.0;
+    tv.intercellSpacing   = NSMakeSize(6.0, 2.0);
+    tv.doubleAction       = @selector(xattr_double_click:);
+    tv.target             = self;
+    tv.allowsMultipleSelection = YES;
+    tv.columnAutoresizingStyle = NSTableViewUniformColumnAutoresizingStyle;
+    tv.usesAlternatingRowBackgroundColors = YES;
+    self.xattr_table = tv;
+
+    NSTableColumn *key_col = [[NSTableColumn alloc] initWithIdentifier:@"key"];
+    key_col.title        = @"Attribute";
+    key_col.minWidth     = 60.0;
+    key_col.resizingMask = NSTableColumnAutoresizingMask | NSTableColumnUserResizingMask;
+    NSTableColumn *val_col = [[NSTableColumn alloc] initWithIdentifier:@"val"];
+    val_col.title        = @"Value";
+    val_col.minWidth     = 60.0;
+    val_col.resizingMask = NSTableColumnAutoresizingMask | NSTableColumnUserResizingMask;
+    [tv addTableColumn:key_col];
+    [tv addTableColumn:val_col];
+
+    NSScrollView *scroll       = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    scroll.documentView        = tv;
+    scroll.hasVerticalScroller = YES;
+    scroll.autohidesScrollers  = YES;
+    scroll.borderType          = NSBezelBorder;
+    [scroll.heightAnchor constraintEqualToConstant:120.0].active = YES;
+
+    /* Toolbar: leading spacer pushes buttons to the right */
+    NSButton *add_btn     = make_xattr_btn(@"+",        self, @selector(xattr_add:));
+    self.xattr_delete_btn = make_xattr_btn(@"−",        self, @selector(xattr_delete:));
+    self.xattr_clear_btn  = make_xattr_btn(@"Clear All", self, @selector(xattr_clear:));
+    self.xattr_delete_btn.enabled = NO;
+    self.xattr_clear_btn.enabled  = NO;
+
+    NSView *spacer = [[NSView alloc] init];
+    [spacer setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                       forOrientation:NSLayoutConstraintOrientationHorizontal];
+    NSStackView *btn_row = [NSStackView stackViewWithViews:@[
+        spacer, add_btn, self.xattr_delete_btn, self.xattr_clear_btn
+    ]];
+    btn_row.spacing   = 4.0;
+    btn_row.alignment = NSLayoutAttributeCenterY;
+
+    /* Container (scroll + toolbar) */
+    NSStackView *container = [NSStackView stackViewWithViews:@[scroll, btn_row]];
+    container.orientation  = NSUserInterfaceLayoutOrientationVertical;
+    container.spacing      = 4.0;
+    container.alignment    = NSLayoutAttributeLeading;
+    [scroll.widthAnchor  constraintEqualToAnchor:container.widthAnchor].active = YES;
+    [btn_row.widthAnchor constraintEqualToAnchor:container.widthAnchor].active = YES;
+    container.hidden   = YES;
+    self.xattr_container = container;
+
+    /* Section root (disclosure + container) */
+    NSStackView *section = [NSStackView stackViewWithViews:@[self.xattr_disclosure, container]];
+    section.orientation  = NSUserInterfaceLayoutOrientationVertical;
+    section.spacing      = 6.0;
+    section.alignment    = NSLayoutAttributeLeading;
+    [self.xattr_disclosure.widthAnchor constraintEqualToAnchor:section.widthAnchor].active = YES;
+    [container.widthAnchor             constraintEqualToAnchor:section.widthAnchor].active = YES;
+
+    return section;
+}
+
+/*
+ * xattr_disclosure_toggled: — shows or hides the xattr table and resizes the
+ * panel to fit.
+ *
+ * Inputs:
+ *   sender — the disclosure button (state already toggled)
+ */
+- (IBAction)
+xattr_disclosure_toggled:(NSButton *)sender
+{
+    (void)sender;
+    self.xattr_container.hidden = (self.xattr_disclosure.state != NSControlStateValueOn);
+    [self xattr_update_disclosure_title];
+    [self fit_window];
+}
+
+/*
+ * reload_xattrs — reads all extended attributes for the current item via
+ * listxattr/getxattr (XATTR_NOFOLLOW) into xattr_keys/xattr_vals, then
+ * reloads the table.
+ */
+- (void)
+reload_xattrs
+{
+    [self.xattr_keys removeAllObjects];
+    [self.xattr_vals removeAllObjects];
+
+    if (self.current_url) {
+        const char *path = self.current_url.fileSystemRepresentation;
+        ssize_t list_size = listxattr(path, NULL, 0, XATTR_NOFOLLOW);
+        if (list_size > 0) {
+            char *list = malloc((size_t)list_size);
+            if (list) {
+                ssize_t got = listxattr(path, list, (size_t)list_size, XATTR_NOFOLLOW);
+                if (got > 0) {
+                    char *p = list, *end = list + got;
+                    while (p < end) {
+                        NSString *key = @(p);
+                        p += strlen(p) + 1;
+                        ssize_t vsz = getxattr(path, key.UTF8String,
+                                               NULL, 0, 0, XATTR_NOFOLLOW);
+                        NSData *data = [NSData data];
+                        if (vsz > 0) {
+                            NSMutableData *md = [NSMutableData dataWithLength:(NSUInteger)vsz];
+                            ssize_t n = getxattr(path, key.UTF8String, md.mutableBytes,
+                                                 (size_t)vsz, 0, XATTR_NOFOLLOW);
+                            if (n >= 0)
+                                data = [md subdataWithRange:NSMakeRange(0, (NSUInteger)n)];
+                        }
+                        [self.xattr_keys addObject:key];
+                        [self.xattr_vals addObject:data];
+                    }
+                }
+                free(list);
+            }
+        }
+    }
+
+    [self.xattr_table reloadData];
+    [self update_xattr_buttons];
+}
+
+/*
+ * update_xattr_buttons — enables or disables the delete and clear buttons to
+ * match the current selection and row count.
+ */
+- (void)
+update_xattr_buttons
+{
+    self.xattr_delete_btn.enabled = (self.xattr_table.selectedRowIndexes.count > 0);
+    self.xattr_clear_btn.enabled  = (self.xattr_keys.count > 0);
+}
+
+/*
+ * xattr_double_click: — begins editing the clicked key or value cell.
+ *
+ * Inputs:
+ *   sender — the table view (unused)
+ */
+- (void)
+xattr_double_click:(id)sender
+{
+    (void)sender;
+    NSInteger row = self.xattr_table.clickedRow;
+    NSInteger col = self.xattr_table.clickedColumn;
+    if (row < 0 || row >= (NSInteger)self.xattr_keys.count) return;
+    if (col < 0 || col > 1) return;
+    self.xattr_editing_row = row;
+    self.xattr_editing_col = col;
+    [self.xattr_table editColumn:col row:row withEvent:nil select:YES];
+}
+
+/*
+ * xattr_commit_edit:col:text: — writes an edited key or value to disk and
+ * updates the local arrays. On error, reverts the cell and shows a sheet.
+ * Returns YES on success.
+ *
+ * Inputs:
+ *   row  — row index
+ *   col  — 0 = key column, 1 = value column
+ *   text — new string the user typed
+ *
+ * Output: YES if the write succeeded.
+ */
+- (BOOL)
+xattr_commit_edit:(NSInteger)row col:(NSInteger)col text:(NSString *)text
+{
+    const char *path = self.current_url.fileSystemRepresentation;
+
+    if (col == 0) {  /* key rename */
+        NSString *old_key = self.xattr_keys[(NSUInteger)row];
+        if ([text isEqualToString:old_key]) return YES;
+        if (text.length == 0) return NO;
+        if ([self.xattr_keys containsObject:text]) {
+            files_show_error([NSString stringWithFormat:@"Attribute \"%@\" already exists", text],
+                             nil, self.window);
+            return NO;
+        }
+        NSData *val = self.xattr_vals[(NSUInteger)row];
+        if (setxattr(path, text.UTF8String, val.bytes, val.length, 0, XATTR_NOFOLLOW) != 0) {
+            files_show_error(@"Could not rename attribute",
+                             [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil],
+                             self.window);
+            return NO;
+        }
+        removexattr(path, old_key.UTF8String, XATTR_NOFOLLOW);
+        self.xattr_keys[(NSUInteger)row] = text;
+
+    } else {  /* value edit */
+        NSString *key    = self.xattr_keys[(NSUInteger)row];
+        NSData *new_data = [text dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data];
+        if (setxattr(path, key.UTF8String, new_data.bytes, new_data.length,
+                     0, XATTR_NOFOLLOW) != 0) {
+            files_show_error(@"Could not set attribute value",
+                             [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil],
+                             self.window);
+            return NO;
+        }
+        self.xattr_vals[(NSUInteger)row] = new_data;
+    }
+    return YES;
+}
+
+/*
+ * xattr_revert_cell:col: — restores a table cell's text field to the value in
+ * xattr_keys/xattr_vals (after a failed commit or an Escape).
+ *
+ * Inputs:
+ *   row — row index
+ *   col — 0 = key, 1 = value
+ */
+- (void)
+xattr_revert_cell:(NSInteger)row col:(NSInteger)col
+{
+    NSTableCellView *cell = [self.xattr_table viewAtColumn:col
+                                                       row:row
+                                          makeIfNecessary:NO];
+    if (!cell) return;
+    cell.textField.stringValue = (col == 0)
+        ? self.xattr_keys[(NSUInteger)row]
+        : xattr_val_string(self.xattr_vals[(NSUInteger)row]);
+}
+
+/*
+ * xattr_add: — writes a new xattr with a unique placeholder key, adds it to
+ * the table, and begins editing its key cell.
+ *
+ * Inputs:
+ *   sender — the + button (unused)
+ */
+- (IBAction)
+xattr_add:(id)sender
+{
+    (void)sender;
+    if (!self.current_url) return;
+
+    NSString *key  = @"new.attribute";
+    NSInteger n    = 1;
+    while ([self.xattr_keys containsObject:key])
+        key = [NSString stringWithFormat:@"new.attribute.%ld", (long)n++];
+
+    const char *path = self.current_url.fileSystemRepresentation;
+    if (setxattr(path, key.UTF8String, "", 0, 0, XATTR_NOFOLLOW) != 0) {
+        files_show_error(@"Could not add attribute",
+                         [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil],
+                         self.window);
+        return;
+    }
+    [self.xattr_keys addObject:key];
+    [self.xattr_vals addObject:[NSData data]];
+    NSInteger new_row = (NSInteger)self.xattr_keys.count - 1;
+    [self.xattr_table reloadData];
+    [self.xattr_table selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)new_row]
+                  byExtendingSelection:NO];
+    [self.xattr_table scrollRowToVisible:new_row];
+    self.xattr_editing_row = new_row;
+    self.xattr_editing_col = 0;
+    [self.xattr_table editColumn:0 row:new_row withEvent:nil select:YES];
+    [self update_xattr_buttons];
+}
+
+/*
+ * xattr_delete: — removes all selected xattrs from disk and from the table.
+ *
+ * Inputs:
+ *   sender — the − button (unused)
+ */
+- (IBAction)
+xattr_delete:(id)sender
+{
+    (void)sender;
+    if (!self.current_url) return;
+    NSIndexSet *sel = self.xattr_table.selectedRowIndexes;
+    if (sel.count == 0) return;
+    const char *path = self.current_url.fileSystemRepresentation;
+    [sel enumerateIndexesWithOptions:NSEnumerationReverse
+                          usingBlock:^(NSUInteger idx, BOOL *stop) {
+        (void)stop;
+        removexattr(path, self.xattr_keys[idx].UTF8String, XATTR_NOFOLLOW);
+        [self.xattr_keys removeObjectAtIndex:idx];
+        [self.xattr_vals removeObjectAtIndex:idx];
+    }];
+    [self.xattr_table reloadData];
+    [self update_xattr_buttons];
+}
+
+/*
+ * xattr_clear: — removes every xattr on the current item.
+ *
+ * Inputs:
+ *   sender — the Clear All button (unused)
+ */
+- (IBAction)
+xattr_clear:(id)sender
+{
+    (void)sender;
+    if (!self.current_url || self.xattr_keys.count == 0) return;
+    const char *path = self.current_url.fileSystemRepresentation;
+    for (NSString *key in self.xattr_keys)
+        removexattr(path, key.UTF8String, XATTR_NOFOLLOW);
+    [self.xattr_keys removeAllObjects];
+    [self.xattr_vals removeAllObjects];
+    [self.xattr_table reloadData];
+    [self update_xattr_buttons];
+}
+
+/* ── NSTableViewDataSource ───────────────────────────────────────────── */
+
+/*
+ * numberOfRowsInTableView: — Output: the number of extended attributes.
+ */
+- (NSInteger)
+numberOfRowsInTableView:(NSTableView *)tv
+{
+    (void)tv;
+    return (NSInteger)self.xattr_keys.count;
+}
+
+/* ── NSTableViewDelegate ─────────────────────────────────────────────── */
+
+/*
+ * tableView:viewForTableColumn:row: — returns a cell view with the attribute
+ * key or value string. Reuses views by identifier.
+ */
+- (NSView *)
+tableView:(NSTableView *)tv viewForTableColumn:(NSTableColumn *)col row:(NSInteger)row
+{
+    (void)tv;
+    BOOL is_key = [col.identifier isEqualToString:@"key"];
+    NSString *ident = is_key ? @"xk" : @"xv";
+    NSTableCellView *cell = [tv makeViewWithIdentifier:ident owner:self];
+    if (!cell) {
+        cell            = [self make_xattr_cell_view];
+        cell.identifier = ident;
+    }
+    cell.textField.delegate    = self;
+    cell.textField.stringValue = is_key
+        ? self.xattr_keys[(NSUInteger)row]
+        : xattr_val_string(self.xattr_vals[(NSUInteger)row]);
+    return cell;
+}
+
+/*
+ * tableViewSelectionDidChange: — updates delete/clear button enabled state
+ * when the selection changes.
+ */
+- (void)
+tableViewSelectionDidChange:(NSNotification *)notification
+{
+    (void)notification;
+    [self update_xattr_buttons];
 }
 
 @end
