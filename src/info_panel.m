@@ -949,7 +949,10 @@ build_xattr_section
     tv.doubleAction       = @selector(xattr_double_click:);
     tv.target             = self;
     tv.allowsMultipleSelection = YES;
-    tv.columnAutoresizingStyle = NSTableViewUniformColumnAutoresizingStyle;
+    /* NoColumnAutoresizing keeps columns at their set widths; combined with
+     * hasHorizontalScroller this lets the table scroll sideways when content
+     * is wider than the panel rather than squashing columns to fit. */
+    tv.columnAutoresizingStyle = NSTableViewNoColumnAutoresizing;
     tv.usesAlternatingRowBackgroundColors = YES;
     self.xattr_table = tv;
 
@@ -966,8 +969,9 @@ build_xattr_section
 
     NSScrollView *scroll       = [[NSScrollView alloc] initWithFrame:NSZeroRect];
     scroll.documentView        = tv;
-    scroll.hasVerticalScroller = YES;
-    scroll.autohidesScrollers  = YES;
+    scroll.hasVerticalScroller   = YES;
+    scroll.hasHorizontalScroller = YES;
+    scroll.autohidesScrollers    = YES;
     scroll.borderType          = NSBezelBorder;
     [scroll.heightAnchor constraintEqualToConstant:120.0].active = YES;
 
