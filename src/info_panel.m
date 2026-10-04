@@ -263,8 +263,10 @@ make_ownership_popup(NSArray<NSString *> *names, id target, SEL action)
 @property (nonatomic, strong) NSURL       *current_url;
 @property (nonatomic, assign) BOOL         current_is_dir;
 @property (nonatomic, strong) NSImageView *icon_view;
-@property (nonatomic, strong) NSTextField *name_field;
-@property (nonatomic, strong) NSTextField *comment_field;
+@property (nonatomic, strong) NSTextField        *name_field;
+@property (nonatomic, strong) NSVisualEffectView *name_bg;       /* glass pill for name_field */
+@property (nonatomic, strong) NSTextField        *locked_name_label;
+@property (nonatomic, strong) NSTextField        *comment_field;
 @property (nonatomic, copy)   NSString    *comment_original; /* value when editing began */
 @property (nonatomic, strong) NSTextField *kind_value;
 @property (nonatomic, strong) NSTextField *opens_with_value;
@@ -366,16 +368,47 @@ init
         [self.icon_view.widthAnchor  constraintEqualToConstant:icon_size],
         [self.icon_view.heightAnchor constraintEqualToConstant:icon_size],
     ]];
-    self.name_field                 = [NSTextField textFieldWithString:@""];
-    self.name_field.bezelStyle      = NSTextFieldRoundedBezel;
-    self.name_field.drawsBackground = NO; /* no rect fill — rounded pill only */
+    /* Glass-pill name field: borderless field inside a rounded visual-effect
+     * view, matching the toolbar address bar's appearance. */
+    self.name_field                 = [[NSTextField alloc] init];
+    self.name_field.editable        = YES;
+    self.name_field.selectable      = YES;
+    self.name_field.bordered        = NO;
+    self.name_field.drawsBackground = NO;
     self.name_field.font            = [NSFont boldSystemFontOfSize:13.0];
     self.name_field.delegate        = self;
     self.name_field.focusRingType   = NSFocusRingTypeNone;
     self.name_field.lineBreakMode   = NSLineBreakByTruncatingMiddle;
+    self.name_field.translatesAutoresizingMaskIntoConstraints = NO;
     [self.name_field setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
                                               forOrientation:NSLayoutConstraintOrientationHorizontal];
-    NSStackView *top = [NSStackView stackViewWithViews:@[self.icon_view, self.name_field]];
+
+    self.name_bg              = [[NSVisualEffectView alloc] init];
+    self.name_bg.material     = NSVisualEffectMaterialHeaderView;
+    self.name_bg.blendingMode = NSVisualEffectBlendingModeWithinWindow;
+    self.name_bg.state        = NSVisualEffectStateActive;
+    self.name_bg.wantsLayer   = YES;
+    self.name_bg.layer.cornerRadius  = 7.0;
+    self.name_bg.layer.masksToBounds = YES;
+    [self.name_bg addSubview:self.name_field];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.name_field.leadingAnchor  constraintEqualToAnchor:self.name_bg.leadingAnchor  constant:6.0],
+        [self.name_field.trailingAnchor constraintEqualToAnchor:self.name_bg.trailingAnchor constant:-6.0],
+        [self.name_field.topAnchor      constraintEqualToAnchor:self.name_bg.topAnchor      constant:3.0],
+        [self.name_field.bottomAnchor   constraintEqualToAnchor:self.name_bg.bottomAnchor   constant:-3.0],
+    ]];
+    [self.name_bg setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                           forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    self.locked_name_label               = [NSTextField labelWithString:@""];
+    self.locked_name_label.font          = [NSFont boldSystemFontOfSize:13.0];
+    self.locked_name_label.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    self.locked_name_label.hidden        = YES;
+    [self.locked_name_label setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                                     forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    NSStackView *top = [NSStackView stackViewWithViews:@[self.icon_view, self.name_bg,
+                                                         self.locked_name_label]];
     top.spacing      = 12.0;
 
     NSGridView *grid = [NSGridView gridViewWithNumberOfColumns:2 rows:0];
@@ -663,7 +696,9 @@ populate_fields:(NSURL *)url
     self.icon_view.image = files_icon_for_url(fresh, icon_size, NO);
 
     /* Name */
-    self.name_field.stringValue = res[NSURLNameKey] ?: url.lastPathComponent;
+    NSString *item_name = res[NSURLNameKey] ?: url.lastPathComponent;
+    self.name_field.stringValue        = item_name;
+    self.locked_name_label.stringValue = item_name;
 
     /* Kind: "Folder" for folders, "Application Container" for apps and so on. */
     BOOL is_dir = [res[NSURLIsDirectoryKey] boolValue];
@@ -760,10 +795,10 @@ update_editable_state
 {
     BOOL editable = (self.lock_check.state != NSControlStateValueOn);
 
-    /* Name field: rounded pill when editable, plain label when locked. */
-    self.name_field.editable = editable;
-    self.name_field.bordered = editable;
-    if (editable) self.name_field.bezelStyle = NSTextFieldRoundedBezel;
+    /* Name field: glass pill when editable, plain label when locked. */
+    self.name_field.editable      = editable;
+    self.name_bg.hidden           = !editable;
+    self.locked_name_label.hidden = editable;
 
     /* Swap the interactive grid rows for read-only label rows (or vice versa). */
     for (NSGridRow *r in self.edit_rows_gated)   r.hidden = !editable;
