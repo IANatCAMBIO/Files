@@ -327,6 +327,7 @@ listing_rows(NSArray<NSURL *> *items, NSString *sort_key, BOOL ascending,
 @property (nonatomic, assign) BOOL                     auto_fit;
 @property (nonatomic, assign) BOOL                     show_hidden;
 @property (nonatomic, assign) BOOL                     show_folder_sizes;
+@property (nonatomic, assign) BOOL                     human_readable_sizes;
 
 /* NSUserDefaultsDidChangeNotification observer (main queue). */
 @property (nonatomic, strong) id                       defaults_observer;
@@ -752,6 +753,11 @@ apply_view_prefs
         [self reset_folder_sizes];
         [self refresh_size_column];
         [self count_folder_sizes];
+    }
+    BOOL human = [ud boolForKey:files_pref_human_readable_sizes];
+    if (human != self.human_readable_sizes) {
+        self.human_readable_sizes = human;
+        [self refresh_size_column];
     }
     BOOL cols_changed = [self update_column_visibility];
     if (fit && (rows_changed || fit_turned_on || cols_changed)) [self apply_auto_fit];

@@ -17,6 +17,7 @@ files_view_pref_groups(void)
            @[@"Auto-Fit Columns", files_pref_auto_fit],
            @[@"Large Rows",       files_pref_large_rows],
            @[@"Show Folder Sizes", files_pref_folder_sizes],
+           @[@"Human Readable File Sizes", files_pref_human_readable_sizes],
            @[@"Show Used Disk Space", files_pref_show_used_space] ],
         @[ @[@"Simple Copies",                files_pref_simple_copies],
            @[@"Validate Copies with SHA-256", files_pref_hash_validation] ],

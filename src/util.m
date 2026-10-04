@@ -17,8 +17,9 @@ NSString * const files_pref_keep_running    = @"files.keep_running";
 NSString * const files_pref_hidden_columns  = @"files.hidden_columns";
 NSString * const files_pref_search_this_mac = @"files.search_this_mac";
 NSString * const files_pref_show_bookmarks  = @"files.show_bookmarks";
-NSString * const files_pref_folder_sizes    = @"files.folder_sizes";
-NSString * const files_pref_show_used_space = @"files.show_used_space";
+NSString * const files_pref_folder_sizes         = @"files.folder_sizes";
+NSString * const files_pref_show_used_space      = @"files.show_used_space";
+NSString * const files_pref_human_readable_sizes = @"files.human_readable_sizes";
 
 /*
  * files_register_defaults — registers non-NO preference defaults.
@@ -28,9 +29,10 @@ void
 files_register_defaults(void)
 {
     [NSUserDefaults.standardUserDefaults registerDefaults:@{
-        files_pref_auto_fit:       @YES,
-        files_pref_default_viewer: @YES,
-        files_pref_show_bookmarks: @YES,
+        files_pref_auto_fit:               @YES,
+        files_pref_default_viewer:         @YES,
+        files_pref_show_bookmarks:         @YES,
+        files_pref_human_readable_sizes:   @YES,
     }];
 }
 
@@ -345,19 +347,28 @@ files_opens_with_text(NSURL *url)
 }
 
 /*
- * files_format_bytes — Finder-style byte count via one shared formatter.
- * Inputs/output are documented in util.h.
+ * files_format_bytes — formats a byte count according to the current
+ * files_pref_human_readable_sizes setting. When on (the default), uses
+ * NSByteCountFormatter (Finder-style: 1.2 MB, 345 KB …). When off, returns
+ * the raw count with thousands separators ("1,234,567 bytes"). Thread-safe.
  */
 NSString *
 files_format_bytes(int64_t bytes)
 {
-    static NSByteCountFormatter *fmt;
+    static NSByteCountFormatter *human_fmt;
+    static NSNumberFormatter    *raw_fmt;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        fmt = [[NSByteCountFormatter alloc] init];
-        fmt.countStyle = NSByteCountFormatterCountStyleFile;
+        human_fmt = [[NSByteCountFormatter alloc] init];
+        human_fmt.countStyle = NSByteCountFormatterCountStyleFile;
+        raw_fmt = [[NSNumberFormatter alloc] init];
+        raw_fmt.numberStyle = NSNumberFormatterDecimalStyle;
     });
-    return [fmt stringFromByteCount:bytes];
+    if ([NSUserDefaults.standardUserDefaults boolForKey:files_pref_human_readable_sizes])
+        return [human_fmt stringFromByteCount:bytes];
+    NSString *n = [raw_fmt stringFromNumber:@(bytes)];
+    return bytes == 1 ? [n stringByAppendingString:@" byte"]
+                      : [n stringByAppendingString:@" bytes"];
 }
 
 /*
