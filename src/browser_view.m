@@ -582,13 +582,26 @@ build_context_menu
     add(@"Copy Path to File", @selector(copy_path:));
     add(@"Paste",         @selector(paste:));
     [menu addItem:NSMenuItem.separatorItem];
-    add(@"Move to Trash", @selector(move_to_trash_action:));
     add(@"Rename",        @selector(begin_rename:));
     [menu addItem:NSMenuItem.separatorItem];
     add(@"Get Info",            @selector(get_info_action:));
     add(@"New Terminal Here",   @selector(new_terminal_here:));
     add(@"New Folder",          @selector(new_folder_action:));
     add(@"New File",            @selector(new_file_action:));
+    [menu addItem:NSMenuItem.separatorItem];
+    /* "Move to Trash" / "Delete" pair: holding ⌘ swaps to the alternate. */
+    NSMenuItem *trash_item = [[NSMenuItem alloc] initWithTitle:@"Move to Trash"
+                                                        action:@selector(move_to_trash_action:)
+                                                 keyEquivalent:@""];
+    trash_item.target = self;
+    [menu addItem:trash_item];
+    NSMenuItem *delete_item = [[NSMenuItem alloc] initWithTitle:@"Delete"
+                                                         action:@selector(delete_permanently:)
+                                                  keyEquivalent:@""];
+    delete_item.target                   = self;
+    delete_item.alternate                = YES;
+    delete_item.keyEquivalentModifierMask = NSEventModifierFlagCommand;
+    [menu addItem:delete_item];
 
     menu.delegate = self;  /* menuNeedsUpdate: selects the right-clicked row */
     return menu;
@@ -2329,6 +2342,61 @@ move_to_trash_action:(id)sender
         if (!s) return;
         if (err) files_show_error(@"Could not move to Trash", err, s.window);
         [s reload_directory];
+    }];
+}
+
+/*
+ * delete_permanently: — context menu ▸ Delete (⌘ alternate of Move to Trash):
+ * permanently removes selected items after a confirmation sheet. Items are
+ * deleted on a background queue; errors are shown per-item in the sheet.
+ *
+ * Inputs:
+ *   sender — menu item (unused)
+ */
+- (IBAction)
+delete_permanently:(id)sender
+{
+    (void)sender;
+    NSArray<NSURL *> *sel = [self selected_urls];
+    if (sel.count == 0) return;
+
+    NSAlert *alert     = [[NSAlert alloc] init];
+    alert.alertStyle   = NSAlertStyleCritical;
+    alert.messageText  = sel.count == 1
+        ? [NSString stringWithFormat:@"Permanently delete \"%@\"?",
+           sel.firstObject.lastPathComponent]
+        : [NSString stringWithFormat:@"Permanently delete %lu items?",
+           (unsigned long)sel.count];
+    alert.informativeText = @"This cannot be undone.";
+    [alert addButtonWithTitle:@"Delete"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    __weak FilesBrowserView *ws = self;
+    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
+        if (r != NSAlertFirstButtonReturn) return;
+        FilesBrowserView *s = ws;
+        if (!s) return;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            NSMutableArray<NSString *> *failed = [NSMutableArray array];
+            for (NSURL *url in sel) {
+                NSError *err = nil;
+                if (![NSFileManager.defaultManager removeItemAtURL:url error:&err])
+                    [failed addObject:[NSString stringWithFormat:@"%@: %@",
+                                      url.lastPathComponent, err.localizedDescription]];
+            }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                FilesBrowserView *t = ws;
+                if (!t) return;
+                [t reload_directory];
+                if (failed.count > 0) {
+                    NSAlert *err_alert   = [[NSAlert alloc] init];
+                    err_alert.alertStyle = NSAlertStyleWarning;
+                    err_alert.messageText = @"Some items could not be deleted";
+                    err_alert.informativeText = [failed componentsJoinedByString:@"\n"];
+                    [err_alert beginSheetModalForWindow:t.window completionHandler:nil];
+                }
+            });
+        });
     }];
 }
 
