@@ -366,12 +366,13 @@ init
         [self.icon_view.widthAnchor  constraintEqualToConstant:icon_size],
         [self.icon_view.heightAnchor constraintEqualToConstant:icon_size],
     ]];
-    self.name_field               = [NSTextField textFieldWithString:@""];
-    self.name_field.bezelStyle    = NSTextFieldRoundedBezel;
-    self.name_field.font          = [NSFont boldSystemFontOfSize:13.0];
-    self.name_field.delegate      = self;
-    self.name_field.focusRingType = NSFocusRingTypeNone;
-    self.name_field.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    self.name_field                 = [NSTextField textFieldWithString:@""];
+    self.name_field.bezelStyle      = NSTextFieldRoundedBezel;
+    self.name_field.drawsBackground = NO; /* no rect fill — rounded pill only */
+    self.name_field.font            = [NSFont boldSystemFontOfSize:13.0];
+    self.name_field.delegate        = self;
+    self.name_field.focusRingType   = NSFocusRingTypeNone;
+    self.name_field.lineBreakMode   = NSLineBreakByTruncatingMiddle;
     [self.name_field setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
                                               forOrientation:NSLayoutConstraintOrientationHorizontal];
     NSStackView *top = [NSStackView stackViewWithViews:@[self.icon_view, self.name_field]];
@@ -759,10 +760,10 @@ update_editable_state
 {
     BOOL editable = (self.lock_check.state != NSControlStateValueOn);
 
-    /* Name field: bezel + editable vs. plain label. */
-    self.name_field.editable        = editable;
-    self.name_field.bordered        = editable;
-    self.name_field.drawsBackground = editable;
+    /* Name field: rounded pill when editable, plain label when locked. */
+    self.name_field.editable = editable;
+    self.name_field.bordered = editable;
+    if (editable) self.name_field.bezelStyle = NSTextFieldRoundedBezel;
 
     /* Swap the interactive grid rows for read-only label rows (or vice versa). */
     for (NSGridRow *r in self.edit_rows_gated)   r.hidden = !editable;
