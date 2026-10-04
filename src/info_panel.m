@@ -205,6 +205,7 @@ init
     panel.title              = @"Info";
     panel.releasedWhenClosed = NO;
     panel.level              = NSFloatingWindowLevel;
+    panel.hidesOnDeactivate  = NO;
 
     self = [super initWithWindow:panel];
     if (!self) {

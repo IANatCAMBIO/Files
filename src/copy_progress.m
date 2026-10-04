@@ -82,6 +82,7 @@ init_with_dest:(NSURL *)dest is_cut:(BOOL)is_cut
     panel.title                  = [ing stringByAppendingString:@"..."];
     panel.worksWhenModal         = YES;
     panel.becomesKeyOnlyIfNeeded = YES;
+    panel.hidesOnDeactivate      = NO;
 
     self = [super initWithWindow:panel];
     if (!self) return nil;

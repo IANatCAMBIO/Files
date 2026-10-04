@@ -1,6 +1,9 @@
 #import "info_sidebar.h"
 #import "util.h"
 #import <QuickLookThumbnailing/QuickLookThumbnailing.h>
+#include <sys/stat.h>
+#include <pwd.h>
+#include <grp.h>
 
 /* ── Layout constants (isFlipped = YES: y=0 at top, increases downward) ─── */
 static const CGFloat pad          = 8.0;
@@ -13,7 +16,7 @@ static const CGFloat icon_edge    = 128.0;   /* an item's icon in that area */
 static const NSTimeInterval icon_grace = 0.15;
 static const CGFloat row_h        = 18.0;    /* metadata row height */
 static const CGFloat name_h       = 34.0;    /* name label (up to 2 lines) */
-static const CGFloat key_w        = 62.0;    /* key column width */
+static const CGFloat key_w        = 70.0;    /* key column width */
 static const CGFloat key_val_gap  = 4.0;     /* gap between key and value */
 
 static const CGFloat sep1_y       = pad + prev_h + 6.0;           /* 164 */
@@ -22,14 +25,43 @@ static const CGFloat sep2_y       = name_y + name_h + 4.0;        /* 209 */
 static const CGFloat first_row_y  = sep2_y + 1.0 + 6.0;           /* 216 */
 
 /* Metadata rows, in display order; indexes row_keys and _row_vals. */
-enum { row_kind, row_opens_with, row_size, row_created, row_modified, row_count };
+enum { row_kind, row_opens_with, row_size, row_created, row_modified,
+       row_owner, row_group, row_permissions, row_count };
 static NSString * const row_keys[row_count] = {
-    [row_kind]       = @"Kind",
-    [row_opens_with] = @"Opens with",
-    [row_size]     = @"Size",
-    [row_created]  = @"Created",
-    [row_modified] = @"Modified",
+    [row_kind]        = @"Kind",
+    [row_opens_with]  = @"Opens with",
+    [row_size]        = @"Size",
+    [row_created]     = @"Created",
+    [row_modified]    = @"Modified",
+    [row_owner]       = @"Owner",
+    [row_group]       = @"Group",
+    [row_permissions] = @"Permissions",
 };
+
+/*
+ * format_mode — POSIX permission bits as a 9-character rwxrwxrwx string.
+ *
+ * Inputs:
+ *   mode — st_mode from stat(2)
+ *
+ * Output: NSString like "rwxr-xr-x"
+ */
+static NSString *
+format_mode(mode_t mode)
+{
+    char buf[10];
+    buf[0] = (mode & S_IRUSR) ? 'r' : '-';
+    buf[1] = (mode & S_IWUSR) ? 'w' : '-';
+    buf[2] = (mode & S_IXUSR) ? 'x' : '-';
+    buf[3] = (mode & S_IRGRP) ? 'r' : '-';
+    buf[4] = (mode & S_IWGRP) ? 'w' : '-';
+    buf[5] = (mode & S_IXGRP) ? 'x' : '-';
+    buf[6] = (mode & S_IROTH) ? 'r' : '-';
+    buf[7] = (mode & S_IWOTH) ? 'w' : '-';
+    buf[8] = (mode & S_IXOTH) ? 'x' : '-';
+    buf[9] = '\0';
+    return @(buf);
+}
 
 /*
  * multi_selection_icon — the image shown for a multi-item selection:
@@ -299,6 +331,27 @@ show_url:(NSURL *)url
     _row_vals[row_modified].stringValue =
         files_format_date(res[NSURLContentModificationDateKey], NSDateFormatterMediumStyle);
 
+    struct stat st;
+    if (lstat(url.fileSystemRepresentation, &st) == 0) {
+        _row_vals[row_permissions].stringValue = format_mode(st.st_mode);
+
+        char pw_buf[256];
+        struct passwd pw, *pw_res;
+        _row_vals[row_owner].stringValue =
+            (getpwuid_r(st.st_uid, &pw, pw_buf, sizeof(pw_buf), &pw_res) == 0 && pw_res)
+            ? @(pw.pw_name) : [NSString stringWithFormat:@"%u", st.st_uid];
+
+        char gr_buf[256];
+        struct group gr, *gr_res;
+        _row_vals[row_group].stringValue =
+            (getgrgid_r(st.st_gid, &gr, gr_buf, sizeof(gr_buf), &gr_res) == 0 && gr_res)
+            ? @(gr.gr_name) : [NSString stringWithFormat:@"%u", st.st_gid];
+    } else {
+        _row_vals[row_permissions].stringValue = @"—";
+        _row_vals[row_owner].stringValue       = @"—";
+        _row_vals[row_group].stringValue       = @"—";
+    }
+
     BOOL plain_folder = [res[NSURLIsDirectoryKey] boolValue] && ![res[NSURLIsPackageKey] boolValue];
     if (plain_folder) {
         [self show_icon_for:url];
@@ -324,10 +377,13 @@ show_urls:(NSArray<NSURL *> *)urls
     [self show_preview:multi_selection_icon() scale_up:YES];
     _name_label.stringValue  = [NSString stringWithFormat:@"%lu items selected",
                                  (unsigned long)urls.count];
-    _row_vals[row_kind].stringValue       = @"—";
-    _row_vals[row_opens_with].stringValue = @"—";
-    _row_vals[row_created].stringValue    = @"—";
-    _row_vals[row_modified].stringValue = @"—";
+    _row_vals[row_kind].stringValue        = @"—";
+    _row_vals[row_opens_with].stringValue  = @"—";
+    _row_vals[row_created].stringValue     = @"—";
+    _row_vals[row_modified].stringValue    = @"—";
+    _row_vals[row_owner].stringValue       = @"—";
+    _row_vals[row_group].stringValue       = @"—";
+    _row_vals[row_permissions].stringValue = @"—";
 
     NSArray<NSURLResourceKey> *keys = @[NSURLIsDirectoryKey, NSURLFileSizeKey];
     int64_t    total    = 0;
