@@ -177,6 +177,27 @@ make_perm_popup(NSString *caption, id target, NSPopUpButton **popup)
     return stack;
 }
 
+/* ── Permission string helper ────────────────────────────────────────── */
+
+/*
+ * format_mode_text — formats the lower 9 bits of a POSIX mode as a
+ * nine-character rwx string (e.g. "rwxr-xr-x").
+ *
+ * Inputs:
+ *   m — st_mode value (type bits are ignored)
+ *
+ * Output: NSString of exactly 9 characters.
+ */
+static NSString *
+format_mode_text(mode_t m)
+{
+    static const char rwx[] = "rwxrwxrwx";
+    char buf[10];
+    for (int i = 0; i < 9; i++) buf[i] = (m >> (8 - i)) & 1 ? rwx[i] : '-';
+    buf[9] = '\0';
+    return @(buf);
+}
+
 /* ── Ownership helpers ───────────────────────────────────────────────── */
 
 /*
@@ -256,6 +277,14 @@ make_ownership_popup(NSArray<NSString *> *names, id target, SEL action)
 @property (nonatomic, strong) NSPopUpButton *other_perms_popup;
 @property (nonatomic, strong) NSPopUpButton *owner_popup;
 @property (nonatomic, strong) NSPopUpButton *group_popup;
+/* Read-only text labels shown in place of the interactive controls when locked. */
+@property (nonatomic, strong) NSTextField *locked_perm_value;
+@property (nonatomic, strong) NSTextField *locked_owner_value;
+@property (nonatomic, strong) NSTextField *locked_group_value;
+@property (nonatomic, strong) NSTextField *locked_comment_value;
+/* Parallel edit / locked grid rows for switching between interactive and label views. */
+@property (nonatomic, strong) NSArray<NSGridRow *> *edit_rows_gated;
+@property (nonatomic, strong) NSArray<NSGridRow *> *locked_rows_gated;
 @property (nonatomic, strong) NSTextField *sha256_value;
 @property (nonatomic, strong) NSTextField *md5_value;
 @property (nonatomic, strong) NSButton    *lock_check;
@@ -382,8 +411,17 @@ init
     row(@"Where:",      self.where_value);
     row(@"Created:",    self.created_value);
     row(@"Modified:",   self.modified_value);
-    row(@"Comments:",   self.comment_field);
 
+    /* Comments — editable row + locked-state label row. */
+    NSGridRow *comment_edit_row = row(@"Comments:", self.comment_field);
+    self.locked_comment_value = [NSTextField wrappingLabelWithString:@""];
+    self.locked_comment_value.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
+    [self.locked_comment_value setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                                        forOrientation:NSLayoutConstraintOrientationHorizontal];
+    NSGridRow *comment_locked_row = row(@"Comments:", self.locked_comment_value);
+    comment_locked_row.hidden = YES;
+
+    /* Permissions — three-popup edit row + locked-state text row. */
     NSPopUpButton *owner = nil, *group = nil, *other = nil;
     NSStackView *perms = [NSStackView stackViewWithViews:@[
         make_perm_popup(@"Owner", self, &owner),
@@ -395,16 +433,29 @@ init
     self.owner_perms_popup = owner;
     self.group_perms_popup = group;
     self.other_perms_popup = other;
-    /* The popups' captions sit below them: align the label with the popups'
-     * tops, not a baseline. */
-    NSGridRow *perm_row  = row(@"Permissions:", perms);
-    perm_row.rowAlignment = NSGridRowAlignmentNone;
-    perm_row.yPlacement   = NSGridCellPlacementTop;
+    NSGridRow *perm_edit_row  = row(@"Permissions:", perms);
+    perm_edit_row.rowAlignment = NSGridRowAlignmentNone;
+    perm_edit_row.yPlacement   = NSGridCellPlacementTop;
+    self.locked_perm_value = make_value();
+    self.locked_perm_value.font = [NSFont monospacedSystemFontOfSize:NSFont.smallSystemFontSize
+                                                              weight:NSFontWeightRegular];
+    NSGridRow *perm_locked_row = row(@"Permissions:", self.locked_perm_value);
+    perm_locked_row.hidden = YES;
 
+    /* Owner and Group — popup edit rows + locked-state label rows. */
     self.owner_popup = make_ownership_popup(local_user_names(),  self, @selector(ownership_popup_changed:));
     self.group_popup = make_ownership_popup(local_group_names(), self, @selector(ownership_popup_changed:));
-    row(@"Owner:", self.owner_popup);
-    row(@"Group:", self.group_popup);
+    NSGridRow *owner_edit_row = row(@"Owner:", self.owner_popup);
+    self.locked_owner_value = make_value();
+    NSGridRow *owner_locked_row = row(@"Owner:", self.locked_owner_value);
+    owner_locked_row.hidden = YES;
+    NSGridRow *group_edit_row = row(@"Group:", self.group_popup);
+    self.locked_group_value = make_value();
+    NSGridRow *group_locked_row = row(@"Group:", self.locked_group_value);
+    group_locked_row.hidden = YES;
+
+    self.edit_rows_gated   = @[comment_edit_row,   perm_edit_row,   owner_edit_row,   group_edit_row];
+    self.locked_rows_gated = @[comment_locked_row, perm_locked_row, owner_locked_row, group_locked_row];
 
     /* Hash fields: monospaced, tail-truncated with "…", selectable to copy. */
     self.sha256_value = make_value();
@@ -650,18 +701,24 @@ populate_fields:(NSURL *)url
             [self.owner_perms_popup selectItemWithTag:(m >> 6) & 7];
             [self.group_perms_popup selectItemWithTag:(m >> 3) & 7];
             [self.other_perms_popup selectItemWithTag:m & 7];
+            self.locked_perm_value.stringValue = format_mode_text(m);
         }
-        void (^select_or_insert)(NSPopUpButton *, NSString *) = ^(NSPopUpButton *popup, NSString *name) {
-            if (!name || name.length == 0) return;
+        void (^select_or_insert)(NSPopUpButton *, NSTextField *, NSString *) =
+            ^(NSPopUpButton *popup, NSTextField *label, NSString *name) {
+            if (!name || name.length == 0) { label.stringValue = @"—"; return; }
             if ([popup indexOfItemWithTitle:name] < 0) [popup insertItemWithTitle:name atIndex:0];
             [popup selectItemWithTitle:name];
+            label.stringValue = name;
         };
-        select_or_insert(self.owner_popup, attrs[NSFileOwnerAccountName]);
-        select_or_insert(self.group_popup, attrs[NSFileGroupOwnerAccountName]);
+        select_or_insert(self.owner_popup, self.locked_owner_value, attrs[NSFileOwnerAccountName]);
+        select_or_insert(self.group_popup, self.locked_group_value, attrs[NSFileGroupOwnerAccountName]);
     } else {
         [self.owner_perms_popup selectItemWithTag:0];
         [self.group_perms_popup selectItemWithTag:0];
         [self.other_perms_popup selectItemWithTag:0];
+        self.locked_perm_value.stringValue  = @"—";
+        self.locked_owner_value.stringValue = @"—";
+        self.locked_group_value.stringValue = @"—";
     }
 
     /* Lock — the user-immutable flag (uchg), same flag lock_toggled: sets.
@@ -683,7 +740,8 @@ populate_fields:(NSURL *)url
 
     /* Spotlight / Finder comment */
     NSString *comment = files_get_finder_comment(fresh) ?: @"";
-    self.comment_field.stringValue = comment;
+    self.comment_field.stringValue        = comment;
+    self.locked_comment_value.stringValue = comment;
     self.comment_original = comment;
 
     /* Extended attributes */
@@ -691,22 +749,27 @@ populate_fields:(NSURL *)url
 }
 
 /*
- * update_editable_state — enables or disables every editable control to
- * match the current lock state. When locked, all fields are read-only; the
- * lock checkbox itself is always enabled so the user can unlock.
+ * update_editable_state — switches between interactive controls and read-only
+ * text labels to match the current lock state. When locked, all fields become
+ * plain labels identical to the sidebar; the lock checkbox stays enabled so
+ * the user can unlock. Calls fit_window because hidden grid rows collapse.
  */
 - (void)
 update_editable_state
 {
     BOOL editable = (self.lock_check.state != NSControlStateValueOn);
-    self.name_field.editable          = editable;
-    self.comment_field.editable       = editable;
-    self.owner_popup.enabled          = editable;
-    self.group_popup.enabled          = editable;
-    self.owner_perms_popup.enabled    = editable;
-    self.group_perms_popup.enabled    = editable;
-    self.other_perms_popup.enabled    = editable;
+
+    /* Name field: bezel + editable vs. plain label. */
+    self.name_field.editable        = editable;
+    self.name_field.bordered        = editable;
+    self.name_field.drawsBackground = editable;
+
+    /* Swap the interactive grid rows for read-only label rows (or vice versa). */
+    for (NSGridRow *r in self.edit_rows_gated)   r.hidden = !editable;
+    for (NSGridRow *r in self.locked_rows_gated) r.hidden =  editable;
+
     [self update_xattr_buttons];
+    [self fit_window];
 }
 
 /*
