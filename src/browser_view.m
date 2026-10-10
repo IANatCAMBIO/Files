@@ -577,6 +577,7 @@ build_context_menu
     };
 
     add(@"Open",          @selector(open_selected:));
+    add(@"Open With…",    @selector(open_with:));
     add(@"Run Application", @selector(run_application:));
     add(@"Add to Bookmarks", @selector(add_to_bookmarks:));
     [menu addItem:NSMenuItem.separatorItem];
@@ -1620,7 +1621,7 @@ apply_auto_fit
         }
 
         col.width = MAX(col.minWidth, max_w);
-        total    += col.width + self.table.intercellSpacing.width;
+        total    += col.width;
     }
 
     /* Fit to the visible width. With legacy (always-visible) scrollers the
@@ -1937,6 +1938,61 @@ open_selected:(id)sender
 }
 
 /*
+ * open_with: — context menu ▸ Open With…: lets the user pick an application
+ * bundle or an executable binary and opens the selected items with it. An
+ * application bundle is launched through NSWorkspace; a plain executable is
+ * run directly with the selected paths as its arguments.
+ *
+ * Inputs:
+ *   sender — context-menu item (unused)
+ */
+- (void)
+open_with:(id)sender
+{
+    NSArray<NSURL *> *items = [self selected_urls];
+    if (items.count == 0) return;
+
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.title                   = @"Open With";
+    panel.prompt                  = @"Open";
+    panel.message                 = @"Choose an application or executable";
+    panel.canChooseFiles          = YES;
+    panel.canChooseDirectories    = NO;
+    panel.allowsMultipleSelection = NO;
+    panel.treatsFilePackagesAsDirectories = NO;
+    panel.directoryURL = [NSURL fileURLWithPath:@"/Applications"];
+    if ([panel runModal] != NSModalResponseOK || !panel.URL) return;
+
+    NSURL *tool = panel.URL;
+    __weak NSWindow *win = self.window;
+    NSNumber *is_app = nil;
+    [tool getResourceValue:&is_app forKey:NSURLIsApplicationKey error:nil];
+
+    if (is_app.boolValue) {
+        [NSWorkspace.sharedWorkspace openURLs:items
+                         withApplicationAtURL:tool
+                                configuration:[NSWorkspaceOpenConfiguration configuration]
+                            completionHandler:^(NSRunningApplication *ra, NSError *err) {
+            if (!err) return;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                files_show_error(@"Could not open with application", err, win);
+            });
+        }];
+        return;
+    }
+
+    NSMutableArray<NSString *> *args = [NSMutableArray array];
+    for (NSURL *url in items) [args addObject:url.path];
+    NSTask *task       = [[NSTask alloc] init];
+    task.executableURL = tool;
+    task.arguments     = args;
+    NSError *err = nil;
+    if (![task launchAndReturnError:&err]) {
+        files_show_error(@"Could not open with program", err, win);
+    }
+}
+
+/*
  * application_urls: — the application bundles among urls.
  *
  * Inputs:
@@ -2033,7 +2089,8 @@ new_terminal_here:(id)sender
  * validateMenuItem: — checks each column-header menu item whose column
  * the user shows (Name: always, disabled); shows "Run Application" in the
  * context menu only when
- * the selected items include an application, "Add to Bookmarks" only for
+ * the selected items include an application, "Open With…" only when
+ * something is selected, "Add to Bookmarks" only for
  * a single selected folder, and the path item
  * only for a single selected item, titled "Copy Path to File" for a file
  * (packages such as apps count as files) and "Copy Path" for a folder.
@@ -2046,6 +2103,11 @@ new_terminal_here:(id)sender
 - (BOOL)
 validateMenuItem:(NSMenuItem *)item
 {
+    if (item.action == @selector(open_with:)) {
+        BOOL has_sel = [self selected_urls].count > 0;
+        item.hidden  = !has_sel;
+        return has_sel;
+    }
     if (item.action == @selector(run_application:)) {
         BOOL has_app = application_urls([self selected_urls]).count > 0;
         item.hidden  = !has_app;
