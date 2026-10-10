@@ -1,5 +1,7 @@
 # files
 
+![Files, dual-pane view](images/screenshot.png)
+
 A minimalist macOS file manager written in Objective-C + AppKit.
 
 ## Features
