@@ -63,6 +63,17 @@ A minimalist macOS file manager written in Objective-C + AppKit.
 - Opening a disk image (.dmg, .iso, …) mounts it and opens its volume in a
   new window; password-protected or licensed images are handed to the
   system's DiskImageMounter to ask, then open the same way
+- Opening an archive (.zip, .tar, .tar.gz, .tgz) extracts it next to
+  itself and opens the new folder in a new window: a folder named after the
+  archive, or the archive's own top-level folder if it has just one; a name
+  already taken gets " 2". Nothing appears until extraction is complete, and
+  a failed one leaves nothing behind. An encrypted zip asks for its password
+- Right-click ▸ Create Archive… on one or more items in the same folder asks
+  for the format (zip, tar.gz or tar), the file name and, for zip, an
+  optional password; the archive is made in that folder and selected.
+  Passwords go to `zip` and `unzip` through a terminal, never on a command
+  line where `ps` would show them. Zip password protection is the older
+  ZipCrypto scheme, which is weak; tar cannot be password protected
 - Spotlight search by name, in the current folder and its subfolders or
   across the whole Mac (the search field's magnifying-glass menu: This
   Folder / This Mac; the empty field shows which); the first 5,000 matches

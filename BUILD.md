@@ -29,8 +29,9 @@ At run time Files runs `/usr/bin/git` (Xcode or the Command Line Tools) for
 the Git column and Get Info's branch and push state. Without either, the git
 features are simply off: Files checks once with `xcode-select -p` and never
 runs git, so macOS does not offer to install the tools. It also runs `lsof`
-(what keeps a volume busy), `hdiutil` (disk images) and, for Archive
-Utility's sandboxed settings only, `defaults`.
+(what keeps a volume busy), `hdiutil` (disk images), `zip`, `unzip` and
+`tar` (creating and extracting archives; all in /usr/bin on macOS) and, for
+Archive Utility's sandboxed settings only, `defaults`.
 
 The C library's `copyfile(3)`, `renamex_np(2)` and CommonCrypto (SHA-256 / MD5)
 are part of libSystem and need no extra linking.
@@ -42,7 +43,7 @@ are part of libSystem and need no extra linking.
 | Build (default) | `make`          | Compiles and assembles `Files.app`     |
 | Run             | `make run`      | Builds then opens the app with `open`  |
 | Install         | `make install`  | Replaces `~/Applications/Files.app` with the new build |
-| Test            | `make test`     | Builds and runs the copy-engine tests (`tests/`) |
+| Test            | `make test`     | Builds and runs the copy-engine and archive tests (`tests/`) |
 | Clean           | `make clean`    | Removes `build/` and `Files.app`       |
 
 `make test` links each `tests/*_test.m` against the app's objects (all but
@@ -54,6 +55,12 @@ validation (APFS clones are not hashed; copies to another volume are). It
 cleans up after itself, prints one line per check and exits non-zero on a
 failure. `make clean` and `make test` skip the keychain lookup for the
 signing identity.
+
+`archive_test` creates and extracts zip, tar.gz and tar archives in a scratch
+folder in `$TMPDIR`: round trips (symbolic links, names starting with `-`,
+brackets and accents), passwords (missing, wrong, right), name clashes,
+refusals, damaged archives, an entry named `../x`, and that no hidden
+staging item is left behind.
 
 ## Output
 
@@ -130,6 +137,12 @@ src/
 ├── mounts_panel.h/.m       — All Mounts panel (mount table read off the
 │                             main thread; per-volume unmount)
 ├── volume_manager.h/.m     — mounted-volume list, unmount, disk images
+├── archive.h/.m            — zip / tar.gz / tar create and extract (system
+│                             tools, passwords via a pty, staged commits)
+│                             and the Create Archive / password windows
+├── tool_panel.h/.m         — small floating tool window (blue header,
+│                             controls, Cancel / action buttons), styled
+│                             like the Tasks reminders window
 ├── default_viewer.h/.m     — takes over from Finder as default file viewer
 │                             (NSFileViewer, Finder settings) and restores
 │                             the recorded originals
@@ -141,7 +154,8 @@ src/
                               the background queue, standard folder URLs,
                               the icon cache, size/date formatting, alerts
 tests/
-└── file_ops_test.m         — copy-engine tests (`make test`)
+├── file_ops_test.m         — copy-engine tests (`make test`)
+└── archive_test.m          — archive tests (`make test`)
 ```
 
 ## Code signing

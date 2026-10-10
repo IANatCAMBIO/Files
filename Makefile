@@ -68,7 +68,7 @@ $(BUNDLE): $(MACOS)/$(APP) resources/Info.plist VERSION $(IMAGES)
 	@plutil -replace CFBundleShortVersionString -string "$(VERSION)" $(CONTENTS)/Info.plist
 	@plutil -replace CFBundleVersion -string "$(VERSION)" $(CONTENTS)/Info.plist
 	@plutil -replace FilesBuildDate -string "$$(date -u +%Y-%m-%dT%H:%M:%SZ)" $(CONTENTS)/Info.plist
-	@cp $(IMAGES) $(RSRC)/
+	@cp -X $(IMAGES) $(RSRC)/
 	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(BUNDLE)
 	@touch $(BUNDLE)  # codesign rewrites the binary; keep the bundle newer than it
 

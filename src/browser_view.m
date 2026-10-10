@@ -1,4 +1,5 @@
 #import "browser_view.h"
+#import "archive.h"
 #import "file_ops.h"
 #import "git_info.h"
 #import "info_panel.h"
@@ -587,6 +588,7 @@ build_context_menu
     add(@"Paste",         @selector(paste:));
     [menu addItem:NSMenuItem.separatorItem];
     add(@"Rename",        @selector(begin_rename:));
+    add(@"Create Archive…", @selector(create_archive:));
     [menu addItem:NSMenuItem.separatorItem];
     add(@"Get Info",            @selector(get_info_action:));
     add(@"New Terminal Here",   @selector(new_terminal_here:));
@@ -831,7 +833,8 @@ load_location:(NSURL *)url
 }
 
 /*
- * navigate_to: — shows url if it is a folder (recording history), otherwise
+ * navigate_to: — shows url if it is a folder (recording history); mounts a
+ * disk image, extracts an archive (FilesArchive is_archive:) or otherwise
  * opens it with its default application. A symbolic link is followed first,
  * like a Finder alias: a link to a folder shows the folder it points to
  * (at its real path), and a link whose target is missing reports an error.
@@ -866,6 +869,8 @@ navigate_to:(NSURL *)url
         [url getResourceValue:&uti forKey:NSURLTypeIdentifierKey error:nil];
         if (uti && [[UTType typeWithIdentifier:uti] conformsToType:UTTypeDiskImage]) {
             [self mount_disk_image:url];
+        } else if ([FilesArchive is_archive:url]) {
+            [self extract_archive:url password:nil];
         } else {
             [NSWorkspace.sharedWorkspace openURL:url];
         }
@@ -923,6 +928,99 @@ mount_disk_image:(NSURL *)image
         } else if (volume) {
             [s navigate_to:volume];
         }
+    }];
+}
+
+/*
+ * extract_archive:password: — expands an archive (FilesArchive extract:…)
+ * and shows the new folder in a new window via open_window_handler, or in
+ * this browser if none is set. The status bar reads "Extracting …"
+ * meanwhile. An encrypted zip asks for its password, again if it was
+ * wrong.
+ *
+ * Inputs:
+ *   archive  — archive file URL
+ *   password — password to try; nil for the first attempt
+ */
+- (void)
+extract_archive:(NSURL *)archive password:(NSString *)password
+{
+    [self report_status:[NSString stringWithFormat:@"Extracting \"%@\"…",
+                         archive.lastPathComponent]];
+    __weak FilesBrowserView *ws = self;
+    [FilesArchive extract:archive password:password completion:^(NSURL *folder, NSError *err) {
+        FilesBrowserView *s = ws;
+        if (!s) return;
+        [s update_status_bar];
+        if (folder) {
+            if (s.open_window_handler) s.open_window_handler(folder);
+            else                       [s navigate_to:folder];
+        } else if ([err.domain isEqualToString:FilesArchiveErrorDomain] &&
+                   (err.code == FilesArchiveErrorPasswordRequired ||
+                    err.code == FilesArchiveErrorPasswordIncorrect)) {
+            [FilesArchive prompt_password_for:archive
+                                    incorrect:err.code == FilesArchiveErrorPasswordIncorrect
+                                       window:s.window
+                                      handler:^(NSString *pw) {
+                [s extract_archive:archive password:pw];
+            }];
+        } else {
+            files_show_error([NSString stringWithFormat:@"Could not extract \"%@\"",
+                              archive.lastPathComponent], err, s.window);
+        }
+    }];
+}
+
+/*
+ * archivable_items — the selection, if it can be archived: something is
+ * selected and every item is in the same folder.
+ *
+ * Output: the selected URLs, or nil.
+ */
+- (NSArray<NSURL *> *)
+archivable_items
+{
+    NSArray<NSURL *> *sel = [self selected_urls];
+    if (sel.count == 0) return nil;
+    NSURL *parent = sel.firstObject.URLByDeletingLastPathComponent;
+    for (NSURL *url in sel) {
+        if (!files_same_path(url.URLByDeletingLastPathComponent, parent)) return nil;
+    }
+    return sel;
+}
+
+/*
+ * create_archive: — context menu ▸ Create Archive…: asks for the format,
+ * name and optional password (FilesArchive prompt_create_for:…), archives
+ * the selected items next to them, and selects the new archive. The status
+ * bar reads "Creating …" meanwhile.
+ *
+ * Inputs:
+ *   sender — context-menu item (unused)
+ */
+- (void)
+create_archive:(id)sender
+{
+    NSArray<NSURL *> *items = [self archivable_items];
+    if (!items) return;
+    __weak FilesBrowserView *ws = self;
+    [FilesArchive prompt_create_for:items window:self.window
+                            handler:^(NSString *name, FilesArchiveFormat format, NSString *pw) {
+        FilesBrowserView *s = ws;
+        if (!s) return;
+        [s report_status:[NSString stringWithFormat:@"Creating \"%@\"…", name]];
+        [FilesArchive create_from:items name:name format:format password:pw
+                       completion:^(NSURL *archive, NSError *err) {
+            FilesBrowserView *s2 = ws;
+            if (!s2) return;
+            [s2 update_status_bar];
+            if (!archive) {
+                files_show_error([NSString stringWithFormat:@"Could not create \"%@\"", name],
+                                 err, s2.window);
+            } else if (files_same_path(archive.URLByDeletingLastPathComponent, s2.current_dir)) {
+                [s2 reveal_items:@[archive.lastPathComponent]];
+            }
+        }];
     }];
 }
 
@@ -2090,7 +2188,8 @@ new_terminal_here:(id)sender
  * the user shows (Name: always, disabled); shows "Run Application" in the
  * context menu only when
  * the selected items include an application, "Open With…" only when
- * something is selected, "Add to Bookmarks" only for
+ * something is selected, "Create Archive…" only when the selected items
+ * share a folder, "Add to Bookmarks" only for
  * a single selected folder, and the path item
  * only for a single selected item, titled "Copy Path to File" for a file
  * (packages such as apps count as files) and "Copy Path" for a folder.
@@ -2107,6 +2206,11 @@ validateMenuItem:(NSMenuItem *)item
         BOOL has_sel = [self selected_urls].count > 0;
         item.hidden  = !has_sel;
         return has_sel;
+    }
+    if (item.action == @selector(create_archive:)) {
+        BOOL ok     = [self archivable_items] != nil;
+        item.hidden = !ok;
+        return ok;
     }
     if (item.action == @selector(run_application:)) {
         BOOL has_app = application_urls([self selected_urls]).count > 0;

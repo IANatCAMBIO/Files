@@ -34,7 +34,8 @@
 
 /*
  * open_window_handler — called to show a folder in a new window (used for
- * the volume of a newly mounted disk image). If nil, the folder is shown in
+ * the volume of a newly mounted disk image and the folder an archive was
+ * extracted to). If nil, the folder is shown in
  * this browser instead.
  */
 @property (nonatomic, copy) void (^open_window_handler)(NSURL *url);
@@ -68,8 +69,9 @@
  * navigate_to: — shows url if it is a folder, pushing the previous location
  * onto the back stack (capped at 100 entries) and clearing the forward
  * stack. A disk image is mounted and its volume shown via
- * open_window_handler; any other item is opened with its default
- * application. Symbolic links are followed to their target first.
+ * open_window_handler; an archive (.zip, .tar, .tar.gz, .tgz) is extracted
+ * next to itself and the new folder shown the same way; any other item is
+ * opened with its default application. Symbolic links are followed to their target first.
  *
  * Inputs:
  *   url — target URL
