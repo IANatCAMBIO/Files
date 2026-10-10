@@ -53,8 +53,9 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   validation on, each file is checked as soon as it is copied and the copy
   stops at the first mismatch; APFS clones share the original's data, so
   they are not re-read
-- Move to Trash, Empty Trash, New Folder and New File (File menu, right-click,
-  or the toolbar's + button), inline rename (right-click ▸ Rename, and
+- Move to Trash, Empty Trash, New Folder and New File (File menu or the
+  toolbar's + button), Paste Into (right-click a folder while files are on
+  the clipboard), inline rename (right-click ▸ Rename, and
   straight after New Folder / New File; the name without its extension is
   selected, ready to type). Return opens the selection, like a
   double-click: folders in the list, files in their default app

@@ -183,7 +183,7 @@ typedef FilesConflictResolution (^FilesConflictBlock)(NSURL *src, NSURL *dst);
 
 /*
  * empty_trash: — permanently deletes everything in the user's Trash
- * (~/.Trash, dotfiles included) on a background queue. Like Finder, it
+ * (~/.Trash and the iCloud Trash, dotfiles included) on a background queue. Like Finder, it
  * deletes locked items and folders the user cannot write to: each item's
  * tree is walked without following symbolic links, lock flags (uchg,
  * uappnd) are cleared and folders get owner rwx before their contents are

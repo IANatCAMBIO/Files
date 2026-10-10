@@ -1,4 +1,5 @@
 #import "default_viewer.h"
+#import "tool_panel.h"
 #import "util.h"
 #include <pwd.h>
 #include <signal.h>
@@ -962,12 +963,14 @@ files_default_viewer_choose(BOOL files, NSWindow *window, void (^finished)(void)
                     files_show_error(@"Files could not write the change log", err, window);
                 }
                 if (log.failures > 0) {
-                    NSAlert *alert        = files_new_alert();
-                    alert.messageText     = files ? @"Some settings could not be changed"
-                                                  : @"Some settings could not be restored";
-                    alert.informativeText = @"The log lists which ones (marked ✗). Files will "
-                                             "try again the next time it opens.";
-                    files_present_alert(alert, window, nil);
+                    [FilesToolPanel show_message:files ? @"Some settings could not be changed"
+                                                       : @"Some settings could not be restored"
+                                         message:@"The log lists which ones (marked ✗). Files will "
+                                                  "try again the next time it opens."
+                                          symbol:@"exclamationmark.triangle.fill"
+                                         buttons:@[@"OK"]
+                                            over:window
+                                         handler:nil];
                 }
                 if (finished) finished();
             });
@@ -978,21 +981,21 @@ files_default_viewer_choose(BOOL files, NSWindow *window, void (^finished)(void)
         return;
     }
 
-    NSAlert *alert = files_new_alert();
-    alert.messageText     = @"Restore Finder as the default file browser?";
-    alert.informativeText = @"\"Show in Finder\" requests will go to Finder again, `open` in "
-                             "Terminal loses Files' shell function, and the settings Files "
-                             "changed (desktop icons, Finder's Quit menu item, Archive Utility "
-                             "revealing its results) go back "
-                             "to what they were before Files. Do this before uninstalling "
-                             "Files. A log of every change opens when it is done.";
-    [alert addButtonWithTitle:@"Restore Finder"];
-    [alert addButtonWithTitle:@"Cancel"];
-    files_present_alert(alert, window, ^(NSModalResponse resp) {
-        if (resp == NSAlertFirstButtonReturn) {
+    [FilesToolPanel show_message:@"Restore Finder as the default file browser?"
+                         message:@"\"Show in Finder\" requests will go to Finder again, `open` in "
+                                  "Terminal loses Files' shell function, and the settings Files "
+                                  "changed (desktop icons, Finder's Quit menu item, Archive Utility "
+                                  "revealing its results) go back "
+                                  "to what they were before Files. Do this before uninstalling "
+                                  "Files. A log of every change opens when it is done."
+                          symbol:@"questionmark.circle"
+                         buttons:@[@"Restore Finder", @"Cancel"]
+                            over:window
+                         handler:^(NSInteger resp) {
+        if (resp == 0) {
             apply();
         } else if (finished) {
             finished();
         }
-    });
+    }];
 }

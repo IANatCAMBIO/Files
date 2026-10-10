@@ -1,4 +1,5 @@
 #import "main_window.h"
+#import "tool_panel.h"
 #import "bookmarks_bar.h"
 #import "browser_view.h"
 #import "info_panel.h"
@@ -80,6 +81,7 @@ static void *first_responder_ctx = &first_responder_ctx;
 @property (nonatomic, assign) NSUInteger   space_generation;
 @property (nonatomic, assign) BOOL         space_refresh_scheduled;
 @property (nonatomic, strong) NSButton    *floating_btn;
+@property (nonatomic, copy)   NSArray<NSLayoutConstraint *> *fab_anchors; /* its current pin */
 @property (nonatomic, assign) NSUInteger   transient_status_id;  /* 0 = none showing */
 
 /* Paths of volumes waiting for their open files to close before unmounting. */
@@ -325,20 +327,25 @@ build_layout
     split_view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     [area addSubview:split_view];
 
-    /* Floating action button — icon-only, lower-right, over the browser.
-     * Its image, action and tooltip are set by update_floating_button. */
-    static const CGFloat fab_size   = 36.0;
-    static const CGFloat fab_margin = 14.0;
+    /* Floating action button — icon-only, lower-right, over the file list.
+     * It lives in browser_container, not area, so it stays clear of the info
+     * sidebar. Its image, action and tooltip are set by update_floating_button. */
+    static const CGFloat fab_size = 36.0;
     self.floating_btn = [[NSButton alloc]
-        initWithFrame:NSMakeRect(w - fab_size - fab_margin, status_h + 1.0 + fab_margin,
-                                 fab_size, fab_size)];
+        initWithFrame:NSMakeRect(0, 0, fab_size, fab_size)];
     self.floating_btn.imageScaling     = NSImageScaleProportionallyDown;
     self.floating_btn.bezelStyle       = NSBezelStyleRegularSquare;
     self.floating_btn.buttonType       = NSButtonTypeMomentaryLight;
     self.floating_btn.target           = self;
-    self.floating_btn.autoresizingMask = NSViewMinXMargin | NSViewMaxYMargin;
     self.floating_btn.hidden           = YES;
-    [area addSubview:self.floating_btn positioned:NSWindowAbove relativeTo:nil];
+    [browser_container addSubview:self.floating_btn positioned:NSWindowAbove relativeTo:nil];
+    /* Positioned by constraints (anchor_floating_button), not a frame: the
+     * container's real width is set later by the split view. */
+    self.floating_btn.translatesAutoresizingMaskIntoConstraints = NO;
+    [NSLayoutConstraint activateConstraints:@[
+        [self.floating_btn.widthAnchor  constraintEqualToConstant:fab_size],
+        [self.floating_btn.heightAnchor constraintEqualToConstant:fab_size],
+    ]];
 }
 
 /*
@@ -424,6 +431,10 @@ new_browser_with_frame:(NSRect)frame
         FilesMainWindow *s = ws;
         if (s && [s active_browser] == wb) [s refresh_sidebar_for_active_pane];
     };
+    b.list_layout_handler = ^{
+        FilesMainWindow *s = ws;
+        if (s && [s active_browser] == wb) [s anchor_floating_button];
+    };
     b.status_text_handler = ^(NSString *text) {
         FilesMainWindow *s = ws;
         if (s && [s active_browser] == wb) [s show_pane_status];
@@ -451,6 +462,30 @@ unmountable_volume_root(NSURL *url)
 }
 
 /*
+ * anchor_floating_button — pins the floating button fab_margin (visible
+ * gap) from the lower-right corner of the active pane's file list: the visible
+ * rows, ending where the scrollers begin, not the pane or window edge. Replaces the previous pin, so it follows the active
+ * pane.
+ */
+- (void)
+anchor_floating_button
+{
+    static const CGFloat fab_margin = 15.0;
+    NSView *list = [self active_browser].list_view;
+    NSButton *btn = self.floating_btn;
+    if (!list.window || list.window != btn.window) return;
+    if (self.fab_anchors) [NSLayoutConstraint deactivateConstraints:self.fab_anchors];
+    NSEdgeInsets bars  = [self active_browser].list_insets;
+    self.fab_anchors = @[
+        [btn.trailingAnchor constraintEqualToAnchor:list.trailingAnchor
+                                           constant:-(fab_margin + bars.right)],
+        [btn.bottomAnchor   constraintEqualToAnchor:list.bottomAnchor
+                                           constant:-(fab_margin + bars.bottom)],
+    ];
+    [NSLayoutConstraint activateConstraints:self.fab_anchors];
+}
+
+/*
  * update_floating_button — shows the floating button for the active pane:
  * Empty Trash while it shows the Trash, Unmount "<name>" while it shows the
  * root of an unmountable volume, hidden otherwise.
@@ -458,6 +493,7 @@ unmountable_volume_root(NSURL *url)
 - (void)
 update_floating_button
 {
+    [self anchor_floating_button];
     NSURL    *url    = [self active_browser].current_url;
     NSURL    *volume = nil;
     NSButton *btn    = self.floating_btn;
@@ -1342,12 +1378,14 @@ show_pending_unmount:(NSString *)name items:(NSArray<NSString *> *)items
         [lines addObject:[NSString stringWithFormat:@"…and %lu more",
                           (unsigned long)(items.count - pending_list_max)]];
     }
-    NSAlert *alert        = files_new_alert();
-    alert.messageText     = [NSString stringWithFormat:@"Unmounting \"%@\" is pending", name];
-    alert.informativeText = [NSString stringWithFormat:
-        @"It will be unmounted automatically once these are closed:\n\n%@",
-        [lines componentsJoinedByString:@"\n"]];
-    [alert beginSheetModalForWindow:self.window completionHandler:nil];
+    [FilesToolPanel show_message:[NSString stringWithFormat:@"Unmounting \"%@\" is pending", name]
+                         message:[NSString stringWithFormat:
+                                     @"It will be unmounted automatically once these are closed:"
+                                      "\n\n%@", [lines componentsJoinedByString:@"\n"]]
+                          symbol:@"eject"
+                         buttons:@[@"OK"]
+                            over:self.window
+                         handler:nil];
 }
 
 /*

@@ -1,4 +1,5 @@
 #import "browser_view.h"
+#import "tool_panel.h"
 #import "archive.h"
 #import "file_ops.h"
 #import "git_info.h"
@@ -174,6 +175,40 @@ git_index_stamp(NSString *index)
 }
 
 /*
+ * list_folder — the items of a folder with listing_keys() prefetched. For
+ * the Trash this is the union of every Trash folder (files_trash_urls), as
+ * Finder shows it; a Trash folder that cannot be read only fails the
+ * listing when the main one cannot.
+ *
+ * Inputs:
+ *   dir — folder to list
+ *   err — receives the failure when nil is returned; may be NULL
+ *
+ * Output: item URLs, or nil if the folder cannot be read.
+ */
+static NSArray<NSURL *> *
+list_folder(NSURL *dir, NSError **err)
+{
+    NSArray<NSURL *> *trashes = files_trash_urls();
+    NSArray<NSURL *> *folders = files_same_path(dir, trashes.firstObject) ? trashes : @[dir];
+    NSMutableArray<NSURL *> *items = nil;
+    for (NSURL *folder in folders) {
+        NSArray<NSURL *> *found =
+            [NSFileManager.defaultManager contentsOfDirectoryAtURL:folder
+                                        includingPropertiesForKeys:listing_keys()
+                                                           options:0
+                                                             error:items ? NULL : err];
+        if (!found) {
+            if (!items) return nil;
+            continue;
+        }
+        if (!items) items = [NSMutableArray array];
+        [items addObjectsFromArray:found];
+    }
+    return items;
+}
+
+/*
  * listing_rows — the rows to show for a set of items: hidden items dropped
  * (unless show_hidden), then sorted folders-first and by the sort column
  * using prefetched values (Finder-style natural order for names and
@@ -265,6 +300,9 @@ listing_rows(NSArray<NSURL *> *items, NSString *sort_key, BOOL ascending,
 /* Folder watcher: stream plus the resolved path events are compared with. */
 @property (nonatomic, assign) FSEventStreamRef         fs_stream;
 @property (nonatomic, copy)   NSString                *watched_path;
+/* Further resolved paths whose events also reload (the iCloud Trash while
+ * viewing the Trash); empty otherwise. */
+@property (nonatomic, copy)   NSArray<NSString *>     *watched_extra_paths;
 /* The index of the git repo the folder is in, also watched so badges
  * follow add/rm/commit; nil outside a repo. */
 @property (nonatomic, copy)   NSString                *watched_git_index;
@@ -292,6 +330,7 @@ listing_rows(NSArray<NSURL *> *items, NSString *sort_key, BOOL ascending,
 
 /* Set by shut_down: nothing is listed or watched afterwards. */
 @property (nonatomic, assign) BOOL                     is_shut_down;
+@property (nonatomic, assign) BOOL                     watching_scrollers; /* KVO on their hidden */
 
 /* Counters that discard results a newer listing or search has superseded. */
 @property (nonatomic, assign) NSUInteger               list_generation;
@@ -377,6 +416,7 @@ fs_event_callback(ConstFSEventStreamRef stream, void *client_info,
             (event_flags[i] & (kFSEventStreamEventFlagMustScanSubDirs |
                                kFSEventStreamEventFlagRootChanged)) ||
             [path isEqualToString:watched] ||
+            [view.watched_extra_paths containsObject:path] ||
             [path isEqualToString:watched.stringByDeletingLastPathComponent] ||
             (git_dir && [path isEqualToString:git_dir]);
         if (relevant) {
@@ -432,6 +472,40 @@ init_with_frame:(NSRect)frame
 }
 
 /*
+ * list_view — see browser_view.h.
+ */
+- (NSView *)
+list_view
+{
+    return self.scroll.contentView;
+}
+
+/*
+ * list_insets — see browser_view.h.
+ */
+- (NSEdgeInsets)
+list_insets
+{
+    NSScroller *v = self.scroll.verticalScroller;
+    NSScroller *h = self.scroll.horizontalScroller;
+    BOOL legacy   = self.scroll.scrollerStyle == NSScrollerStyleLegacy;
+    return NSEdgeInsetsMake(0, 0,
+                            legacy && self.scroll.hasHorizontalScroller && !h.hidden ? NSHeight(h.frame) : 0,
+                            legacy && self.scroll.hasVerticalScroller && !v.hidden ? NSWidth(v.frame) : 0);
+}
+
+/*
+ * observeValueForKeyPath:ofObject:change:context: — a scroller was shown or
+ * hidden, so the visible part of the list changed: tells list_layout_handler.
+ */
+- (void)
+observeValueForKeyPath:(NSString *)key_path ofObject:(id)object
+                change:(NSDictionary *)change context:(void *)context
+{
+    if (self.list_layout_handler) self.list_layout_handler();
+}
+
+/*
  * build_table — creates the scroll view and NSTableView.
  */
 - (void)
@@ -480,6 +554,10 @@ build_table
     self.scroll.autohidesScrollers    = YES;
     self.scroll.autoresizingMask      = NSViewWidthSizable | NSViewHeightSizable;
     [self addSubview:self.scroll];
+    for (NSScroller *scroller in @[self.scroll.verticalScroller, self.scroll.horizontalScroller]) {
+        [scroller addObserver:self forKeyPath:@"hidden" options:0 context:NULL];
+    }
+    self.watching_scrollers = YES;
 }
 
 /*
@@ -586,14 +664,13 @@ build_context_menu
     add(@"Copy",          @selector(copy:));
     add(@"Copy Path to File", @selector(copy_path:));
     add(@"Paste",         @selector(paste:));
+    add(@"Paste Into",    @selector(paste_into:));
     [menu addItem:NSMenuItem.separatorItem];
     add(@"Rename",        @selector(begin_rename:));
     add(@"Create Archive…", @selector(create_archive:));
     [menu addItem:NSMenuItem.separatorItem];
     add(@"Get Info",            @selector(get_info_action:));
     add(@"New Terminal Here",   @selector(new_terminal_here:));
-    add(@"New Folder",          @selector(new_folder_action:));
-    add(@"New File",            @selector(new_file_action:));
     [menu addItem:NSMenuItem.separatorItem];
     /* "Move to Trash" / "Delete" pair: holding ⌘ swaps to the alternate. */
     NSMenuItem *trash_item = [[NSMenuItem alloc] initWithTitle:@"Move to Trash"
@@ -621,7 +698,8 @@ build_context_menu
  * kFSEventStreamCreateFlagWatchRoot so a deleted or renamed folder is
  * noticed). fs_event_callback keeps only events naming the folder itself,
  * so activity deeper in the tree (e.g. ~/Library caches while viewing ~)
- * is ignored. Does nothing if that is already what is watched.
+ * is ignored. While viewing the Trash, the other Trash folders
+ * (files_trash_urls) are watched too. Does nothing if that is already what is watched.
  *
  * Inputs:
  *   dir       — directory URL to watch
@@ -640,11 +718,20 @@ watch:(NSURL *)dir git_index:(NSString *)git_index
     }
     [self stop_watching];
 
-    self.watched_path      = path;
-    self.watched_git_index = git_index;
-    NSArray<NSString *> *paths = git_index
-        ? @[self.watched_path, git_index.stringByDeletingLastPathComponent]
-        : @[self.watched_path];
+    NSArray<NSURL *> *trashes = files_trash_urls();
+    NSMutableArray<NSString *> *extra = [NSMutableArray array];
+    if (files_same_path(dir, trashes.firstObject)) {
+        for (NSURL *trash in [trashes subarrayWithRange:NSMakeRange(1, trashes.count - 1)]) {
+            [extra addObject:trash.URLByResolvingSymlinksInPath.path];
+        }
+    }
+
+    self.watched_path        = path;
+    self.watched_extra_paths = extra;
+    self.watched_git_index   = git_index;
+    NSMutableArray<NSString *> *paths = [NSMutableArray arrayWithObject:self.watched_path];
+    [paths addObjectsFromArray:extra];
+    if (git_index) [paths addObject:git_index.stringByDeletingLastPathComponent];
 
     FSEventStreamContext ctx = { .info = (__bridge void *)self };
     self.fs_stream = FSEventStreamCreate(
@@ -708,6 +795,11 @@ shut_down
         self.defaults_observer = nil;
     }
     self.is_shut_down = YES;
+    if (self.watching_scrollers) {
+        self.watching_scrollers = NO;
+        [self.scroll.verticalScroller removeObserver:self forKeyPath:@"hidden"];
+        [self.scroll.horizontalScroller removeObserver:self forKeyPath:@"hidden"];
+    }
     [self reset_folder_sizes];
     [self stop_watching];
     [self stop_search_query];
@@ -1163,11 +1255,7 @@ reload_directory
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSError *err = nil;
-        NSArray<NSURL *> *items =
-            [NSFileManager.defaultManager contentsOfDirectoryAtURL:dir
-                                        includingPropertiesForKeys:listing_keys()
-                                                           options:0
-                                                             error:&err];
+        NSArray<NSURL *> *items = list_folder(dir, &err);
         NSURL *work_tree    = files_git_work_tree(dir);
         NSString *git_index = work_tree ? files_git_index_path(work_tree) : nil;
         NSString *stamp     = git_index_stamp(git_index);
@@ -1752,37 +1840,37 @@ apply_auto_fit
 - (IBAction)
 empty_trash_action:(id)sender
 {
-    NSAlert *alert        = files_new_alert();
-    alert.messageText     = @"Permanently delete the items in the Trash?";
-    alert.informativeText = @"You cannot undo this action.";
-    alert.alertStyle      = NSAlertStyleWarning;
-    [alert addButtonWithTitle:@"Empty Trash"];
-    [alert addButtonWithTitle:@"Cancel"];
-
     __weak FilesBrowserView *ws = self;
-    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse resp) {
-        if (resp != NSAlertFirstButtonReturn) return;
+    [FilesToolPanel show_message:@"Permanently delete the items in the Trash?"
+                         message:@"You cannot undo this action."
+                          symbol:@"trash"
+                         buttons:@[@"Empty Trash", @"Cancel"]
+                            over:self.window
+                         handler:^(NSInteger index) {
+        if (index != 0) return;
         [FilesFileOps empty_trash:^(NSArray<NSURL *> *failed, NSArray<NSString *> *reasons) {
             FilesBrowserView *s = ws;
             if (!s) return;
             [s reload_directory];
             if (failed.count == 0) return;
 
-            NSAlert *report        = files_new_alert();
-            report.messageText     = failed.count == 1
+            NSString *headline = failed.count == 1
                 ? @"1 item could not be deleted"
                 : [NSString stringWithFormat:@"%lu items could not be deleted",
                    (unsigned long)failed.count];
-            report.informativeText = [[reasons componentsJoinedByString:@"\n"]
+            NSString *body = [[reasons componentsJoinedByString:@"\n"]
                 stringByAppendingString:@"\n\nmacOS lets only Finder delete other "
                                         @"developers' apps and items owned by root. "
                                         @"Empty with Finder hands the rest of the Trash "
                                         @"to Finder, which may ask for your password."];
-            [report addButtonWithTitle:@"Empty with Finder"];
-            [report addButtonWithTitle:@"Cancel"];
-            files_present_alert(report, s.window, ^(NSModalResponse r) {
-                if (r == NSAlertFirstButtonReturn) [ws empty_trash_with_finder];
-            });
+            [FilesToolPanel show_message:headline
+                                 message:body
+                                  symbol:@"exclamationmark.triangle.fill"
+                                 buttons:@[@"Empty with Finder", @"Cancel"]
+                                    over:s.window
+                                 handler:^(NSInteger r) {
+                if (r == 0) [ws empty_trash_with_finder];
+            }];
         }];
     }];
 }
@@ -1800,10 +1888,12 @@ empty_trash_with_finder
         if (!s) return;
         [s reload_directory];
         if (!error) return;
-        NSAlert *alert        = files_new_alert();
-        alert.messageText     = @"The Trash was not emptied";
-        alert.informativeText = error;
-        files_present_alert(alert, s.window, nil);
+        [FilesToolPanel show_message:@"The Trash was not emptied"
+                             message:error
+                              symbol:@"exclamationmark.triangle.fill"
+                             buttons:@[@"OK"]
+                                over:s.window
+                             handler:nil];
     }];
 }
 
@@ -2187,7 +2277,8 @@ new_terminal_here:(id)sender
  * validateMenuItem: — checks each column-header menu item whose column
  * the user shows (Name: always, disabled); shows "Run Application" in the
  * context menu only when
- * the selected items include an application, "Open With…" only when
+ * the selected items include an application, "Paste Into" only when a
+ * single folder is selected and the clipboard holds files, "Open With…" only when
  * something is selected, "Create Archive…" only when the selected items
  * share a folder, "Add to Bookmarks" only for
  * a single selected folder, and the path item
@@ -2229,6 +2320,11 @@ validateMenuItem:(NSMenuItem *)item
         BOOL folder = [self selected_folder] != nil;
         item.hidden = !folder;
         return folder;
+    }
+    if (item.action == @selector(paste_into:)) {
+        BOOL ok     = [self selected_folder] != nil && [FilesFileOps pasteboard_has_files];
+        item.hidden = !ok;
+        return ok;
     }
     if (item.action == @selector(new_terminal_here:)) {
         /* Show when a single folder is selected or when right-clicking empty
@@ -2485,6 +2581,26 @@ cut:(id)sender
 }
 
 /*
+ * paste_to: — copies (or moves, after a cut) the pasteboard's files into
+ * dest, then reloads the listing.
+ *
+ * Inputs:
+ *   dest — destination folder URL, or nil to do nothing
+ */
+- (void)
+paste_to:(NSURL *)dest
+{
+    if (!dest || ![FilesFileOps pasteboard_has_files]) return;
+    __weak FilesBrowserView *ws = self;
+    [FilesFileOps paste_to_directory:dest completion:^(NSError *err) {
+        FilesBrowserView *s = ws;
+        if (!s) return;
+        if (err && err.code != NSUserCancelledError) files_show_error(@"Paste failed", err, s.window);
+        [s reload_directory];
+    }];
+}
+
+/*
  * paste: — copies (or moves, after a cut) the pasteboard's files into the
  * current folder.
  *
@@ -2494,14 +2610,20 @@ cut:(id)sender
 - (IBAction)
 paste:(id)sender
 {
-    if (!self.current_dir || ![FilesFileOps pasteboard_has_files]) return;
-    __weak FilesBrowserView *ws = self;
-    [FilesFileOps paste_to_directory:self.current_dir completion:^(NSError *err) {
-        FilesBrowserView *s = ws;
-        if (!s) return;
-        if (err && err.code != NSUserCancelledError) files_show_error(@"Paste failed", err, s.window);
-        [s reload_directory];
-    }];
+    [self paste_to:self.current_dir];
+}
+
+/*
+ * paste_into: — copies (or moves, after a cut) the pasteboard's files into
+ * the selected folder.
+ *
+ * Inputs:
+ *   sender — menu item (unused)
+ */
+- (IBAction)
+paste_into:(id)sender
+{
+    [self paste_to:[self selected_folder]];
 }
 
 /*
@@ -2539,20 +2661,20 @@ delete_permanently:(id)sender
     NSArray<NSURL *> *sel = [self selected_urls];
     if (sel.count == 0) return;
 
-    NSAlert *alert     = [[NSAlert alloc] init];
-    alert.alertStyle   = NSAlertStyleCritical;
-    alert.messageText  = sel.count == 1
+    NSString *headline = sel.count == 1
         ? [NSString stringWithFormat:@"Permanently delete \"%@\"?",
            sel.firstObject.lastPathComponent]
         : [NSString stringWithFormat:@"Permanently delete %lu items?",
            (unsigned long)sel.count];
-    alert.informativeText = @"This cannot be undone.";
-    [alert addButtonWithTitle:@"Delete"];
-    [alert addButtonWithTitle:@"Cancel"];
 
     __weak FilesBrowserView *ws = self;
-    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
-        if (r != NSAlertFirstButtonReturn) return;
+    [FilesToolPanel show_message:headline
+                         message:@"This cannot be undone."
+                          symbol:@"trash"
+                         buttons:@[@"Delete", @"Cancel"]
+                            over:self.window
+                         handler:^(NSInteger r) {
+        if (r != 0) return;
         FilesBrowserView *s = ws;
         if (!s) return;
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -2568,11 +2690,12 @@ delete_permanently:(id)sender
                 if (!t) return;
                 [t reload_directory];
                 if (failed.count > 0) {
-                    NSAlert *err_alert   = [[NSAlert alloc] init];
-                    err_alert.alertStyle = NSAlertStyleWarning;
-                    err_alert.messageText = @"Some items could not be deleted";
-                    err_alert.informativeText = [failed componentsJoinedByString:@"\n"];
-                    [err_alert beginSheetModalForWindow:t.window completionHandler:nil];
+                    [FilesToolPanel show_message:@"Some items could not be deleted"
+                                         message:[failed componentsJoinedByString:@"\n"]
+                                          symbol:@"exclamationmark.triangle.fill"
+                                         buttons:@[@"OK"]
+                                            over:t.window
+                                         handler:nil];
                 }
             });
         });

@@ -53,6 +53,25 @@
 @property (nonatomic, copy, readonly) NSString *status_text;
 
 /*
+ * The clip view showing the rows: the file list's visible area, which ends
+ * where the scrollers begin. For anchoring overlays to the list.
+ */
+@property (nonatomic, readonly) NSView *list_view;
+
+/*
+ * list_insets — how far the scrollers, when shown as legacy bars that sit
+ * over the clip view's edge, cut into the right and bottom of list_view;
+ * zero for an edge with no bar (hidden, or overlay scrollers).
+ */
+@property (nonatomic, readonly) NSEdgeInsets list_insets;
+
+/*
+ * list_layout_handler — called when a scroller is shown or hidden, i.e.
+ * when list_insets changes.
+ */
+@property (nonatomic, copy) void (^list_layout_handler)(void);
+
+/*
  * init_with_frame: — designated initialiser; builds subviews and sets up the
  * table.
  *
@@ -169,6 +188,7 @@
 - (IBAction)copy:(id)sender;
 - (IBAction)cut:(id)sender;
 - (IBAction)paste:(id)sender;
+- (IBAction)paste_into:(id)sender;
 - (IBAction)move_to_trash_action:(id)sender;
 - (IBAction)new_folder_action:(id)sender;
 - (IBAction)new_file_action:(id)sender;

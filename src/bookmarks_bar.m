@@ -23,11 +23,11 @@ static NSString * const trash_changed_note = @"FilesTrashChanged";
 static BOOL trash_full;
 
 /*
- * trash_has_items — whether the Trash holds anything but hidden (dot)
+ * trash_has_items — whether a Trash folder holds anything but hidden (dot)
  * files, as Finder judges it. Stops at the first such entry.
  *
  * Inputs:
- *   path — the Trash folder
+ *   path — a Trash folder
  *
  * Output: YES if it has a visible item.
  */
@@ -46,7 +46,7 @@ trash_has_items(const char *path)
 }
 
 /*
- * check_trash — re-checks the Trash on a utility queue and, if it went
+ * check_trash — re-checks the Trash folders on a utility queue and, if it went
  * from empty to full or back, records it in trash_full and posts
  * trash_changed_note on the main queue.
  */
@@ -59,9 +59,12 @@ check_trash(void)
         queue = dispatch_queue_create("files.trash",
             dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
     });
-    NSString *path = files_directory_url(NSTrashDirectory).path;
+    NSArray<NSURL *> *trashes = files_trash_urls();
     dispatch_async(queue, ^{
-        BOOL full = trash_has_items(path.fileSystemRepresentation);
+        BOOL full = NO;
+        for (NSURL *trash in trashes) {
+            full = full || trash_has_items(trash.fileSystemRepresentation);
+        }
         dispatch_async(dispatch_get_main_queue(), ^{
             if (full == trash_full) return;
             trash_full = full;
@@ -83,7 +86,7 @@ trash_event_callback(ConstFSEventStreamRef stream, void *info, size_t n, void *p
 
 /*
  * watch_trash — starts the app's single Trash watcher (an FSEventStream on
- * ~/.Trash, kept for the life of the process) and checks the Trash once.
+ * the Trash folders, kept for the life of the process) and checks the Trash once.
  * Every bookmarks bar follows it through trash_changed_note, so the Trash
  * icon tracks Move to Trash, Empty Trash and changes made by other apps
  * without anything listing the Trash on navigation.
@@ -93,10 +96,13 @@ watch_trash(void)
 {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        NSString *path = files_directory_url(NSTrashDirectory).URLByResolvingSymlinksInPath.path;
+        NSMutableArray<NSString *> *paths = [NSMutableArray array];
+        for (NSURL *trash in files_trash_urls()) {
+            [paths addObject:trash.URLByResolvingSymlinksInPath.path];
+        }
         FSEventStreamContext ctx = {0};
         FSEventStreamRef stream = FSEventStreamCreate(kCFAllocatorDefault, trash_event_callback,
-            &ctx, (__bridge CFArrayRef)@[path], kFSEventStreamEventIdSinceNow, 0.5,
+            &ctx, (__bridge CFArrayRef)paths, kFSEventStreamEventIdSinceNow, 0.5,
             kFSEventStreamCreateFlagNone);
         if (stream) {
             FSEventStreamSetDispatchQueue(stream, dispatch_get_main_queue());

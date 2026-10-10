@@ -1,4 +1,5 @@
 #import "util.h"
+#import "tool_panel.h"
 #import "git_info.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <fcntl.h>
@@ -69,6 +70,20 @@ files_icloud_drive_url(void)
     NSURL *url = [files_home_url() URLByAppendingPathComponent:
                   @"Library/Mobile Documents/com~apple~CloudDocs" isDirectory:YES];
     return [url checkResourceIsReachableAndReturnError:nil] ? url : nil;
+}
+
+/*
+ * files_trash_urls — ~/.Trash plus the iCloud Trash when it exists.
+ * Inputs/output are documented in util.h.
+ */
+NSArray<NSURL *> *
+files_trash_urls(void)
+{
+    NSMutableArray<NSURL *> *urls = [NSMutableArray arrayWithObject:files_directory_url(NSTrashDirectory)];
+    NSURL *icloud = [files_home_url() URLByAppendingPathComponent:@"Library/Mobile Documents/.Trash"
+                                                      isDirectory:YES];
+    if ([icloud checkResourceIsReachableAndReturnError:nil]) [urls addObject:icloud];
+    return urls;
 }
 
 /*
@@ -467,44 +482,18 @@ files_app_icon(void)
 }
 
 /*
- * files_new_alert — NSAlert with the plain app icon.
- * Inputs/output are documented in util.h.
- */
-NSAlert *
-files_new_alert(void)
-{
-    NSAlert *alert = [[NSAlert alloc] init];
-    NSImage *icon  = files_app_icon();
-    if (icon) alert.icon = icon;
-    return alert;
-}
-
-/*
- * files_present_alert — alert as a sheet (or app-modal if no window).
- * Inputs/output are documented in util.h.
- */
-void
-files_present_alert(NSAlert *alert, NSWindow *window, void (^handler)(NSModalResponse resp))
-{
-    if (window) {
-        [alert beginSheetModalForWindow:window completionHandler:handler];
-    } else {
-        NSModalResponse resp = [alert runModal];
-        if (handler) handler(resp);
-    }
-}
-
-/*
- * files_show_error — error alert as a sheet (or app-modal if no window).
+ * files_show_error — error in a tool panel.
  * Inputs/output are documented in util.h.
  */
 void
 files_show_error(NSString *title, NSError *err, NSWindow *window)
 {
-    NSAlert *alert        = files_new_alert();
-    alert.messageText     = title;
-    alert.informativeText = err.localizedDescription ?: @"Unknown error";
-    files_present_alert(alert, window, nil);
+    [FilesToolPanel show_message:title
+                         message:err.localizedDescription ?: @"Unknown error"
+                          symbol:@"exclamationmark.triangle.fill"
+                         buttons:@[@"OK"]
+                            over:window
+                         handler:nil];
 }
 
 @implementation FilesCancelToken {

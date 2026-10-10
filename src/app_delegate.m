@@ -1,4 +1,5 @@
 #import "app_delegate.h"
+#import "tool_panel.h"
 #import "main_window.h"
 #import "browser_view.h"
 #import "volume_manager.h"
@@ -26,9 +27,9 @@
  *
  * The icon: macOS 26 draws a bundle icon that is not its rounded-square
  * shape on a grey rounded-square backdrop. The running app's icon (the
- * Dock tile while Files runs) is set to folder.png itself; alerts and the
- * About panel are handed it explicitly (files_new_alert, show_about:),
- * since they would add the backdrop to the app icon themselves. Finder,
+ * Dock tile while Files runs) is set to folder.png itself; the
+ * About panel is handed it explicitly (show_about:),
+ * since it would add the backdrop to the app icon themselves. Finder,
  * and the Dock while Files is not running, use the bundle icon and keep
  * the backdrop; only redrawn artwork avoids that.
  *
@@ -225,15 +226,15 @@ sync_keep_running_reporting:(BOOL)report
 - (void)
 ask_login_item_approval
 {
-    NSAlert *alert        = files_new_alert();
-    alert.messageText     = @"Allow Files to open at login";
-    alert.informativeText = @"Files is turned off in Login Items. Turn it on in System "
-                             "Settings ▸ General ▸ Login Items so Files starts at login.";
-    [alert addButtonWithTitle:@"Open Login Items Settings"];
-    [alert addButtonWithTitle:@"Not Now"];
-    files_present_alert(alert, [self front_window].window, ^(NSModalResponse resp) {
-        if (resp == NSAlertFirstButtonReturn) [SMAppService openSystemSettingsLoginItems];
-    });
+    [FilesToolPanel show_message:@"Allow Files to open at login"
+                         message:@"Files is turned off in Login Items. Turn it on in System "
+                                  "Settings ▸ General ▸ Login Items so Files starts at login."
+                          symbol:@"power"
+                         buttons:@[@"Open Login Items Settings", @"Not Now"]
+                            over:[self front_window].window
+                         handler:^(NSInteger index) {
+        if (index == 0) [SMAppService openSystemSettingsLoginItems];
+    }];
 }
 
 /*
@@ -248,21 +249,21 @@ ask_login_item_approval
 prompt_full_disk_access:(NSString *)reason
 {
     NSString *app_path = NSBundle.mainBundle.bundlePath;
-    NSAlert *alert     = files_new_alert();
-    alert.messageText  = @"Files needs Full Disk Access";
-    alert.informativeText = [NSString stringWithFormat:
+    NSString *message = [NSString stringWithFormat:
         @"%@\n\nTo grant it:\n"
          "1. Click Open System Settings (Privacy & Security ▸ Full Disk Access).\n"
          "2. Turn on Files, or click + and add:\n    %@\n"
          "3. When asked, choose Quit & Reopen.", reason, app_path];
-    [alert addButtonWithTitle:@"Open System Settings"];
-    [alert addButtonWithTitle:@"Not Now"];
-    void (^handle)(NSModalResponse) = ^(NSModalResponse resp) {
-        if (resp != NSAlertFirstButtonReturn) return;
+    [FilesToolPanel show_message:@"Files needs Full Disk Access"
+                         message:message
+                          symbol:@"lock.shield"
+                         buttons:@[@"Open System Settings", @"Not Now"]
+                            over:[self front_window].window
+                         handler:^(NSInteger index) {
+        if (index != 0) return;
         [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:
             @"x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"]];
-    };
-    files_present_alert(alert, [self front_window].window, handle);
+    }];
 }
 
 /* ── Windows ─────────────────────────────────────────────────────────────── */

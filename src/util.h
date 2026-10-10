@@ -64,6 +64,16 @@ NSURL *files_home_url(void);
 NSURL *files_icloud_drive_url(void);
 
 /*
+ * files_trash_urls — the folders that together make up the user's Trash:
+ * ~/.Trash, and ~/Library/Mobile Documents/.Trash where macOS puts items
+ * deleted from iCloud-synced folders (e.g. a Desktop synced with iCloud).
+ * Finder shows their union.
+ *
+ * Output: ~/.Trash first, then the iCloud Trash when it exists.
+ */
+NSArray<NSURL *> *files_trash_urls(void);
+
+/*
  * files_same_path — YES if a and b name the same file-system path, ignoring
  * differences NSURL -isEqual: is sensitive to (trailing slash, "..", base URL).
  *
@@ -278,33 +288,13 @@ NSString *files_format_date(NSDate *date, NSDateFormatterStyle date_style);
 NSImage *files_app_icon(void);
 
 /*
- * files_new_alert — a new NSAlert showing files_app_icon() instead of the
- * backdropped app icon. Every alert in Files is made with this.
- *
- * Output: NSAlert (never nil).
- */
-NSAlert *files_new_alert(void);
-
-/*
- * files_present_alert — shows alert as a sheet on window when given,
- * otherwise app-modal, and passes the response to handler. Must be called
- * on the main thread.
+ * files_show_error — shows an error in a tool panel (FilesToolPanel), centred
+ * over window. Returns at once. Must be called on the main thread.
  *
  * Inputs:
- *   alert   — configured alert
- *   window  — window to attach the sheet to; nil = app-modal alert
- *   handler — receives the button response; may be nil
- */
-void files_present_alert(NSAlert *alert, NSWindow *window, void (^handler)(NSModalResponse resp));
-
-/*
- * files_show_error — shows an error alert: as a sheet on window when given,
- * otherwise app-modal. Must be called on the main thread.
- *
- * Inputs:
- *   title  — alert headline, e.g. @"Could not create folder"
+ *   title  — headline, e.g. @"Could not create folder"
  *   err    — error whose localizedDescription becomes the body; may be nil
- *   window — window to attach the sheet to; nil = app-modal alert
+ *   window — window to centre over; nil = the screen
  */
 void files_show_error(NSString *title, NSError *err, NSWindow *window);
 

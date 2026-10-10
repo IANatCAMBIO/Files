@@ -998,21 +998,27 @@ completion:(void (^)(NSURL *, NSError *))completion
 }
 
 /*
- * empty_trash: — remove_tree on every item in ~/.Trash, off the main queue.
+ * empty_trash: — remove_tree on every item in the Trash folders
+ * (files_trash_urls), off the main queue.
  * Inputs/output are documented in file_ops.h.
  */
 + (void)
 empty_trash:(void (^)(NSArray<NSURL *> *failed, NSArray<NSString *> *reasons))completion
 {
-    NSURL *trash = files_directory_url(NSTrashDirectory);
+    NSArray<NSURL *> *trashes = files_trash_urls();
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSMutableArray<NSURL *>    *failed   = [NSMutableArray array];
         NSMutableArray<NSString *> *failures = [NSMutableArray array];
-        NSError *list_err = nil;
-        NSArray<NSURL *> *items = [NSFileManager.defaultManager
-            contentsOfDirectoryAtURL:trash includingPropertiesForKeys:nil
-                             options:0 error:&list_err];
-        if (!items) {
+        NSMutableArray<NSURL *>    *items    = [NSMutableArray array];
+        for (NSURL *trash in trashes) {
+            NSError *list_err = nil;
+            NSArray<NSURL *> *found = [NSFileManager.defaultManager
+                contentsOfDirectoryAtURL:trash includingPropertiesForKeys:nil
+                                 options:0 error:&list_err];
+            if (found) {
+                [items addObjectsFromArray:found];
+                continue;
+            }
             [failed addObject:trash];
             [failures addObject:[NSString stringWithFormat:@"Trash — %@",
                                  list_err.localizedDescription ?: @"cannot be read"]];
