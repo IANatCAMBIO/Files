@@ -55,18 +55,24 @@
  *
  * Called on the background copy queue when each file starts, after every
  * 1 MB of data copied (cloned files report no intermediate chunks), and when
- * each file finishes. All byte counts are in bytes.
+ * each file finishes. While iCloud placeholders are downloaded before an
+ * item is transferred, it is called about ten times a second with
+ * downloading set: file_done and file_total then count the bytes of all of
+ * that item's downloads, and current_file names one still downloading.
+ * All byte counts are in bytes.
  *
  * Parameters:
  *   current_file — filename (last path component) of the file being copied
  *   file_done    — bytes copied so far for the current file
  *   file_total   — total bytes in the current file
- *   total_done   — bytes copied across all files in this operation
+ *   total_done   — bytes copied (and downloaded) across this operation
+ *   downloading  — YES while downloading from iCloud, NO while copying
  */
 typedef void (^FileCopyProgressBlock)(NSString *current_file,
                                        int64_t   file_done,
                                        int64_t   file_total,
-                                       int64_t   total_done);
+                                       int64_t   total_done,
+                                       BOOL      downloading);
 
 /*
  * FileCopyLogBlock — transfer-log callback for copies and moves.
@@ -78,8 +84,9 @@ typedef void (^FileCopyProgressBlock)(NSString *current_file,
  * APFS clones), each SHA-256 being computed and then its digest, for the
  * source and the copy, and whether they match, conflict decisions, every
  * rename (staging item into place, an existing item set aside, a
- * same-volume move) and every deletion (a replaced item, a staging item
- * after a failure, the original after a move across volumes).
+ * same-volume move), every deletion (a replaced item, a staging item
+ * after a failure, the original after a move across volumes) and iCloud
+ * downloads (started, finished, or not startable).
  *
  * Parameters:
  *   line — log text, without timestamp or trailing newline
@@ -114,7 +121,9 @@ typedef FilesConflictResolution (^FilesConflictBlock)(NSURL *src, NSURL *dst);
  *
  * Runs on a background queue; calls completion on the main queue.
  * Uses copyfile(3) (APFS clones, full metadata, symlinks kept as links) and
- * rename(2) for same-volume moves. Each copy is staged under a hidden name
+ * rename(2) for same-volume moves. iCloud placeholders are downloaded first,
+ * with progress, unless progress and log are both nil or a move stays in
+ * iCloud Drive. Each copy is staged under a hidden name
  * and renamed into place only when complete, so cancel, errors and failed
  * validation never damage an existing destination or delete the source.
  * Validation hashes each file as soon as it is copied, stopping at the

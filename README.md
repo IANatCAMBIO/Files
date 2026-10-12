@@ -53,7 +53,9 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   at the destination is replaced until the new copy is complete. With
   validation on, each file is checked as soon as it is copied and the copy
   stops at the first mismatch; APFS clones share the original's data, so
-  they are not re-read
+  they are not re-read. Files kept only in iCloud are downloaded first,
+  with their progress shown in the panel ("Downloading … from iCloud");
+  moves within iCloud Drive need no download
 - Move to Trash, Empty Trash, New Folder and New File (File menu or the
   toolbar's + button), Paste Into (right-click a folder while files are on
   the clipboard), inline rename (right-click ▸ Rename, and

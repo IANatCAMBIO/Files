@@ -211,6 +211,7 @@ typedef struct {
     NSString              *file_name;     /* file currently being copied */
     int64_t                file_total;    /* its size */
     int64_t                file_done;     /* bytes of it copied so far */
+    BOOL                   downloading;   /* file_* describe an iCloud download */
     BOOL                   is_regular;    /* it is a regular file (has data to hash) */
     BOOL                   hash_failed;   /* a copy did not match its source */
     int                    err;           /* errno from the first COPYFILE_ERR */
@@ -300,8 +301,157 @@ report_progress(copy_ctx_t *c, int64_t copied)
         c->file_done   = copied;
     }
     if (c->progress) {
-        c->progress(c->file_name, c->file_done, c->file_total, c->total_done);
+        c->progress(c->file_name, c->file_done, c->file_total, c->total_done, c->downloading);
     }
+}
+
+/* How often download_placeholders polls the downloads it waits for. */
+#define DOWNLOAD_POLL_USEC 100000
+
+/*
+ * placeholder_files — the regular files at or under url whose contents are
+ * only in iCloud (SF_DATALESS placeholders, "compressed,dataless" in
+ * ls -lO). Symbolic links are not followed and other volumes are not
+ * entered. Enumerating a placeholder folder may itself wait for iCloud.
+ *
+ * Inputs:
+ *   url    — item to walk
+ *   bytes  — receives the files' total size
+ *   cancel — polled during the walk; non-zero stops it. May be NULL.
+ *
+ * Output: the placeholders' URLs; empty if there are none or on cancel.
+ */
+static NSArray<NSURL *> *
+placeholder_files(NSURL *url, int64_t *bytes, const atomic_int *cancel)
+{
+    NSMutableArray<NSURL *> *files = [NSMutableArray array];
+    *bytes = 0;
+    char *const roots[] = { (char *)url.fileSystemRepresentation, NULL };
+    FTS *fts = fts_open(roots, FTS_PHYSICAL | FTS_NOCHDIR | FTS_XDEV, NULL);
+    if (!fts) return files;
+
+    FTSENT *e;
+    while ((e = fts_read(fts)) != NULL) {
+        if (cancel && atomic_load(cancel)) break;
+        if (e->fts_info == FTS_F && (e->fts_statp->st_flags & SF_DATALESS)) {
+            [files addObject:[NSURL fileURLWithFileSystemRepresentation:e->fts_path
+                                                            isDirectory:NO relativeToURL:nil]];
+            *bytes += e->fts_statp->st_size;
+        }
+    }
+    fts_close(fts);
+    return files;
+}
+
+/*
+ * is_placeholder — YES while the file's contents are only in iCloud.
+ *
+ * Inputs:
+ *   url — file URL
+ */
+static BOOL
+is_placeholder(NSURL *url)
+{
+    struct stat st;
+    return lstat(url.fileSystemRepresentation, &st) == 0 && (st.st_flags & SF_DATALESS);
+}
+
+/*
+ * download_placeholders — downloads the iCloud placeholders in src before
+ * it is moved or copied. Renaming a placeholder out of iCloud Drive, or
+ * cloning it, makes the kernel download it inside that one system call,
+ * which reports nothing for as long as the download takes; downloading
+ * first lets the transfer report it. All downloads are started at once;
+ * their bytes come from the progress iCloud publishes for each file (as
+ * Finder shows it) and are reported with c->downloading set. A file whose
+ * download cannot be started is left to the transfer itself.
+ *
+ * Inputs:
+ *   src — item about to be moved or copied
+ *   c   — copy context (progress, log, cancel flag)
+ *
+ * Output: nil once nothing in src is a placeholder (or nothing more can be
+ *         downloaded); NSUserCancelledError on cancel.
+ */
+static NSError *
+download_placeholders(NSURL *src, copy_ctx_t *c)
+{
+    int64_t total = 0;
+    NSArray<NSURL *> *files = placeholder_files(src, &total, c->cancel);
+    if (files.count == 0) return nil;
+
+    /* Written by the publishing handlers (main thread), read by the poll;
+     * the handlers retain both, so a late one is harmless. */
+    NSMutableDictionary<NSString *, NSProgress *> *published = [NSMutableDictionary dictionary];
+    NSLock *lock = [NSLock new];
+
+    NSMutableArray *subscribers         = [NSMutableArray array];
+    NSMutableArray<NSURL *> *pending    = [NSMutableArray array];
+    NSMutableDictionary<NSString *, NSNumber *> *sizes = [NSMutableDictionary dictionary];
+    for (NSURL *file in files) {
+        NSString *path = file.path;
+        [subscribers addObject:[NSProgress addSubscriberForFileURL:file
+                                             withPublishingHandler:^NSProgressUnpublishingHandler(NSProgress *p) {
+            [lock lock];
+            published[path] = p;
+            [lock unlock];
+            return nil;
+        }]];
+        NSError *err = nil;
+        if ([NSFileManager.defaultManager startDownloadingUbiquitousItemAtURL:file error:&err]) {
+            struct stat st;
+            sizes[path] = @(lstat(file.fileSystemRepresentation, &st) == 0 ? st.st_size : 0);
+            [pending addObject:file];
+        } else {
+            log_line(c, @"Could not start downloading \"%@\" from iCloud (%@); the "
+                        @"transfer will wait for it instead", path, err.localizedDescription);
+        }
+    }
+
+    int64_t to_download = 0;
+    for (NSNumber *n in sizes.allValues) to_download += n.longLongValue;
+    if (pending.count) {
+        log_line(c, @"Downloading %@ from iCloud (%@) before the transfer",
+                 pending.count == 1 ? [NSString stringWithFormat:@"\"%@\"", pending.firstObject.path]
+                                    : [NSString stringWithFormat:@"%lu files",
+                                       (unsigned long)pending.count],
+                 byte_count(to_download));
+    }
+
+    CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
+    c->downloading = YES;
+    c->file_total  = to_download;
+    c->file_done   = 0;
+    NSError *result = nil;
+    while (pending.count) {
+        if (c->cancel && atomic_load(c->cancel)) {
+            result = [NSError errorWithDomain:NSCocoaErrorDomain
+                                         code:NSUserCancelledError userInfo:nil];
+            break;
+        }
+        [pending filterUsingPredicate:[NSPredicate predicateWithBlock:
+            ^BOOL(NSURL *file, NSDictionary *bindings) { return is_placeholder(file); }]];
+
+        int64_t done = to_download;  /* less what pending files still lack */
+        [lock lock];
+        for (NSURL *file in pending) {
+            int64_t size = sizes[file.path].longLongValue;
+            int64_t got  = MIN(MAX(published[file.path].completedUnitCount, 0), size);
+            done -= size - got;
+        }
+        [lock unlock];
+        c->file_name = pending.firstObject.lastPathComponent ?: c->file_name;
+        report_progress(c, done);
+        if (pending.count) usleep(DOWNLOAD_POLL_USEC);
+    }
+    c->downloading = NO;
+
+    for (id subscriber in subscribers) [NSProgress removeSubscriber:subscriber];
+    if (!result && to_download > 0) {
+        log_line(c, @"✓ Downloaded %@ from iCloud in %.1f sec", byte_count(to_download),
+                 CFAbsoluteTimeGetCurrent() - start);
+    }
+    return result;
 }
 
 /*
@@ -629,7 +779,9 @@ commit_item(NSURL *staged, NSURL *dst, BOOL replace, BOOL hidden, copy_ctx_t *c)
  * copied under a hidden sibling name of dst (hash-verified as it goes, if
  * requested) and committed with commit_item only once it is complete, so
  * cancel, I/O errors and validation failures leave dst untouched; a move
- * across volumes then deletes the source.
+ * across volumes then deletes the source. Before any of this, iCloud
+ * placeholders in src are downloaded (download_placeholders), unless the
+ * move stays in iCloud Drive or the transfer is silent.
  *
  * Inputs:
  *   src     — source item URL
@@ -647,6 +799,16 @@ transfer_item(NSURL *src, NSURL *dst, BOOL replace, BOOL is_cut, copy_ctx_t *c)
     struct stat st;
     BOOL have_st = lstat(src.fileSystemRepresentation, &st) == 0;
     BOOL hidden  = have_st && (st.st_flags & UF_HIDDEN);  /* the copy should match */
+
+    /* A move that stays in iCloud Drive renames placeholders without
+     * downloading them; anything else downloads them first, reported. A
+     * silent transfer (no progress, no log) leaves that to the kernel. */
+    BOOL stays_in_icloud = is_cut && [NSFileManager.defaultManager
+        isUbiquitousItemAtURL:dst.URLByDeletingLastPathComponent];
+    if ((c->progress || c->log) && !stays_in_icloud) {
+        NSError *err = download_placeholders(src, c);
+        if (err) return err;
+    }
 
     if (is_cut) {
         BOOL direct = !replace || !item_exists(dst);

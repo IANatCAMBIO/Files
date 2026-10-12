@@ -18,6 +18,27 @@ static const CGFloat button_margin = 12.0;  /* Cancel/Close inset from bottom an
 static const NSUInteger log_max_lines  = 1000;
 static const NSUInteger log_trim_batch = 100;
 
+/*
+ * log_attributes — how transfer log text is drawn: small monospaced type
+ * in the system text color, which follows Light and Dark mode.
+ *
+ * Output: attributes for the log's text storage.
+ */
+static NSDictionary<NSAttributedStringKey, id> *
+log_attributes(void)
+{
+    static NSDictionary<NSAttributedStringKey, id> *attrs;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        attrs = @{
+            NSFontAttributeName:            [NSFont monospacedSystemFontOfSize:10.0
+                                                                       weight:NSFontWeightRegular],
+            NSForegroundColorAttributeName: NSColor.textColor,
+        };
+    });
+    return attrs;
+}
+
 /* ── FilesCopyProgress implementation ───────────────────────────────────── */
 
 @interface FilesCopyProgress () <NSWindowDelegate>
@@ -54,6 +75,9 @@ static const NSUInteger log_trim_batch = 100;
     NSMutableArray<NSString *> *_engine_log;  /* timestamped lines not yet shown */
     NSString          *_engine_name;  /* file the engine reported last */
     int64_t            _engine_done;  /* bytes the engine reported last */
+    BOOL               _engine_downloading;  /* it was downloading from iCloud */
+    int64_t            _engine_dl_done;      /* bytes of that download so far */
+    int64_t            _engine_dl_total;     /* bytes that download needs */
 }
 
 /* ── Panel construction ─────────────────────────────────────────────────── */
@@ -193,8 +217,7 @@ build_views
     tv.editable              = NO;
     tv.selectable            = YES;
     tv.richText              = NO;
-    tv.font                  = [NSFont monospacedSystemFontOfSize:10.0
-                                                          weight:NSFontWeightRegular];
+    tv.typingAttributes      = log_attributes();
     tv.backgroundColor       = NSColor.textBackgroundColor;
     tv.textContainerInset    = NSMakeSize(4, 4);
     tv.autoresizingMask      = NSViewWidthSizable;
@@ -292,9 +315,9 @@ append_log_lines:(NSArray<NSString *> *)lines
     NSString      *sep = ts.length ? @"\n" : @"";
 
     [ts beginEditing];
-    [ts replaceCharactersInRange:NSMakeRange(ts.length, 0)
-                      withString:[sep stringByAppendingString:
-                                  [lines componentsJoinedByString:@"\n"]]];
+    [ts appendAttributedString:[[NSAttributedString alloc]
+        initWithString:[sep stringByAppendingString:[lines componentsJoinedByString:@"\n"]]
+            attributes:log_attributes()]];
     _log_lines += lines.count;
 
     if (_log_lines > log_max_lines + log_trim_batch) {
@@ -329,20 +352,30 @@ append_log:(NSString *)line
 }
 
 /*
- * engine_progress:total_done: — records the engine's latest progress report.
- * Called on the copy thread for every report; the panel shows it on its
- * next tick (take_engine_updates).
+ * engine_progress:file_done:file_total:total_done:downloading: — records
+ * the engine's latest progress report. Called on the copy thread for
+ * every report; the panel shows it on its next tick (take_engine_updates).
  *
  * Inputs:
- *   name       — file being copied
- *   total_done — bytes copied across all files so far
+ *   name        — file being copied (or downloaded)
+ *   file_done   — while downloading: bytes of the download so far
+ *   file_total  — while downloading: bytes the download needs
+ *   total_done  — bytes copied (and downloaded) across all files so far
+ *   downloading — YES while the engine downloads from iCloud
  */
 - (void)
-engine_progress:(NSString *)name total_done:(int64_t)total_done
+engine_progress:(NSString *)name
+      file_done:(int64_t)file_done
+     file_total:(int64_t)file_total
+     total_done:(int64_t)total_done
+    downloading:(BOOL)downloading
 {
     os_unfair_lock_lock(&_engine_lock);
-    _engine_name = name;
-    _engine_done = total_done;
+    _engine_name        = name;
+    _engine_done        = total_done;
+    _engine_downloading = downloading;
+    _engine_dl_done     = file_done;
+    _engine_dl_total    = file_total;
     os_unfair_lock_unlock(&_engine_lock);
 }
 
@@ -366,7 +399,9 @@ engine_log:(NSString *)line
 /*
  * take_engine_updates — shows what the engine reported since the last
  * call: appends its log lines, records the byte count (feed_graph reads
- * it) and updates the status line when the file changed. Main thread only.
+ * it) and updates the status line — every call while downloading from
+ * iCloud ("Downloading "name" from iCloud — 312 MB of 731 MB"), otherwise
+ * when the file changed. Main thread only.
  */
 - (void)
 take_engine_updates
@@ -374,13 +409,21 @@ take_engine_updates
     os_unfair_lock_lock(&_engine_lock);
     NSArray<NSString *> *lines = _engine_log.count ? [_engine_log copy] : nil;
     [_engine_log removeAllObjects];
-    NSString *name = _engine_name;
-    int64_t   done = _engine_done;
+    NSString *name        = _engine_name;
+    int64_t   done        = _engine_done;
+    BOOL      downloading = _engine_downloading;
+    int64_t   dl_done     = _engine_dl_done;
+    int64_t   dl_total    = _engine_dl_total;
     os_unfair_lock_unlock(&_engine_lock);
 
     if (lines) [self append_log_lines:lines];
     _total_done = done;
-    if (name && ![name isEqualToString:_cur_name]) {
+    if (downloading) {
+        _cur_name = @"";  /* the copy that follows sets the status line again */
+        self.status_label.stringValue = [NSString stringWithFormat:
+            @"Downloading \"%@\" from iCloud — %@ of %@", name,
+            files_format_bytes(dl_done), files_format_bytes(dl_total)];
+    } else if (name && ![name isEqualToString:_cur_name]) {
         _cur_name = name;
         self.status_label.stringValue = [NSString stringWithFormat:
             @"%@ \"%@\" to %@", _ing, name, _dest_name];
@@ -518,7 +561,7 @@ completion:(void (^)(NSError *))completion
 /*
  * start_copy:to:is_cut:hash_validate:completion: — kick off the copy using
  * the FilesFileOps engine. Its progress and log blocks run on the copy
- * thread and only record what they are given (engine_progress:total_done:,
+ * thread and only record what they are given (engine_progress:file_done:…,
  * engine_log:); the graph timer shows it every graph_interval.
  *
  * Inputs:
@@ -556,9 +599,10 @@ completion:(void (^)(NSError *))completion
         _ing, src_desc, _dest_name, hash_validate ? @" (SHA256)" : @""]];
 
     FileCopyProgressBlock progress = ^(NSString *name, int64_t f_done, int64_t f_total,
-                                       int64_t t_done)
+                                       int64_t t_done, BOOL downloading)
     {
-        [alive engine_progress:name total_done:t_done];
+        [alive engine_progress:name file_done:f_done file_total:f_total
+                    total_done:t_done downloading:downloading];
     };
     FileCopyLogBlock log = ^(NSString *line) {
         [alive engine_log:line];
