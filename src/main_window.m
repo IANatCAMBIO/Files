@@ -75,6 +75,9 @@ static void *first_responder_ctx = &first_responder_ctx;
  * which is Empty Trash in the Trash and Unmount at an unmountable volume's
  * root (see update_floating_button). */
 @property (nonatomic, strong) NSTextField *status_label;
+/* Left of the status bar: spins while the active pane's folder is
+ * loading (FilesBrowserView loading). */
+@property (nonatomic, strong) NSProgressIndicator *loading_spinner;
 /* Right of the status bar: free and total space of the active pane's
  * volume (refresh_disk_space). */
 @property (nonatomic, strong) NSTextField *space_label;
@@ -82,6 +85,7 @@ static void *first_responder_ctx = &first_responder_ctx;
 @property (nonatomic, assign) BOOL         space_refresh_scheduled;
 @property (nonatomic, strong) NSButton    *floating_btn;
 @property (nonatomic, copy)   NSArray<NSLayoutConstraint *> *fab_anchors; /* its current pin */
+@property (nonatomic, assign) NSUInteger   fab_generation;  /* drops superseded volume checks */
 @property (nonatomic, assign) NSUInteger   transient_status_id;  /* 0 = none showing */
 
 /* Paths of volumes waiting for their open files to close before unmounting. */
@@ -252,6 +256,13 @@ build_layout
     [self.space_label setContentCompressionResistancePriority:NSLayoutPriorityRequired
                                                forOrientation:NSLayoutConstraintOrientationHorizontal];
     [status_container addSubview:self.space_label];
+    self.loading_spinner = [[NSProgressIndicator alloc] init];
+    self.loading_spinner.translatesAutoresizingMaskIntoConstraints = NO;
+    self.loading_spinner.style                = NSProgressIndicatorStyleSpinning;
+    self.loading_spinner.controlSize          = NSControlSizeSmall;
+    self.loading_spinner.indeterminate        = YES;
+    self.loading_spinner.displayedWhenStopped = NO;
+    [status_container addSubview:self.loading_spinner];
 
     /* The item count stays centred in the bar; it gives way (truncating)
      * before it would run into the disk space on the right. */
@@ -264,10 +275,15 @@ build_layout
     [NSLayoutConstraint activateConstraints:@[
         [self.status_label.centerYAnchor  constraintEqualToAnchor:status_container.centerYAnchor],
         centred,
-        [self.status_label.leadingAnchor  constraintGreaterThanOrEqualToAnchor:status_container.leadingAnchor
+        [self.status_label.leadingAnchor  constraintGreaterThanOrEqualToAnchor:self.loading_spinner.trailingAnchor
                                                                       constant:8.0],
         [self.status_label.trailingAnchor constraintLessThanOrEqualToAnchor:self.space_label.leadingAnchor
                                                                    constant:-8.0],
+        [self.loading_spinner.centerYAnchor constraintEqualToAnchor:status_container.centerYAnchor],
+        [self.loading_spinner.leadingAnchor constraintEqualToAnchor:status_container.leadingAnchor
+                                                           constant:8.0],
+        [self.loading_spinner.widthAnchor   constraintEqualToConstant:14.0],
+        [self.loading_spinner.heightAnchor  constraintEqualToConstant:14.0],
         [self.space_label.centerYAnchor   constraintEqualToAnchor:status_container.centerYAnchor],
         [self.space_label.trailingAnchor  constraintEqualToAnchor:status_container.trailingAnchor
                                                          constant:-8.0],
@@ -439,6 +455,10 @@ new_browser_with_frame:(NSRect)frame
         FilesMainWindow *s = ws;
         if (s && [s active_browser] == wb) [s show_pane_status];
     };
+    b.loading_handler = ^{
+        FilesMainWindow *s = ws;
+        if (s && [s active_browser] == wb) [s show_pane_loading];
+    };
     return b;
 }
 
@@ -488,36 +508,49 @@ anchor_floating_button
 /*
  * update_floating_button — shows the floating button for the active pane:
  * Empty Trash while it shows the Trash, Unmount "<name>" while it shows the
- * root of an unmountable volume, hidden otherwise.
+ * root of an unmountable volume, hidden otherwise. The volume is checked
+ * on a background queue (a slow volume would otherwise block the UI), so
+ * the Unmount button appears once that check is in.
  */
 - (void)
 update_floating_button
 {
     [self anchor_floating_button];
-    NSURL    *url    = [self active_browser].current_url;
-    NSURL    *volume = nil;
-    NSButton *btn    = self.floating_btn;
-    NSImage  *icon;
+    NSURL    *url = [self active_browser].current_url;
+    NSButton *btn = self.floating_btn;
+    NSUInteger generation = ++self.fab_generation;
+    btn.hidden = YES;
+    if (!url) return;
     if (files_same_path(url, files_directory_url(NSTrashDirectory))) {
-        icon        = [[NSImage imageNamed:NSImageNameTrashEmpty] copy];
+        NSImage *icon = [[NSImage imageNamed:NSImageNameTrashEmpty] copy];
         icon.size   = NSMakeSize(20.0, 20.0);
         btn.action  = @selector(empty_trash_action:);
         btn.toolTip = @"Empty Trash";
-    } else if ((volume = unmountable_volume_root(url))) {
-        NSString *name = [FilesVolumeManager.shared display_name_for_volume:volume];
-        btn.toolTip = [NSString stringWithFormat:@"Unmount \"%@\"", name];
-        icon        = [[NSImage imageWithSystemSymbolName:@"eject" accessibilityDescription:btn.toolTip]
-                          imageWithSymbolConfiguration:
-                              [NSImageSymbolConfiguration configurationWithPointSize:16
-                                                                              weight:NSFontWeightRegular]];
-        btn.action  = @selector(unmount_action:);
-    } else {
-        btn.hidden = YES;
+        btn.image   = icon;
+        btn.enabled = YES;
+        btn.hidden  = NO;
         return;
     }
-    btn.image   = icon;
-    btn.enabled = YES;
-    btn.hidden  = NO;
+
+    __weak FilesMainWindow *ws = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSURL *volume  = unmountable_volume_root(url);
+        NSString *name = volume ? [FilesVolumeManager.shared display_name_for_volume:volume] : nil;
+        if (!volume) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            FilesMainWindow *s = ws;
+            if (!s || generation != s.fab_generation) return;
+            NSButton *b = s.floating_btn;
+            b.toolTip = [NSString stringWithFormat:@"Unmount \"%@\"", name];
+            b.image   = [[NSImage imageWithSystemSymbolName:@"eject" accessibilityDescription:b.toolTip]
+                            imageWithSymbolConfiguration:
+                                [NSImageSymbolConfiguration configurationWithPointSize:16
+                                                                                weight:NSFontWeightRegular]];
+            b.action  = @selector(unmount_action:);
+            b.enabled = YES;
+            b.hidden  = NO;
+        });
+    });
 }
 
 /*
@@ -538,6 +571,7 @@ set_active_pane:(NSInteger)idx
 
     [self update_toolbar_for_url:[self active_browser].current_url];
     [self show_pane_status];
+    [self show_pane_loading];
     [self update_floating_button];
     [self refresh_sidebar_for_active_pane];
 }
@@ -552,6 +586,20 @@ show_pane_status
     [self refresh_disk_space];
     if (self.transient_status_id) return;
     self.status_label.stringValue = [self active_browser].status_text ?: @"";
+}
+
+/*
+ * show_pane_loading — spins the status bar spinner while the active
+ * pane's folder is loading and hides it otherwise.
+ */
+- (void)
+show_pane_loading
+{
+    if ([self active_browser].loading) {
+        [self.loading_spinner startAnimation:nil];
+    } else {
+        [self.loading_spinner stopAnimation:nil];
+    }
 }
 
 /*

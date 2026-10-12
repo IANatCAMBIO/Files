@@ -33,6 +33,11 @@
 @property (nonatomic, copy) void (^status_text_handler)(NSString *text);
 
 /*
+ * loading_handler — called whenever loading changes.
+ */
+@property (nonatomic, copy) void (^loading_handler)(void);
+
+/*
  * open_window_handler — called to show a folder in a new window (used for
  * the volume of a newly mounted disk image and the folder an archive was
  * extracted to). If nil, the folder is shown in
@@ -51,6 +56,13 @@
  * selection, listing error or progress message); nil before the first.
  */
 @property (nonatomic, copy, readonly) NSString *status_text;
+
+/*
+ * loading — YES while a navigation check or folder listing has been
+ * running for longer than a moment (slow or unresponsive volumes, e.g. File Provider mounts); NO
+ * once it lands, is superseded or the browser shuts down.
+ */
+@property (nonatomic, assign, readonly) BOOL loading;
 
 /*
  * The clip view showing the rows: the file list's visible area, which ends
@@ -91,6 +103,8 @@
  * open_window_handler; an archive (.zip, .tar, .tar.gz, .tgz) is extracted
  * next to itself and the new folder shown the same way; any other item is
  * opened with its default application. Symbolic links are followed to their target first.
+ * Asynchronous: the item is examined on a background queue, and a folder
+ * is shown only if no newer navigate_to: was called meanwhile.
  *
  * Inputs:
  *   url — target URL

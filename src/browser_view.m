@@ -57,6 +57,11 @@ static const CGFloat icon_size_normal  = 16.0;
 /* Delay used to coalesce bursts of file-system events into one reload. */
 #define WATCH_COALESCE_SEC 0.25
 
+/* How long a navigation check or listing may run before the browser
+ * reports it as loading (begin_loading), so fast ones do not flash the
+ * status bar spinner. */
+#define LOADING_DELAY_SEC 0.2
+
 /*
  * listing_keys — resource keys prefetched for every listed item, so table
  * cells, sorting and filtering never touch the file system again.
@@ -279,6 +284,33 @@ listing_rows(NSArray<NSURL *> *items, NSString *sort_key, BOOL ascending,
     return rows;
 }
 
+/*
+ * item_icons — reads the icons files_icon_for_url keys by path (folders,
+ * packages and items with no type) for items: those read the volume, so
+ * they are read here, with the listing, rather than when rows are drawn.
+ * Plain files share their type's icon, which costs no file-system access.
+ * Background queue.
+ *
+ * Inputs:
+ *   items — listed URLs with listing_keys() prefetched
+ *   size  — icon edge length in points
+ *
+ * Output: icons by path; empty if items has no such item.
+ */
+static NSDictionary<NSString *, NSImage *> *
+item_icons(NSArray<NSURL *> *items, CGFloat size)
+{
+    NSMutableDictionary<NSString *, NSImage *> *icons = [NSMutableDictionary dictionary];
+    for (NSURL *url in items) {
+        NSNumber *is_dir = nil;
+        NSString *uti    = nil;
+        [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
+        [url getResourceValue:&uti forKey:NSURLTypeIdentifierKey error:nil];
+        if (is_dir.boolValue || uti.length == 0) icons[url.path] = files_icon_for_url(url, size, YES);
+    }
+    return icons;
+}
+
 /* ── FilesBrowserView ────────────────────────────────────────────────── */
 
 @interface FilesBrowserView () <NSTableViewDataSource,
@@ -327,6 +359,10 @@ listing_rows(NSArray<NSURL *> *items, NSString *sort_key, BOOL ascending,
 @property (nonatomic, strong) FilesCancelToken        *size_token;
 @property (nonatomic, strong) dispatch_queue_t         size_queue;
 @property (nonatomic, assign) BOOL                     size_refresh_scheduled;
+/* Icons of the listed items that are read per path (item_icons), by
+ * path: read with the listing, on its background queue, so drawing rows
+ * never touches a slow volume. */
+@property (nonatomic, copy)   NSDictionary<NSString *, NSImage *> *row_icons;
 
 /* Set by shut_down: nothing is listed or watched afterwards. */
 @property (nonatomic, assign) BOOL                     is_shut_down;
@@ -334,6 +370,12 @@ listing_rows(NSArray<NSURL *> *items, NSString *sort_key, BOOL ascending,
 
 /* Counters that discard results a newer listing or search has superseded. */
 @property (nonatomic, assign) NSUInteger               list_generation;
+/* Ids begin_loading has handed out, and the newest one not yet ended
+ * (0 if none). */
+@property (nonatomic, assign) NSUInteger               loading_counter;
+@property (nonatomic, assign) NSUInteger               loading_id;
+/* Counter that drops navigate_to: checks a newer navigation superseded. */
+@property (nonatomic, assign) NSUInteger               navigate_generation;
 @property (nonatomic, assign) NSUInteger               search_generation;
 @property (nonatomic, assign) BOOL                     auto_fit_pending;
 
@@ -804,6 +846,8 @@ shut_down
     [self stop_watching];
     [self stop_search_query];
     ++self.list_generation;  /* drop any listing still in flight */
+    self.loading_id = 0;
+    [self report_loading:NO];
 }
 
 /*
@@ -839,7 +883,8 @@ apply_view_prefs
     if (rows_changed) {
         self.large_rows = large;
         self.table.rowHeight = [self row_height];
-        [self.table reloadData];
+        [self.table reloadData];         /* row_icons scaled until re-read */
+        [self reload_directory];
     }
     if (hidden != self.show_hidden) {
         self.show_hidden = hidden;
@@ -930,6 +975,9 @@ load_location:(NSURL *)url
  * opens it with its default application. A symbolic link is followed first,
  * like a Finder alias: a link to a folder shows the folder it points to
  * (at its real path), and a link whose target is missing reports an error.
+ * The item is examined on a background queue, so a slow volume never
+ * blocks the UI; a folder is shown only if no newer navigate_to: came
+ * since.
  *
  * Inputs:
  *   url — target URL
@@ -937,42 +985,59 @@ load_location:(NSURL *)url
 - (void)
 navigate_to:(NSURL *)url
 {
-    NSNumber *is_link = nil;
-    [url getResourceValue:&is_link forKey:NSURLIsSymbolicLinkKey error:nil];
-    if (is_link.boolValue) {
-        /* realpath(3) follows chains of links and fails (ENOENT) for a
-         * broken one; -URLByResolvingSymlinksInPath would silently return
-         * the broken link itself. */
-        char target[PATH_MAX];
-        if (!realpath(url.fileSystemRepresentation, target)) {
-            files_show_error([NSString stringWithFormat:
-                @"\"%@\" points to an item that no longer exists", url.lastPathComponent],
-                [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil],
-                self.window);
-            return;
-        }
-        url = [NSURL fileURLWithFileSystemRepresentation:target isDirectory:NO relativeToURL:nil];
-    }
+    NSUInteger generation = ++self.navigate_generation;
+    NSUInteger loading    = [self begin_loading];
+    __weak FilesBrowserView *ws = self;
 
-    NSNumber *is_dir = nil;
-    NSString *uti    = nil;
-    [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
-    if (!is_dir.boolValue) {
-        [url getResourceValue:&uti forKey:NSURLTypeIdentifierKey error:nil];
-        if (uti && [[UTType typeWithIdentifier:uti] conformsToType:UTTypeDiskImage]) {
-            [self mount_disk_image:url];
-        } else if ([FilesArchive is_archive:url]) {
-            [self extract_archive:url password:nil];
-        } else {
-            [NSWorkspace.sharedWorkspace openURL:url];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSURL *target    = url;
+        NSNumber *is_link = nil;
+        int link_errno   = 0;
+        [target getResourceValue:&is_link forKey:NSURLIsSymbolicLinkKey error:nil];
+        if (is_link.boolValue) {
+            /* realpath(3) follows chains of links and fails (ENOENT) for a
+             * broken one; -URLByResolvingSymlinksInPath would silently return
+             * the broken link itself. */
+            char resolved[PATH_MAX];
+            if (realpath(target.fileSystemRepresentation, resolved)) {
+                target = [NSURL fileURLWithFileSystemRepresentation:resolved isDirectory:NO
+                                                      relativeToURL:nil];
+            } else {
+                link_errno = errno;
+            }
         }
-        return;
-    }
-    if (files_same_path(url, self.current_dir)) return;
+        NSNumber *is_dir = nil;
+        NSString *uti    = nil;
+        if (!link_errno) {
+            [target getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
+            if (!is_dir.boolValue) [target getResourceValue:&uti forKey:NSURLTypeIdentifierKey error:nil];
+        }
 
-    [self push_history:self.current_dir onto:self.back_stack];
-    [self.forward_stack removeAllObjects];
-    [self load_location:url];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            FilesBrowserView *s = ws;
+            if (!s || s.is_shut_down) return;
+            [s end_loading:loading];
+            if (link_errno) {
+                files_show_error([NSString stringWithFormat:
+                    @"\"%@\" points to an item that no longer exists", url.lastPathComponent],
+                    [NSError errorWithDomain:NSPOSIXErrorDomain code:link_errno userInfo:nil],
+                    s.window);
+            } else if (!is_dir.boolValue) {
+                if (uti && [[UTType typeWithIdentifier:uti] conformsToType:UTTypeDiskImage]) {
+                    [s mount_disk_image:target];
+                } else if ([FilesArchive is_archive:target]) {
+                    [s extract_archive:target password:nil];
+                } else {
+                    [NSWorkspace.sharedWorkspace openURL:target];
+                }
+            } else if (generation == s.navigate_generation &&
+                       !files_same_path(target, s.current_dir)) {
+                [s push_history:s.current_dir onto:s.back_stack];
+                [s.forward_stack removeAllObjects];
+                [s load_location:target];
+            }
+        });
+    });
 }
 
 /*
@@ -1251,7 +1316,10 @@ reload_directory
     NSString *cache_stamp = same_dir ? self.git_cache_stamp : nil;
     NSSet<NSString *> *cache_tracked = same_dir ? self.git_cache_tracked : nil;
     NSDictionary<NSString *, NSNumber *> *sizes = [self.folder_sizes copy];
+    CGFloat icon_sz       = [self icon_size];
     __weak FilesBrowserView *ws = self;
+
+    NSUInteger loading = [self begin_loading];
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSError *err = nil;
@@ -1265,12 +1333,16 @@ reload_directory
                                               tracked, sizes, show_hidden);
         NSString *error = items ? nil
             : (err.localizedFailureReason ?: err.localizedDescription ?: @"It cannot be read.");
+        NSDictionary<NSString *, NSImage *> *icons = item_icons(items ?: @[], icon_sz);
 
         dispatch_async(dispatch_get_main_queue(), ^{
             FilesBrowserView *s = ws;
-            if (!s || generation != s.list_generation || s.search_active) return;
+            if (!s || generation != s.list_generation) return;
+            [s end_loading:loading];
+            if (s.search_active) return;
             [s watch:dir git_index:git_index];
             [s set_git_tracked:tracked];
+            s.row_icons     = icons;
             s.listing_error = error;
             [s show_listing:items ?: @[]
                        rows:[order isEqualToString:[s row_order]] ? rows : nil];
@@ -1637,6 +1709,7 @@ search_results_updated:(NSNotification *)note
     BOOL ascending        = self.sort_ascending;
     BOOL show_hidden      = [self shows_hidden_items];
     NSDictionary<NSString *, NSNumber *> *sizes = [self.folder_sizes copy];
+    CGFloat icon_sz       = [self icon_size];
     __weak FilesBrowserView *ws = self;
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -1647,10 +1720,12 @@ search_results_updated:(NSNotification *)note
             [items addObject:url];
         }
         NSArray<NSURL *> *rows = listing_rows(items, sort_key, ascending, nil, sizes, show_hidden);
+        NSDictionary<NSString *, NSImage *> *icons = item_icons(items, icon_sz);
 
         dispatch_async(dispatch_get_main_queue(), ^{
             FilesBrowserView *s = ws;
             if (!s || generation != s.search_generation || !s.search_active) return;
+            s.row_icons       = icons;
             s.all_items       = items;
             s.search_overflow = total > count ? total : 0;
             if (![order isEqualToString:[s row_order]]) {
@@ -1912,6 +1987,58 @@ report_status:(NSString *)text
 }
 
 /*
+ * begin_loading — starts a file-system wait the user may notice (a
+ * navigation check or a listing). Unless end_loading: ends it, or a newer
+ * begin_loading supersedes it, within LOADING_DELAY_SEC, loading turns
+ * YES — so fast ones never flash the spinner.
+ *
+ * Output: id to pass to end_loading:.
+ */
+- (NSUInteger)
+begin_loading
+{
+    NSUInteger loading = ++self.loading_counter;
+    self.loading_id    = loading;
+    __weak FilesBrowserView *ws = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(LOADING_DELAY_SEC * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        FilesBrowserView *s = ws;
+        if (s && s.loading_id == loading) [s report_loading:YES];
+    });
+    return loading;
+}
+
+/*
+ * end_loading: — ends the wait begin_loading returned loading for; loading
+ * turns NO unless a newer one is still running.
+ *
+ * Inputs:
+ *   loading — id from begin_loading
+ */
+- (void)
+end_loading:(NSUInteger)loading
+{
+    if (loading == 0 || loading != self.loading_id) return;
+    self.loading_id = 0;
+    [self report_loading:NO];
+}
+
+/*
+ * report_loading: — records loading and, if it changed, calls
+ * loading_handler.
+ *
+ * Inputs:
+ *   loading — YES while a slow navigation check or listing is running
+ */
+- (void)
+report_loading:(BOOL)loading
+{
+    if (_loading == loading) return;
+    _loading = loading;
+    if (self.loading_handler) self.loading_handler();
+}
+
+/*
  * update_status_bar — reports the item/selection count, why the folder
  * could not be listed, or how many Spotlight matches were not shown.
  */
@@ -2025,7 +2152,7 @@ viewForTableColumn:(NSTableColumn *)col
     }
 
     cell.textField.stringValue = [self cell_text_for_column:ident url:url];
-    if ([ident isEqualToString:col_name]) cell.imageView.image = files_icon_for_url(url, icon_sz, YES);
+    if ([ident isEqualToString:col_name]) cell.imageView.image = self.row_icons[url.path] ?: files_icon_for_url(url, icon_sz, YES);
     return cell;
 }
 

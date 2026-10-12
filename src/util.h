@@ -118,7 +118,8 @@ NSString *files_opens_with_text(NSURL *url);
  * icon per file type (custom icons on individual files are not shown) and
  * one per folder or package path. Uncached, it reads the item's own
  * current icon, custom icons included, for the one item Get Info or the
- * sidebar shows. Main thread.
+ * sidebar shows. Any thread: per-path icons read the volume, which can
+ * stall on a slow one, so file lists read them on a background queue.
  *
  * Inputs:
  *   url    — file URL of the item (listing resource values used if prefetched)
