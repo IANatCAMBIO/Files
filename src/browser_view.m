@@ -311,6 +311,184 @@ item_icons(NSArray<NSURL *> *items, CGFloat size)
     return icons;
 }
 
+/*
+ * item_comments — reads the Finder comments of items (one extended
+ * attribute read each), for the Comment column: read with the listing, so
+ * drawing rows never touches the volume. Background queue.
+ *
+ * Inputs:
+ *   items — listed URLs
+ *
+ * Output: comments by path; items without one are absent.
+ */
+static NSDictionary<NSString *, NSString *> *
+item_comments(NSArray<NSURL *> *items)
+{
+    NSMutableDictionary<NSString *, NSString *> *comments = [NSMutableDictionary dictionary];
+    for (NSURL *url in items) {
+        NSString *comment = files_get_finder_comment(url);
+        if (comment.length > 0) comments[url.path] = comment;
+    }
+    return comments;
+}
+
+/*
+ * cell_font_for_column — font a column's cells are drawn in (Permissions is
+ * monospaced). Used by the cell builder and by auto-fit measurement.
+ * Thread-safe.
+ *
+ * Inputs:
+ *   col_id — column identifier
+ *
+ * Output: NSFont.
+ */
+static NSFont *
+cell_font_for_column(NSString *col_id)
+{
+    return [col_id isEqualToString:col_perms]
+        ? [NSFont monospacedSystemFontOfSize:11.0 weight:NSFontWeightRegular]
+        : [NSFont systemFontOfSize:12.0];
+}
+
+/* What a cell's text depends on besides its item: a snapshot of the view's
+ * state, so cell text can also be made off the main thread. */
+typedef struct {
+    BOOL show_folder_sizes;
+    NSDictionary<NSString *, NSNumber *> *folder_sizes;  /* totals by path */
+    NSSet<NSString *>                    *git_tracked;   /* tracked names */
+    NSDictionary<NSString *, NSString *> *comments;      /* item_comments */
+} cell_context_t;
+
+/*
+ * cell_text — the display string for a cell, from prefetched resource
+ * values and ctx only (no file-system access). Thread-safe.
+ *
+ * Inputs:
+ *   col_id — column identifier (col_name, col_size, …)
+ *   url    — row's item, with listing_keys() prefetched
+ *   ctx    — the view's state
+ *
+ * Output: NSString to display; never nil.
+ */
+static NSString *
+cell_text(NSString *col_id, NSURL *url, const cell_context_t *ctx)
+{
+    if ([col_id isEqualToString:col_name]) {
+        NSString *name = nil;
+        [url getResourceValue:&name forKey:NSURLNameKey error:nil];
+        return name ?: url.lastPathComponent;
+
+    } else if ([col_id isEqualToString:col_size]) {
+        NSNumber *is_dir = nil, *sz = nil;
+        [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
+        if (is_dir.boolValue) {
+            /* Show Folder Sizes: the total once counted, "…" until then. */
+            if (!ctx->show_folder_sizes) return @"—";
+            NSNumber *total = ctx->folder_sizes[url.path];
+            return total ? files_format_bytes(total.longLongValue) : @"…";
+        }
+        [url getResourceValue:&sz forKey:NSURLFileSizeKey error:nil];
+        return sz ? files_format_bytes(sz.longLongValue) : @"—";
+
+    } else if ([col_id isEqualToString:col_kind]) {
+        /* "Folder" for folders, "Application" for apps and so on. */
+        NSString *kind = nil;
+        [url getResourceValue:&kind forKey:NSURLLocalizedTypeDescriptionKey error:nil];
+        return kind ?: @"—";
+
+    } else if ([col_id isEqualToString:col_perms]) {
+        mode_t mode = file_mode(url);
+        return mode ? perms_string_for_mode(mode) : @"—";
+
+    } else if ([col_id isEqualToString:col_modified]) {
+        NSDate *date = nil;
+        [url getResourceValue:&date forKey:NSURLContentModificationDateKey error:nil];
+        return files_format_date(date, NSDateFormatterShortStyle);
+
+    } else if ([col_id isEqualToString:col_comment]) {
+        return ctx->comments[url.path] ?: @"";
+
+    } else if ([col_id isEqualToString:col_git]) {
+        return [ctx->git_tracked containsObject:url.lastPathComponent] ? @"tracked" : @"";
+    }
+    return @"";
+}
+
+/*
+ * column_text_widths — for auto-fit, the width of each column's widest
+ * cell text (first AUTO_FIT_ROW_LIMIT rows, in the column's cell font),
+ * in whole points: text fields truncate 42.3 pt of text in 42.3 pt. The
+ * Git column only ever shows "tracked", which may be filled in later, so
+ * it is sized for that word; with Show Folder Sizes the Size column has
+ * room for a wide total, since totals arrive later. Thread-safe, so a
+ * listing is measured on its background queue.
+ *
+ * Inputs:
+ *   rows    — items in display order, with listing_keys() prefetched
+ *   col_ids — columns to measure
+ *   ctx     — the view's state
+ *
+ * Output: text width by column identifier, for every column in col_ids.
+ */
+static NSDictionary<NSString *, NSNumber *> *
+column_text_widths(NSArray<NSURL *> *rows, NSArray<NSString *> *col_ids,
+                   const cell_context_t *ctx)
+{
+    NSUInteger count = MIN(rows.count, (NSUInteger)AUTO_FIT_ROW_LIMIT);
+    NSMutableDictionary<NSString *, NSNumber *> *widths = [NSMutableDictionary dictionary];
+    for (NSString *col_id in col_ids) {
+        NSDictionary *attrs = @{ NSFontAttributeName: cell_font_for_column(col_id) };
+        BOOL git   = [col_id isEqualToString:col_git];
+        CGFloat max_w = 0;
+        if (ctx->show_folder_sizes && [col_id isEqualToString:col_size]) {
+            max_w = ceil([@"888.8 MB" sizeWithAttributes:attrs].width);
+        }
+        for (NSUInteger i = 0; i < (git ? 1 : count); i++) {
+            NSString *text = git ? @"tracked" : cell_text(col_id, rows[i], ctx);
+            max_w = MAX(max_w, ceil([text sizeWithAttributes:attrs].width));
+        }
+        widths[col_id] = @(max_w);
+    }
+    return widths;
+}
+
+/* ── FilesTableView ──────────────────────────────────────────────────── */
+
+/*
+ * FilesTableView — the browser's table. NSTableView selects a clicked row
+ * only when the mouse button goes up, while it tells a click from a drag;
+ * this one selects it when the button goes down, as Finder does.
+ */
+@interface FilesTableView : NSTableView
+@end
+
+@implementation FilesTableView
+
+/*
+ * mouseDown: — selects the row under a plain left click at once, then lets
+ * NSTableView handle the click as usual (drags, double-clicks). A row that
+ * is already selected is left alone, so the whole selection can still be
+ * dragged (NSTableView narrows it on mouse-up if there was no drag), as are
+ * ⌘-, ⇧- and ^-clicks, which extend the selection or open the menu.
+ *
+ * Inputs:
+ *   event — the mouse-down event
+ */
+- (void)
+mouseDown:(NSEvent *)event
+{
+    NSEventModifierFlags mods = event.modifierFlags & (NSEventModifierFlagCommand |
+                                                       NSEventModifierFlagShift |
+                                                       NSEventModifierFlagControl);
+    NSInteger row = [self rowAtPoint:[self convertPoint:event.locationInWindow fromView:nil]];
+    if (mods == 0 && event.clickCount == 1 && row >= 0 && ![self isRowSelected:row]) {
+        [self selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row] byExtendingSelection:NO];
+    }
+    [super mouseDown:event];
+}
+
+@end
+
 /* ── FilesBrowserView ────────────────────────────────────────────────── */
 
 @interface FilesBrowserView () <NSTableViewDataSource,
@@ -363,6 +541,12 @@ item_icons(NSArray<NSURL *> *items, CGFloat size)
  * path: read with the listing, on its background queue, so drawing rows
  * never touches a slow volume. */
 @property (nonatomic, copy)   NSDictionary<NSString *, NSImage *> *row_icons;
+/* Finder comments of the listed items by path (item_comments), read the
+ * same way while the Comment column is shown; nil while it is hidden. */
+@property (nonatomic, copy)   NSDictionary<NSString *, NSString *> *row_comments;
+/* Column text widths a listing measured with its rows (column_text_widths),
+ * for the auto-fit of the show_rows:selecting:reveal: that installs them. */
+@property (nonatomic, copy)   NSDictionary<NSString *, NSNumber *> *pending_widths;
 
 /* Set by shut_down: nothing is listed or watched afterwards. */
 @property (nonatomic, assign) BOOL                     is_shut_down;
@@ -553,7 +737,7 @@ observeValueForKeyPath:(NSString *)key_path ofObject:(id)object
 - (void)
 build_table
 {
-    self.table = [[NSTableView alloc] initWithFrame:self.bounds];
+    self.table = [[FilesTableView alloc] initWithFrame:self.bounds];
     self.table.style                              = NSTableViewStylePlain;
     self.table.usesAlternatingRowBackgroundColors = YES;
     self.table.allowsMultipleSelection            = YES;
@@ -677,6 +861,39 @@ update_column_visibility
     }
     if (changed) name_col.width = MAX(name_col.minWidth, name_col.width + delta);
     return changed;
+}
+
+/*
+ * shows_column: — whether a column is currently shown.
+ *
+ * Inputs:
+ *   col_id — column identifier
+ *
+ * Output: YES if the column exists and is not hidden.
+ */
+- (BOOL)
+shows_column:(NSString *)col_id
+{
+    NSTableColumn *col = [self.table tableColumnWithIdentifier:col_id];
+    return col && !col.hidden;
+}
+
+/*
+ * columns_to_fit — the columns a listing or search about to be prepared
+ * should measure for auto-fit (column_text_widths), off the main thread.
+ *
+ * Output: identifiers of the shown columns if the rows will be auto-fitted
+ * when shown (auto_fit_pending with Auto-Fit on), else nil.
+ */
+- (NSArray<NSString *> *)
+columns_to_fit
+{
+    if (!self.auto_fit || !self.auto_fit_pending) return nil;
+    NSMutableArray<NSString *> *ids = [NSMutableArray array];
+    for (NSTableColumn *col in self.table.tableColumns) {
+        if (!col.hidden) [ids addObject:col.identifier];
+    }
+    return ids;
 }
 
 /*
@@ -866,8 +1083,9 @@ dealloc
  * files_pref_hidden_columns. Cheap when
  * nothing changed, so it runs on every defaults change; otherwise the
  * table is redrawn for a new row height, the rows are re-filtered for
- * Show Hidden Files, and the columns are fitted when auto-fit is on and it
- * was just turned on, the icon size changed or a column appeared or went.
+ * Show Hidden Files, the columns are fitted when auto-fit is on and it
+ * was just turned on, the icon size changed or a column appeared or went,
+ * and the Finder comments are read when the Comment column appears.
  */
 - (void)
 apply_view_prefs
@@ -902,8 +1120,26 @@ apply_view_prefs
         [self refresh_size_column];
         if (self.auto_fit) [self apply_auto_fit];
     }
+    BOOL had_comments = [self shows_column:col_comment];
     BOOL cols_changed = [self update_column_visibility];
     if (fit && (rows_changed || fit_turned_on || cols_changed)) [self apply_auto_fit];
+    if (!had_comments && [self shows_column:col_comment]) [self reload_comments];
+}
+
+/*
+ * reload_comments — re-lists the folder, or re-prepares the search
+ * results, to read the Finder comments the Comment column was just shown
+ * for (they are only read while it is shown), auto-fitting when they land.
+ */
+- (void)
+reload_comments
+{
+    self.auto_fit_pending = YES;
+    if (self.search_active) {
+        if (self.search_query) [self search_results_updated:nil];
+    } else {
+        [self reload_directory];
+    }
 }
 
 /*
@@ -1317,6 +1553,9 @@ reload_directory
     NSSet<NSString *> *cache_tracked = same_dir ? self.git_cache_tracked : nil;
     NSDictionary<NSString *, NSNumber *> *sizes = [self.folder_sizes copy];
     CGFloat icon_sz       = [self icon_size];
+    BOOL want_comments    = [self shows_column:col_comment];
+    BOOL show_sizes       = self.show_folder_sizes;
+    NSArray<NSString *> *fit_cols = [self columns_to_fit];
     __weak FilesBrowserView *ws = self;
 
     NSUInteger loading = [self begin_loading];
@@ -1334,6 +1573,10 @@ reload_directory
         NSString *error = items ? nil
             : (err.localizedFailureReason ?: err.localizedDescription ?: @"It cannot be read.");
         NSDictionary<NSString *, NSImage *> *icons = item_icons(items ?: @[], icon_sz);
+        NSDictionary<NSString *, NSString *> *comments = want_comments ? item_comments(items ?: @[]) : nil;
+        cell_context_t ctx = { show_sizes, sizes, tracked, comments };
+        NSDictionary<NSString *, NSNumber *> *widths =
+            fit_cols ? column_text_widths(rows, fit_cols, &ctx) : nil;
 
         dispatch_async(dispatch_get_main_queue(), ^{
             FilesBrowserView *s = ws;
@@ -1342,8 +1585,10 @@ reload_directory
             if (s.search_active) return;
             [s watch:dir git_index:git_index];
             [s set_git_tracked:tracked];
-            s.row_icons     = icons;
-            s.listing_error = error;
+            s.row_icons      = icons;
+            s.row_comments   = comments;
+            s.pending_widths = widths;
+            s.listing_error  = error;
             [s show_listing:items ?: @[]
                        rows:[order isEqualToString:[s row_order]] ? rows : nil];
         });
@@ -1407,7 +1652,8 @@ selected_paths
  * selects the rows whose paths are in paths (AppKit keeps selected row
  * numbers across reloadData, which point at other items once rows are
  * reordered or rebuilt), updates the status and runs a pending auto-fit
- * (for a search, only once it has results). During an inline rename the
+ * (for a search, only once it has results), with the text widths in
+ * pending_widths if the listing measured them. During an inline rename the
  * table is left alone and a reload is run when the rename ends.
  *
  * Inputs:
@@ -1418,6 +1664,8 @@ selected_paths
 - (void)
 show_rows:(NSArray<NSURL *> *)rows selecting:(NSSet<NSString *> *)paths reveal:(BOOL)reveal
 {
+    NSDictionary<NSString *, NSNumber *> *widths = self.pending_widths;
+    self.pending_widths = nil;
     if (self.rename_url) {             /* reloading the table would end the edit */
         self.reload_deferred = YES;
         return;
@@ -1434,7 +1682,7 @@ show_rows:(NSArray<NSURL *> *)rows selecting:(NSSet<NSString *> *)paths reveal:(
     [self update_status_bar];
     if (self.auto_fit_pending && (rows.count > 0 || !self.search_active)) {
         self.auto_fit_pending = NO;
-        if (self.auto_fit) [self apply_auto_fit];
+        if (self.auto_fit) [self apply_auto_fit_measured:widths];
     }
     [self count_folder_sizes];
 }
@@ -1710,6 +1958,9 @@ search_results_updated:(NSNotification *)note
     BOOL show_hidden      = [self shows_hidden_items];
     NSDictionary<NSString *, NSNumber *> *sizes = [self.folder_sizes copy];
     CGFloat icon_sz       = [self icon_size];
+    BOOL want_comments    = [self shows_column:col_comment];
+    BOOL show_sizes       = self.show_folder_sizes;
+    NSArray<NSString *> *fit_cols = [self columns_to_fit];
     __weak FilesBrowserView *ws = self;
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -1721,16 +1972,22 @@ search_results_updated:(NSNotification *)note
         }
         NSArray<NSURL *> *rows = listing_rows(items, sort_key, ascending, nil, sizes, show_hidden);
         NSDictionary<NSString *, NSImage *> *icons = item_icons(items, icon_sz);
+        NSDictionary<NSString *, NSString *> *comments = want_comments ? item_comments(items) : nil;
+        cell_context_t ctx = { show_sizes, sizes, nil, comments };
+        NSDictionary<NSString *, NSNumber *> *widths =
+            fit_cols ? column_text_widths(rows, fit_cols, &ctx) : nil;
 
         dispatch_async(dispatch_get_main_queue(), ^{
             FilesBrowserView *s = ws;
             if (!s || generation != s.search_generation || !s.search_active) return;
             s.row_icons       = icons;
+            s.row_comments    = comments;
             s.all_items       = items;
             s.search_overflow = total > count ? total : 0;
             if (![order isEqualToString:[s row_order]]) {
                 [s resort_revealing:NO];
             } else {
+                s.pending_widths = widths;
                 [s show_rows:rows selecting:[s selected_paths] reveal:NO];
             }
         });
@@ -1760,76 +2017,20 @@ update_sort_indicators
 /* ── Cells and column auto-fit ───────────────────────────────────────── */
 
 /*
- * cell_text_for_column:url: — returns the display string for a cell, using
- * only prefetched resource values. Shared by the cell-view builder and the
- * column auto-fit measurement.
+ * cell_context — the view's state that cell text depends on (cell_text),
+ * for the main thread; a listing takes its own snapshot.
  *
- * Inputs:
- *   col_id — column identifier (col_name, col_size, …)
- *   url    — file URL for the row
- *
- * Output: NSString to display; never nil.
+ * Output: cell_context_t referring to the view's current state.
  */
-- (NSString *)
-cell_text_for_column:(NSString *)col_id
-                 url:(NSURL *)url
+- (cell_context_t)
+cell_context
 {
-    if ([col_id isEqualToString:col_name]) {
-        NSString *name = nil;
-        [url getResourceValue:&name forKey:NSURLNameKey error:nil];
-        return name ?: url.lastPathComponent;
-
-    } else if ([col_id isEqualToString:col_size]) {
-        NSNumber *is_dir = nil, *sz = nil;
-        [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
-        if (is_dir.boolValue) {
-            /* Show Folder Sizes: the total once counted, "…" until then. */
-            if (!self.show_folder_sizes) return @"—";
-            NSNumber *total = self.folder_sizes[url.path];
-            return total ? files_format_bytes(total.longLongValue) : @"…";
-        }
-        [url getResourceValue:&sz forKey:NSURLFileSizeKey error:nil];
-        return sz ? files_format_bytes(sz.longLongValue) : @"—";
-
-    } else if ([col_id isEqualToString:col_kind]) {
-        /* "Folder" for folders, "Application" for apps and so on. */
-        NSString *kind = nil;
-        [url getResourceValue:&kind forKey:NSURLLocalizedTypeDescriptionKey error:nil];
-        return kind ?: @"—";
-
-    } else if ([col_id isEqualToString:col_perms]) {
-        mode_t mode = file_mode(url);
-        return mode ? perms_string_for_mode(mode) : @"—";
-
-    } else if ([col_id isEqualToString:col_modified]) {
-        NSDate *date = nil;
-        [url getResourceValue:&date forKey:NSURLContentModificationDateKey error:nil];
-        return files_format_date(date, NSDateFormatterShortStyle);
-
-    } else if ([col_id isEqualToString:col_comment]) {
-        return files_get_finder_comment(url) ?: @"";
-
-    } else if ([col_id isEqualToString:col_git]) {
-        return [self.git_tracked containsObject:url.lastPathComponent] ? @"tracked" : @"";
-    }
-    return @"";
-}
-
-/*
- * cell_font_for_column — font a column's cells are drawn in (Permissions is
- * monospaced). Used by the cell builder and by auto-fit measurement.
- *
- * Inputs:
- *   col_id — column identifier
- *
- * Output: NSFont.
- */
-static NSFont *
-cell_font_for_column(NSString *col_id)
-{
-    return [col_id isEqualToString:col_perms]
-        ? [NSFont monospacedSystemFontOfSize:11.0 weight:NSFontWeightRegular]
-        : [NSFont systemFontOfSize:12.0];
+    return (cell_context_t){
+        .show_folder_sizes = self.show_folder_sizes,
+        .folder_sizes      = self.folder_sizes,
+        .git_tracked       = self.git_tracked,
+        .comments          = self.row_comments,
+    };
 }
 
 /*
@@ -1845,6 +2046,20 @@ cell_font_for_column(NSString *col_id)
 - (void)
 apply_auto_fit
 {
+    [self apply_auto_fit_measured:nil];
+}
+
+/*
+ * apply_auto_fit_measured: — apply_auto_fit, taking the text widths of the
+ * rows from measured (column_text_widths, as a listing measures them on
+ * its background queue); a shown column measured lacks is measured here.
+ *
+ * Inputs:
+ *   measured — text widths by column identifier, or nil
+ */
+- (void)
+apply_auto_fit_measured:(NSDictionary<NSString *, NSNumber *> *)measured
+{
     /* Extra fixed pixels: icon+gap for Name col; cell left+right padding
      * elsewhere. Each also loses the intercell spacing, which the table
      * takes out of a column's width before laying out its cell view. */
@@ -1853,34 +2068,25 @@ apply_auto_fit
     CGFloat cell_extra = 2 + 2 + spacing;                        /* l-pad + r-pad */
     static const CGFloat header_pad = 10;                        /* header padding + margin */
 
-    NSUInteger rows = MIN(self.filtered_items.count, (NSUInteger)AUTO_FIT_ROW_LIMIT);
+    NSMutableArray<NSString *> *unmeasured = [NSMutableArray array];
+    for (NSTableColumn *col in self.table.tableColumns) {
+        if (!col.hidden && !measured[col.identifier]) [unmeasured addObject:col.identifier];
+    }
+    if (unmeasured.count > 0) {
+        cell_context_t ctx = [self cell_context];
+        NSMutableDictionary *all = [NSMutableDictionary dictionaryWithDictionary:measured ?: @{}];
+        [all addEntriesFromDictionary:column_text_widths(self.filtered_items, unmeasured, &ctx)];
+        measured = all;
+    }
+
     CGFloat total = 0;
     for (NSTableColumn *col in self.table.tableColumns) {
         if (col.hidden) continue;
         NSString *col_id = col.identifier;
-
-        CGFloat max_w = [col.title sizeWithAttributes:
+        CGFloat header_w = [col.title sizeWithAttributes:
             @{ NSFontAttributeName: col.headerCell.font }].width + header_pad;
-
-        NSDictionary *attrs = @{ NSFontAttributeName: cell_font_for_column(col_id) };
         CGFloat extra = [col_id isEqualToString:col_name] ? name_extra : cell_extra;
-        /* Folder totals arrive after this runs, so with Show Folder Sizes
-         * the Size column has room for a wide one from the start. */
-        if (self.show_folder_sizes && [col_id isEqualToString:col_size]) {
-            max_w = MAX(max_w, ceil([@"888.8 MB" sizeWithAttributes:attrs].width) + extra);
-        }
-        /* The Git column only ever shows "tracked", which may be filled in
-         * after this runs, so it is sized for that word. */
-        BOOL git = [col_id isEqualToString:col_git];
-        for (NSUInteger i = 0; i < (git ? 1 : rows); i++) {
-            NSString *text = git ? @"tracked"
-                                 : [self cell_text_for_column:col_id url:self.filtered_items[i]];
-            /* Text fields need whole points: 42.3 pt of text does not fit
-             * in 42.3 pt, it is truncated. */
-            CGFloat w = ceil([text sizeWithAttributes:attrs].width) + extra;
-            if (w > max_w) max_w = w;
-        }
-
+        CGFloat max_w = MAX(header_w, measured[col_id].doubleValue + extra);
         col.width = MAX(col.minWidth, max_w);
         total    += col.width;
     }
@@ -2151,7 +2357,8 @@ viewForTableColumn:(NSTableColumn *)col
         }
     }
 
-    cell.textField.stringValue = [self cell_text_for_column:ident url:url];
+    cell_context_t ctx = [self cell_context];
+    cell.textField.stringValue = cell_text(ident, url, &ctx);
     if ([ident isEqualToString:col_name]) cell.imageView.image = self.row_icons[url.path] ?: files_icon_for_url(url, icon_sz, YES);
     return cell;
 }
