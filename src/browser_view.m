@@ -916,6 +916,7 @@ build_context_menu
 
     add(@"Open",          @selector(open_selected:));
     add(@"Open With…",    @selector(open_with:));
+    add(@"Open in Split Pane", @selector(open_in_split_pane:));
     add(@"Run Application", @selector(run_application:));
     add(@"Add to Bookmarks", @selector(add_to_bookmarks:));
     [menu addItem:NSMenuItem.separatorItem];
@@ -2588,6 +2589,20 @@ add_to_bookmarks:(id)sender
 }
 
 /*
+ * open_in_split_pane: — context menu ▸ Open in Split Pane: hands the
+ * selected folder to split_pane_handler, which shows it in the other pane.
+ *
+ * Inputs:
+ *   sender — context-menu item (unused)
+ */
+- (void)
+open_in_split_pane:(id)sender
+{
+    NSURL *folder = [self selected_folder];
+    if (folder && self.split_pane_handler) self.split_pane_handler(folder);
+}
+
+/*
  * new_terminal_here: — opens a new Terminal window at the selected folder, or
  * at the current directory when nothing is selected or the right-click landed
  * on empty space.
@@ -2614,7 +2629,7 @@ new_terminal_here:(id)sender
  * the selected items include an application, "Paste Into" only when a
  * single folder is selected and the clipboard holds files, "Open With…" only when
  * something is selected, "Create Archive…" only when the selected items
- * share a folder, "Add to Bookmarks" only for
+ * share a folder, "Add to Bookmarks" and "Open in Split Pane" only for
  * a single selected folder, and the path item
  * only for a single selected item, titled "Copy Path to File" for a file
  * (packages such as apps count as files) and "Copy Path" for a folder.
@@ -2652,6 +2667,11 @@ validateMenuItem:(NSMenuItem *)item
     }
     if (item.action == @selector(add_to_bookmarks:)) {
         BOOL folder = [self selected_folder] != nil;
+        item.hidden = !folder;
+        return folder;
+    }
+    if (item.action == @selector(open_in_split_pane:)) {
+        BOOL folder = [self selected_folder] != nil && self.split_pane_handler != nil;
         item.hidden = !folder;
         return folder;
     }

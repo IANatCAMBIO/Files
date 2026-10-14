@@ -20,7 +20,9 @@ static const NSUInteger log_trim_batch = 100;
 
 /*
  * log_attributes — how transfer log text is drawn: small monospaced type
- * in the system text color, which follows Light and Dark mode.
+ * in the system text color, which follows Light and Dark mode, with extra
+ * leading so the lines are easy to tell apart (a little more between log
+ * entries than between the wrapped lines of one entry).
  *
  * Output: attributes for the log's text storage.
  */
@@ -30,7 +32,11 @@ log_attributes(void)
     static NSDictionary<NSAttributedStringKey, id> *attrs;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
+        NSMutableParagraphStyle *para = [[NSMutableParagraphStyle alloc] init];
+        para.lineSpacing      = 2.0;
+        para.paragraphSpacing = 2.0;
         attrs = @{
+            NSParagraphStyleAttributeName:  para,
             NSFontAttributeName:            [NSFont monospacedSystemFontOfSize:10.0
                                                                        weight:NSFontWeightRegular],
             NSForegroundColorAttributeName: NSColor.textColor,
@@ -459,10 +465,13 @@ stop_graph_timer
 }
 
 /*
- * finish_with_error: — show the final state after the copy ends: logs the
- * error, sets the status line, switches the button to "Close", feeds the
- * graph its last interval and shows elapsed time. (The engine logged each
- * digest; a failed validation arrives as err.)
+ * finish_with_error: — show the final state after the copy ends: feeds the
+ * graph its last interval (taking the engine's last updates), logs the
+ * error, sets the title ("Copied"/"Moved", or "Copy Failed"/"Move Failed")
+ * and the status line, switches the button to "Close" and shows elapsed
+ * time. The status line is set after the last feed, which would otherwise
+ * put back "Copying …" for a file reported since the previous tick. (The
+ * engine logged each digest; a failed validation arrives as err.)
  *
  * Inputs:
  *   err — engine error, or nil on success
@@ -470,10 +479,16 @@ stop_graph_timer
 - (void)
 finish_with_error:(NSError *)err
 {
+    [self stop_graph_timer];
+    [self feed_graph];
+
     BOOL all_ok = (err == nil);
     if (err) {
         [self append_log:[NSString stringWithFormat:@"✗ %@", err.localizedDescription]];
     }
+    self.window.title = all_ok
+        ? _ed
+        : [NSString stringWithFormat:@"%@ Failed", _noun.capitalizedString];
     self.status_label.stringValue = all_ok
         ? [NSString stringWithFormat:@"%@ \"%@\" to %@", _ed,
            _cur_name.length ? _cur_name : @"files", _dest_name]
@@ -495,9 +510,6 @@ finish_with_error:(NSError *)err
     [self append_log:all_ok
         ? [NSString stringWithFormat:@"✓ Done — %@%.1f sec total", rate, elapsed]
         : [NSString stringWithFormat:@"✗ %@ failed", _noun.capitalizedString]];
-
-    [self stop_graph_timer];
-    [self feed_graph];
 
     if (elapsed < 1.0) {
         self.elapsed_label.stringValue =

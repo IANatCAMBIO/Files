@@ -52,6 +52,12 @@
 @property (nonatomic, copy) void (^bookmark_handler)(NSURL *url);
 
 /*
+ * split_pane_handler — called with a folder the user chose to open in the
+ * other pane (context menu ▸ Open in Split Pane). If nil, the item is hidden.
+ */
+@property (nonatomic, copy) void (^split_pane_handler)(NSURL *url);
+
+/*
  * status_text — the text last passed to status_text_handler (item count,
  * selection, listing error or progress message); nil before the first.
  */

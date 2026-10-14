@@ -22,6 +22,7 @@ extern NSString * const files_pref_show_bookmarks;  /* bookmarks bar above the l
 extern NSString * const files_pref_folder_sizes;         /* Size column totals folders' contents */
 extern NSString * const files_pref_show_used_space;      /* status bar shows used, not free, space */
 extern NSString * const files_pref_human_readable_sizes; /* format sizes as KB/MB/… (default on) */
+extern NSString * const files_pref_full_path_title;      /* window title shows the full path, not the folder name (default on) */
 
 /* NSUserDefaults key (array of column identifiers): file-list columns the
  * user has hidden from the column-header menu. Absent = all shown. */

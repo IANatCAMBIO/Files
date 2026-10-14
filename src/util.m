@@ -22,6 +22,7 @@ NSString * const files_pref_show_bookmarks  = @"files.show_bookmarks";
 NSString * const files_pref_folder_sizes         = @"files.folder_sizes";
 NSString * const files_pref_show_used_space      = @"files.show_used_space";
 NSString * const files_pref_human_readable_sizes = @"files.human_readable_sizes";
+NSString * const files_pref_full_path_title      = @"files.full_path_title";
 
 /*
  * files_register_defaults — registers non-NO preference defaults.
@@ -35,6 +36,7 @@ files_register_defaults(void)
         files_pref_default_viewer:         @YES,
         files_pref_show_bookmarks:         @YES,
         files_pref_human_readable_sizes:   @YES,
+        files_pref_full_path_title:        @YES,
     }];
 }
 

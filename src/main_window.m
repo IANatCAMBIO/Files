@@ -8,8 +8,7 @@
 #import "volume_manager.h"
 
 /* Toolbar item identifiers */
-static NSString * const tb_back          = @"files.back";
-static NSString * const tb_forward       = @"files.forward";
+static NSString * const tb_back_forward  = @"files.back-forward";
 static NSString * const tb_up            = @"files.up";
 static NSString * const tb_reload        = @"files.reload";
 static NSString * const tb_hidden_files  = @"files.hidden-files";
@@ -153,6 +152,7 @@ init_with_url:(NSURL *)url
         [ws update_search_placeholder];
         [ws apply_bookmarks_bar_pref];
         [ws refresh_disk_space];
+        [ws update_title];
     }];
     [self apply_bookmarks_bar_pref];
 
@@ -440,6 +440,9 @@ new_browser_with_frame:(NSRect)frame
     b.bookmark_handler = ^(NSURL *url) {
         [ws.bookmarks_bar add_bookmark:url];
     };
+    b.split_pane_handler = ^(NSURL *url) {
+        [ws open_in_split_pane:url from:wb];
+    };
     b.info_handler = ^(NSArray<NSURL *> *urls) {
         [FilesInfoPanel.shared show_for_url:urls.firstObject];
     };
@@ -680,6 +683,20 @@ show_transient_status:(NSString *)msg
 }
 
 /*
+ * update_title — titles the window after the active pane's folder: its
+ * name, or its full path when files_pref_full_path_title is on ("Files"
+ * before any folder is shown). Runs after a navigation and on every
+ * defaults change.
+ */
+- (void)
+update_title
+{
+    NSURL *url  = [self active_browser].current_url;
+    BOOL   full = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_full_path_title];
+    self.window.title = (full ? url.path : url.lastPathComponent) ?: @"Files";
+}
+
+/*
  * update_toolbar_for_url: — refreshes the address bar, window title and
  * toolbar item enablement after a navigation.
  *
@@ -690,13 +707,13 @@ show_transient_status:(NSString *)msg
 update_toolbar_for_url:(NSURL *)url
 {
     self.address_bar.stringValue = url.path ?: @"";
-    self.window.title            = url.lastPathComponent ?: @"Files";
+    [self update_title];
     [self.window.toolbar validateVisibleItems];
 }
 
 /*
- * fit_address_bar — makes the address bar fill the toolbar between the +
- * button and the search field. The toolbar sizes a view item to its
+ * fit_address_bar — makes the address bar fill the toolbar between the
+ * Reload button and the search field. The toolbar sizes a view item to its
  * fitting width and puts any room left over after its last item, so this
  * sets the address bar to the toolbar's width less its margins and the
  * other items (never below address_min_w). The toolbar's row of items, its
@@ -768,11 +785,9 @@ pane_item:(FilesBrowserView *)browser
 
 /*
  * toggle_dual_pane: — switches between single-pane and dual-pane mode. The
- * second pane slides in from the right edge, or back out to it, with the
- * split view collapse animation the info sidebar uses: it is added
- * collapsed at half the width, then expanded; on close it is collapsed,
- * then removed. It opens on the same folder as the first. Ignored while a
- * slide is under way.
+ * second pane opens on the same folder as the first (open_secondary_pane_at:);
+ * on close it slides back out to the right edge with the split view
+ * collapse animation, then is removed. Ignored while a slide is under way.
  *
  * Inputs:
  *   sender — menu item or toolbar item (unused)
@@ -781,10 +796,10 @@ pane_item:(FilesBrowserView *)browser
 toggle_dual_pane:(id)sender
 {
     if (self.panes_animating) return;
-    self.panes_animating = YES;
-    __weak FilesMainWindow *ws = self;
 
     if (self.secondary_browser) {
+        self.panes_animating = YES;
+        __weak FilesMainWindow *ws = self;
         /* Single-pane from now on; the closing pane only slides out. */
         NSSplitViewItem *item = self.secondary_item;
         [self.secondary_browser shut_down];
@@ -798,27 +813,69 @@ toggle_dual_pane:(id)sender
             [ws.pane_split_vc removeSplitViewItem:item];
             ws.panes_animating = NO;
         }];
+        [self.window.toolbar validateVisibleItems];
     } else {
-        NSSize size = self.pane_split_vc.view.bounds.size;
-        self.secondary_browser = [self new_browser_with_frame:
-            NSMakeRect(0, 0, floor(size.width / 2), size.height)];
-        NSSplitViewItem *item = [self pane_item:self.secondary_browser];
-        item.canCollapse = YES;
-        item.collapsed   = YES;
-        [self.pane_split_vc addSplitViewItem:item];
-        self.secondary_item = item;
-        [self set_active_pane:0];
-        [self.secondary_browser navigate_to:self.primary_browser.current_url];
-        /* Expand on the next pass, once the item is laid out collapsed. */
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
-                item.animator.collapsed = NO;
-            } completionHandler:^{
-                ws.panes_animating = NO;
-            }];
-        });
+        [self open_secondary_pane_at:self.primary_browser.current_url];
     }
+}
+
+/*
+ * open_secondary_pane_at: — switches to dual-pane mode with the second pane
+ * showing url. The pane slides in from the right edge with the split view
+ * collapse animation the info sidebar uses: it is added collapsed at half
+ * the width, then expanded. The primary pane stays active. Call only in
+ * single-pane mode and when no slide is under way.
+ *
+ * Inputs:
+ *   url — folder the second pane shows
+ */
+- (void)
+open_secondary_pane_at:(NSURL *)url
+{
+    self.panes_animating = YES;
+    __weak FilesMainWindow *ws = self;
+
+    NSSize size = self.pane_split_vc.view.bounds.size;
+    self.secondary_browser = [self new_browser_with_frame:
+        NSMakeRect(0, 0, floor(size.width / 2), size.height)];
+    NSSplitViewItem *item = [self pane_item:self.secondary_browser];
+    item.canCollapse = YES;
+    item.collapsed   = YES;
+    [self.pane_split_vc addSplitViewItem:item];
+    self.secondary_item = item;
+    [self set_active_pane:0];
+    [self.secondary_browser navigate_to:url];
+    /* Expand on the next pass, once the item is laid out collapsed. */
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
+            item.animator.collapsed = NO;
+        } completionHandler:^{
+            ws.panes_animating = NO;
+        }];
+    });
     [self.window.toolbar validateVisibleItems];
+}
+
+/*
+ * open_in_split_pane:from: — shows url in the pane other than source,
+ * opening the second pane first in single-pane mode. Ignored while a pane
+ * slide is under way.
+ *
+ * Inputs:
+ *   url    — folder to show
+ *   source — the pane whose context menu asked for it
+ */
+- (void)
+open_in_split_pane:(NSURL *)url from:(FilesBrowserView *)source
+{
+    if (self.panes_animating) return;
+    if (!self.secondary_browser) {
+        [self open_secondary_pane_at:url];
+    } else if (source == self.secondary_browser) {
+        [self.primary_browser navigate_to:url];
+    } else {
+        [self.secondary_browser navigate_to:url];
+    }
 }
 
 /*
@@ -881,9 +938,9 @@ observeValueForKeyPath:(NSString *)keyPath
 static NSArray<NSToolbarItemIdentifier> *
 toolbar_identifiers(void)
 {
-    return @[tb_back, tb_forward, tb_up, tb_reload, tb_new_item,
+    return @[tb_back_forward, tb_up, tb_reload,
              tb_path,
-             tb_search, tb_hidden_files, tb_open_terminal,
+             tb_search, tb_new_item, tb_hidden_files, tb_open_terminal,
              tb_dual_pane, tb_sidebar];
 }
 
@@ -958,10 +1015,31 @@ toolbar:(NSToolbar *)toolbar
 itemForItemIdentifier:(NSString *)identifier
 willBeInsertedIntoToolbar:(BOOL)flag
 {
-    if ([identifier isEqualToString:tb_back])
-        return button_item(identifier, @"Back", @"chevron.left", @selector(go_back_action:), self);
-    if ([identifier isEqualToString:tb_forward])
-        return button_item(identifier, @"Forward", @"chevron.right", @selector(go_forward_action:), self);
+    if ([identifier isEqualToString:tb_back_forward]) {
+        /* One segmented control, Back joined to Forward. Each subitem keeps
+         * its own action, so validateToolbarItem: enables each segment and
+         * the overflow menu runs the right one. */
+        NSArray<NSString *> *labels = @[@"Back", @"Forward"];
+        NSArray<NSImage *> *images = @[
+            [NSImage imageWithSystemSymbolName:@"chevron.left" accessibilityDescription:labels[0]],
+            [NSImage imageWithSystemSymbolName:@"chevron.right" accessibilityDescription:labels[1]],
+        ];
+        NSToolbarItemGroup *group =
+            [NSToolbarItemGroup groupWithItemIdentifier:identifier
+                                                 images:images
+                                          selectionMode:NSToolbarItemGroupSelectionModeMomentary
+                                                 labels:labels
+                                                 target:self
+                                                 action:@selector(back_forward_action:)];
+        group.label = @"Back/Forward";
+        const SEL actions[] = { @selector(go_back_action:), @selector(go_forward_action:) };
+        for (NSUInteger i = 0; i < group.subitems.count; i++) {
+            group.subitems[i].toolTip = labels[i];
+            group.subitems[i].action  = actions[i];
+            group.subitems[i].target  = self;
+        }
+        return group;
+    }
     if ([identifier isEqualToString:tb_up])
         return button_item(identifier, @"Up", @"arrow.up", @selector(go_up_action:), self);
     if ([identifier isEqualToString:tb_reload])
@@ -1112,6 +1190,20 @@ go_back_action:(id)sender
 go_forward_action:(id)sender
 {
     [[self active_browser] go_forward];
+}
+
+/*
+ * back_forward_action: — the Back/Forward segmented item: runs the clicked
+ * segment's action.
+ *
+ * Inputs:
+ *   sender — the toolbar item group
+ */
+- (IBAction)
+back_forward_action:(NSToolbarItemGroup *)sender
+{
+    if (sender.selectedIndex == 0) [self go_back_action:sender];
+    else                           [self go_forward_action:sender];
 }
 
 /*

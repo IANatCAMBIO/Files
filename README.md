@@ -11,13 +11,16 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   right-click the headers to show or hide columns (every list follows)
 - Auto-fit columns (View ▸ Auto-Fit Columns, on by default) and optional
   double-height rows with larger icons (View ▸ Large Rows)
-- Single- or dual-pane browsing (View ▸ Dual Pane, ⇧⌘2; Tab switches panes)
+- Single- or dual-pane browsing (View ▸ Dual Pane, ⇧⌘2; Tab switches panes; right-click a folder ▸ Open in Split Pane)
 - The status bar shows the item count and, on the right, the free and
   total space of the disk being browsed ("10.3 GB (of 245 GB) free"; free
   space counts purgeable space, as Finder does). View ▸ Show Used Disk
   Space (off by default; also in Preferences) shows the space used instead
   ("234.8 GB (of 245 GB) used"). A spinner at its left shows while a slow
   folder (e.g. a File Provider mount) is still loading
+- View ▸ Show Full Path in Title (on by default; also in Preferences)
+  titles the window with the active pane's full path instead of just the
+  folder name
 - Bookmarks bar (Home, Desktop, Downloads, Documents, Applications, Trash);
   ⌘D or the ★ button adds the current folder, and right-click ▸ Add to
   Bookmarks on a folder in the list adds that folder (before Trash, which
