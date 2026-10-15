@@ -332,3 +332,39 @@ files_git_describe(NSURL *repo, NSString **branch, NSString **pushed, NSString *
     *remote_url = describe_remote_url(repo, fields.count > 2 ? fields[2] : nil);
     return YES;
 }
+
+/*
+ * files_git_show — runs files_git_describe off the main thread and fills
+ * the fields. Inputs/output are documented in git_info.h.
+ */
+void
+files_git_show(NSURL *repo, NSTextField *branch, NSTextField *pushed,
+               NSTextField *remote_url, BOOL (^is_current)(void))
+{
+    for (NSTextField *f in @[branch, pushed, remote_url]) {
+        f.stringValue = @"Checking…";
+        f.toolTip     = nil;
+    }
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *b = nil, *p = nil, *r = nil;
+        BOOL ok = files_git_describe(repo, &b, &p, &r);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!is_current()) return;
+            if (!ok) {
+                branch.stringValue     = @"Unavailable (git could not read it)";
+                branch.toolTip         = branch.stringValue;
+                pushed.stringValue     = @"—";
+                remote_url.stringValue = @"—";
+                return;
+            }
+            branch.stringValue     = b;
+            branch.toolTip         = b;
+            pushed.stringValue     = p;
+            pushed.toolTip         = [p stringByAppendingString:
+                @"\nCompared with the upstream branch as of the last fetch."];
+            remote_url.stringValue = r;
+            remote_url.toolTip     = r;
+        });
+    });
+}

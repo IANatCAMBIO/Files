@@ -844,9 +844,9 @@ update_hashes
 }
 
 /*
- * start_git_job: — reads the branch, push state and remote URL of repo on
- * a background queue and fills the Git rows when done, unless the panel
- * has moved on to another item (git_generation changed) in the meantime.
+ * start_git_job: — fills the Git rows for repo (files_git_show), unless the
+ * panel has moved on to another item (git_generation changed) by the time
+ * git answers.
  *
  * Inputs:
  *   repo — git working-tree root
@@ -855,33 +855,10 @@ update_hashes
 start_git_job:(NSURL *)repo
 {
     NSUInteger gen = self.git_generation;
-    for (NSTextField *f in @[self.branch_value, self.pushed_value, self.remote_value]) {
-        f.stringValue = @"Checking…";
-        f.toolTip     = nil;
-    }
-
     __weak FilesInfoPanel *ws = self;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSString *branch = nil, *pushed = nil, *remote = nil;
-        BOOL ok = files_git_describe(repo, &branch, &pushed, &remote);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            FilesInfoPanel *s = ws;
-            if (!s || s.git_generation != gen) return;
-            if (!ok) {
-                s.branch_value.stringValue = @"Unavailable (git could not read it)";
-                s.pushed_value.stringValue = @"—";
-                s.remote_value.stringValue = @"—";
-                return;
-            }
-            /* Tooltips carry the full text, which may be truncated. */
-            s.branch_value.stringValue = branch;
-            s.branch_value.toolTip     = branch;
-            s.pushed_value.stringValue = pushed;
-            s.pushed_value.toolTip     = [pushed stringByAppendingString:
-                @"\nCompared with the upstream branch as of the last fetch."];
-            s.remote_value.stringValue = remote;
-            s.remote_value.toolTip     = remote;
-        });
+    files_git_show(repo, self.branch_value, self.pushed_value, self.remote_value, ^BOOL {
+        FilesInfoPanel *s = ws;
+        return s && s.git_generation == gen;
     });
 }
 

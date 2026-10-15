@@ -1,5 +1,6 @@
 #import "info_sidebar.h"
 #import "util.h"
+#import "git_info.h"
 #import <QuickLookThumbnailing/QuickLookThumbnailing.h>
 #include <sys/stat.h>
 #include <pwd.h>
@@ -24,9 +25,13 @@ static const CGFloat name_y       = sep1_y + 1.0 + 6.0;           /* 171 */
 static const CGFloat sep2_y       = name_y + name_h + 4.0;        /* 209 */
 static const CGFloat first_row_y  = sep2_y + 1.0 + 6.0;           /* 216 */
 
-/* Metadata rows, in display order; indexes row_keys and _row_vals. */
+/* Metadata rows, in display order; indexes row_keys and _row_vals. The git
+ * rows come last, so hiding them leaves the others where they are; they are
+ * shown only for the top folder of a git working tree. */
 enum { row_kind, row_opens_with, row_size, row_created, row_modified,
-       row_owner, row_group, row_permissions, row_count };
+       row_owner, row_group, row_permissions,
+       row_branch, row_pushed, row_remote, row_count };
+static const NSUInteger row_first_git = row_branch;
 static NSString * const row_keys[row_count] = {
     [row_kind]        = @"Kind",
     [row_opens_with]  = @"Opens with",
@@ -36,6 +41,9 @@ static NSString * const row_keys[row_count] = {
     [row_owner]       = @"Owner",
     [row_group]       = @"Group",
     [row_permissions] = @"Permissions",
+    [row_branch]      = @"Branch",
+    [row_pushed]      = @"Pushed",
+    [row_remote]      = @"Remote",
 };
 
 /*
@@ -87,6 +95,9 @@ multi_selection_icon(void)
     NSImageView  *_preview_view;
     NSTextField  *_name_label;
     NSTextField  *_row_vals[row_count]; /* parallel to row_keys */
+    NSTextField  *_row_key_labels[row_count];
+
+    NSUInteger    _git_generation;      /* stale guard for git reads */
 
     QLThumbnailGenerationRequest *_pending_request;
 }
@@ -190,6 +201,7 @@ build_views
         key_lbl.textColor         = NSColor.secondaryLabelColor;
         key_lbl.autoresizingMask  = NSViewMaxXMargin;
         [self addSubview:key_lbl];
+        _row_key_labels[i] = key_lbl;
 
         _row_vals[i] = [NSTextField labelWithString:@"—"];
         _row_vals[i].frame            = NSMakeRect(val_x, y, val_w, row_h);
@@ -198,6 +210,8 @@ build_views
         _row_vals[i].autoresizingMask = NSViewWidthSizable;
         [self addSubview:_row_vals[i]];
     }
+    _row_vals[row_remote].selectable = YES;  /* so the URL can be copied */
+    [self set_git_rows_visible:NO];
 }
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
@@ -216,6 +230,23 @@ show_preview:(NSImage *)image scale_up:(BOOL)scale_up
     _preview_view.imageScaling = scale_up ? NSImageScaleProportionallyUpOrDown
                                           : NSImageScaleProportionallyDown;
     _preview_view.image = image;
+}
+
+/*
+ * set_git_rows_visible: — shows or hides the Branch, Pushed and Remote
+ * rows. Hiding also drops any git read still in flight (_git_generation).
+ *
+ * Inputs:
+ *   visible — YES to show the git rows
+ */
+- (void)
+set_git_rows_visible:(BOOL)visible
+{
+    _git_generation++;
+    for (NSUInteger i = row_first_git; i < row_count; i++) {
+        _row_key_labels[i].hidden = !visible;
+        _row_vals[i].hidden       = !visible;
+    }
 }
 
 /*
@@ -299,7 +330,8 @@ request_thumbnail:(NSURL *)url
  * Files and packages show their QL thumbnail, or their icon when there is
  * none (request_thumbnail:). A plain folder shows its icon at once: its
  * thumbnail would be that icon anyway (minus the git badge of a working
- * tree).
+ * tree). The top folder of a git working tree also shows its branch, push
+ * state and remote, read by git in the background.
  *
  * Inputs:
  *   url — file-system URL of the item to inspect
@@ -357,6 +389,18 @@ show_url:(NSURL *)url
     } else {
         [self request_thumbnail:url];
     }
+
+    BOOL is_git = plain_folder && files_is_git_repo(url);
+    [self set_git_rows_visible:is_git];
+    if (is_git) {
+        NSUInteger gen = _git_generation;
+        __weak FilesInfoSidebar *ws = self;
+        files_git_show(url, _row_vals[row_branch], _row_vals[row_pushed],
+                       _row_vals[row_remote], ^BOOL {
+            FilesInfoSidebar *s = ws;
+            return s && s->_git_generation == gen;
+        });
+    }
 }
 
 /*
@@ -372,6 +416,7 @@ show_url:(NSURL *)url
 show_urls:(NSArray<NSURL *> *)urls
 {
     [self cancel_pending];
+    [self set_git_rows_visible:NO];
 
     [self show_preview:multi_selection_icon() scale_up:YES];
     _name_label.stringValue  = [NSString stringWithFormat:@"%lu items selected",
@@ -425,6 +470,7 @@ clear
         _row_vals[i].stringValue = @"—";
         _row_vals[i].toolTip     = nil;
     }
+    [self set_git_rows_visible:NO];
 }
 
 @end

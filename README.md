@@ -48,7 +48,8 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   panel adds a Git section: the current branch, whether it is pushed
   (compared with its upstream as of the last fetch — commits
   ahead/behind, no upstream, detached HEAD), and the remote URL (the
-  upstream's remote, else origin)
+  upstream's remote, else origin), and the info sidebar shows the same three as
+  Branch, Pushed and Remote rows
 - Copy, cut and paste, and drag and drop (moves by default; hold ⌥ to
   copy), with a progress panel (speed graph, transfer log, cancel), Keep
   Both / Replace prompts, and optional SHA-256 verification (View ▸

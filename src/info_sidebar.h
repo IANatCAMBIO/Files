@@ -2,7 +2,8 @@
 
 /*
  * FilesInfoSidebar — 220pt-wide right panel showing a Quick Look thumbnail
- * and file metadata for the active selection.  The thumbnail is served from
+ * and file metadata for the active selection (plus branch, push state and
+ * remote for a git working tree).  The thumbnail is served from
  * the system Quick Look cache; no file parsing is done by this class.
  */
 @interface FilesInfoSidebar : NSView

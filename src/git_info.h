@@ -96,3 +96,21 @@ NSImage *files_git_badged_icon(NSImage *icon);
  */
 BOOL files_git_describe(NSURL *repo, NSString **branch, NSString **pushed,
                         NSString **remote_url);
+
+/*
+ * files_git_show — fills three value fields with files_git_describe's
+ * results for repo: shows "Checking…" at once, runs git on a background
+ * queue, then sets the text (and full-text tooltips, since values may be
+ * truncated) on the main queue. Shared by Get Info and the info sidebar.
+ * Call on the main thread.
+ *
+ * Inputs:
+ *   repo       — working-tree root (files_is_git_repo(repo) is YES)
+ *   branch     — field for the branch name
+ *   pushed     — field for the push state
+ *   remote_url — field for the remote URL
+ *   is_current — called on the main queue before filling; return NO when
+ *                the view has moved on to another item, to drop the result
+ */
+void files_git_show(NSURL *repo, NSTextField *branch, NSTextField *pushed,
+                    NSTextField *remote_url, BOOL (^is_current)(void));
