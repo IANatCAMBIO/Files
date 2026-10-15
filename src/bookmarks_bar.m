@@ -9,12 +9,13 @@ static NSString * const bookmarks_defaults_key = @"files.bookmarks";
 static NSString * const bookmarks_icloud_key   = @"files.bookmarks.icloud_added";
 static const CGFloat btn_gap     = 4.0;
 static const CGFloat btn_pad_left = 4.0;
-static const CGFloat star_btn_w   = 26.0;
-static const CGFloat star_btn_gap = 3.0;
+/* How far the mouse moves with the button down before a press on a bookmark
+ * becomes a drag that reorders it, and how long the others take to slide
+ * out of its way. */
+static const CGFloat reorder_threshold = 4.0;
+static const double  reorder_slide_sec = 0.15;
 
-/* Posted (main queue) by a bar after it saves the bookmark list, so every
- * other window's bar shows the same list; object is the bar that saved. */
-static NSString * const bookmarks_changed_note = @"FilesBookmarksChanged";
+NSString * const files_bookmarks_changed_note = @"FilesBookmarksChanged";
 
 /* Posted (main queue) when the Trash goes from empty to full or back. */
 static NSString * const trash_changed_note = @"FilesTrashChanged";
@@ -152,11 +153,50 @@ scrollWheel:(NSEvent *)event
 
 @end
 
+@interface FilesBookmarksBar ()
+- (BOOL)track_reorder_of:(NSButton *)btn from_event:(NSEvent *)event;
+@end
+
+/*
+ * FilesBookmarkButton — a bookmark's button. A plain left press on a
+ * movable one (every bookmark but Trash) is tracked by the bar, which
+ * reorders the bookmark when the mouse drags it sideways and otherwise
+ * treats the press as a click.
+ */
+@interface FilesBookmarkButton : NSButton
+@property (nonatomic, weak)   FilesBookmarksBar *bar;
+@property (nonatomic, assign) BOOL               movable;
+@end
+
+@implementation FilesBookmarkButton
+
+/*
+ * mouseDown: — hands a plain left press on a movable bookmark to the bar
+ * (track_reorder_of:from_event:); a ^-click (context menu) or a press on
+ * Trash gets NSButton's usual handling. A press the bar decides was a click
+ * sends the button's action.
+ *
+ * Inputs:
+ *   event — the mouse-down event
+ */
+- (void)
+mouseDown:(NSEvent *)event
+{
+    if (!self.movable || (event.modifierFlags & NSEventModifierFlagControl)) {
+        [super mouseDown:event];
+        return;
+    }
+    if (![self.bar track_reorder_of:self from_event:event]) {
+        [NSApp sendAction:self.action to:self.target from:self];
+    }
+}
+
+@end
+
 @implementation FilesBookmarksBar {
     NSMutableArray<NSURL *> *_bookmarks;
     FilesBookmarksScrollView *_scroll_view;
     NSView                  *_btn_container;
-    NSButton                *_star_button;
     NSButton                *_trash_btn;   /* the Trash bookmark's button (in _btn_container); nil if none */
 }
 
@@ -175,14 +215,13 @@ init_with_frame:(NSRect)frame
     if (!self) return nil;
 
     [self load_bookmarks];
-    [self setup_star_button];
     [self setup_scroll_view];
     [self rebuild_buttons];
 
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(update_trash_icon)
                                                name:trash_changed_note object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(bookmarks_changed:)
-                                               name:bookmarks_changed_note object:nil];
+                                               name:files_bookmarks_changed_note object:nil];
     watch_trash();
     return self;
 }
@@ -201,7 +240,7 @@ dealloc
  * reload it, so no bar later saves an outdated copy over it.
  *
  * Inputs:
- *   note — bookmarks_changed_note; object is the bar that saved
+ *   note — files_bookmarks_changed_note; object is the bar that saved
  */
 - (void)
 bookmarks_changed:(NSNotification *)note
@@ -212,63 +251,132 @@ bookmarks_changed:(NSNotification *)note
 }
 
 /*
- * load_bookmarks — fills _bookmarks from NSUserDefaults, or initialises
- * defaults (Home, Desktop, Downloads, Documents, Applications, iCloud
- * Drive when set up, Trash). A saved list from before iCloud Drive was a
- * default gets it once, before Trash. Trash is always the last bookmark.
- * The saved list is rewritten only when one of these repairs changes it,
- * so a normal launch does no extra work and writes nothing.
+ * bookmark_list — the bookmark list from NSUserDefaults, or the defaults
+ * (Home, Desktop, Downloads, Documents, Applications, iCloud Drive when
+ * set up, Trash) when none is saved. A saved list from before iCloud Drive
+ * was a default gets it once, before Trash. Trash is always the last
+ * bookmark.
+ *
+ * Inputs:
+ *   repaired — set to YES when a saved list was changed by one of these
+ *              repairs and should be saved again; may be NULL
+ *
+ * Output: the bookmarks, in bar order.
  */
-- (void)
-load_bookmarks
+static NSMutableArray<NSURL *> *
+bookmark_list(BOOL *repaired)
 {
     NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
     NSURL *trash  = files_directory_url(NSTrashDirectory);
     NSURL *icloud = files_icloud_drive_url();
+    if (repaired) *repaired = NO;
 
     NSArray<NSString *> *saved = [ud arrayForKey:bookmarks_defaults_key];
     if (saved.count == 0) {
-        _bookmarks = [@[
+        NSMutableArray<NSURL *> *list = [@[
             files_home_url(),
             files_directory_url(NSDesktopDirectory),
             files_directory_url(NSDownloadsDirectory),
             files_directory_url(NSDocumentDirectory),
             files_directory_url(NSApplicationDirectory),
         ] mutableCopy];
-        if (icloud) [_bookmarks addObject:icloud];
-        [_bookmarks addObject:trash];
+        if (icloud) [list addObject:icloud];
+        [list addObject:trash];
         [ud setBool:YES forKey:bookmarks_icloud_key];
-        return;
+        return list;
     }
 
-    _bookmarks = [NSMutableArray arrayWithCapacity:saved.count];
+    NSMutableArray<NSURL *> *list = [NSMutableArray arrayWithCapacity:saved.count];
     for (NSString *path in saved) {
-        [_bookmarks addObject:[NSURL fileURLWithPath:path]];
+        [list addObject:[NSURL fileURLWithPath:path]];
     }
 
     BOOL changed = NO;
-    if (!files_same_path(_bookmarks.lastObject, trash)) {
-        NSIndexSet *trash_rows = [_bookmarks indexesOfObjectsPassingTest:
+    if (!files_same_path(list.lastObject, trash)) {
+        NSIndexSet *trash_rows = [list indexesOfObjectsPassingTest:
             ^BOOL(NSURL *u, NSUInteger idx, BOOL *stop) { return files_same_path(u, trash); }];
-        [_bookmarks removeObjectsAtIndexes:trash_rows];
-        [_bookmarks addObject:trash];
+        [list removeObjectsAtIndexes:trash_rows];
+        [list addObject:trash];
         changed = YES;
     }
     if (icloud && ![ud boolForKey:bookmarks_icloud_key]) {
         [ud setBool:YES forKey:bookmarks_icloud_key];
-        NSUInteger have = [_bookmarks indexOfObjectPassingTest:
+        NSUInteger have = [list indexOfObjectPassingTest:
             ^BOOL(NSURL *u, NSUInteger idx, BOOL *stop) { return files_same_path(u, icloud); }];
         if (have == NSNotFound) {
-            [_bookmarks insertObject:icloud atIndex:_bookmarks.count - 1];
+            [list insertObject:icloud atIndex:list.count - 1];
             changed = YES;
         }
     }
-    if (changed) [self persist_bookmarks];
+    if (repaired) *repaired = changed;
+    return list;
+}
+
+/*
+ * files_bookmark_urls — documented in bookmarks_bar.h.
+ */
+NSArray<NSURL *> *
+files_bookmark_urls(void)
+{
+    return bookmark_list(NULL);
+}
+
+/*
+ * files_is_bookmark — documented in bookmarks_bar.h.
+ */
+BOOL
+files_is_bookmark(NSURL *url)
+{
+    for (NSURL *b in bookmark_list(NULL)) {
+        if (files_same_path(b, url)) return YES;
+    }
+    return NO;
+}
+
+/*
+ * files_bookmark_name — documented in bookmarks_bar.h.
+ */
+NSString *
+files_bookmark_name(NSURL *url)
+{
+    if (files_same_path(url, files_home_url())) return @"Home";
+    if (files_same_path(url, files_directory_url(NSTrashDirectory))) return @"Trash";
+    /* The name Finder shows: "iCloud Drive", not com~apple~CloudDocs. */
+    NSString *localized = nil;
+    [url getResourceValue:&localized forKey:NSURLLocalizedNameKey error:nil];
+    return localized ?: url.lastPathComponent;
+}
+
+/*
+ * files_bookmark_icon — documented in bookmarks_bar.h.
+ */
+NSImage *
+files_bookmark_icon(NSURL *url, CGFloat size)
+{
+    if (!files_same_path(url, files_directory_url(NSTrashDirectory))) {
+        return files_icon_for_url(url, size, YES);
+    }
+    NSImage *icon = [[NSImage imageNamed:trash_full ? NSImageNameTrashFull
+                                                    : NSImageNameTrashEmpty] copy];
+    icon.size = NSMakeSize(size, size);
+    return icon;
+}
+
+/*
+ * load_bookmarks — fills _bookmarks from bookmark_list, saving the list
+ * again only when a repair changed it, so a normal launch writes nothing.
+ */
+- (void)
+load_bookmarks
+{
+    BOOL repaired;
+    _bookmarks = bookmark_list(&repaired);
+    if (repaired) [self persist_bookmarks];
 }
 
 /*
  * persist_bookmarks — writes the current bookmark paths to NSUserDefaults
- * and tells the other windows' bars (bookmarks_changed_note).
+ * and tells the other windows' bars (files_bookmarks_changed_note).
  */
 - (void)
 persist_bookmarks
@@ -278,48 +386,17 @@ persist_bookmarks
         [paths addObject:url.path];
     }
     [NSUserDefaults.standardUserDefaults setObject:paths forKey:bookmarks_defaults_key];
-    [NSNotificationCenter.defaultCenter postNotificationName:bookmarks_changed_note object:self];
-}
-
-/*
- * setup_star_button — creates the fixed ⭐️ button at the left of the bar
- * that adds the current folder to the bookmarks via the responder chain.
- */
-- (void)
-setup_star_button
-{
-    CGFloat bar_h = self.bounds.size.height;
-    CGFloat btn_h = bar_h - 4.0;
-
-    _star_button = [[NSButton alloc] init];
-    _star_button.title      = @"⭐️";
-    _star_button.bezelStyle = NSBezelStyleRecessed;
-    [_star_button setButtonType:NSButtonTypeMomentaryPushIn];
-    _star_button.font       = [NSFont systemFontOfSize:11.0];
-    _star_button.target     = nil;   /* send up the responder chain */
-    _star_button.action     = @selector(add_bookmark_action:);
-    _star_button.toolTip    = @"Add Current Folder to Bookmarks";
-    _star_button.frame      = NSMakeRect(btn_pad_left,
-                                         (bar_h - btn_h) / 2.0,
-                                         star_btn_w, btn_h);
-    _star_button.autoresizingMask = NSViewMaxXMargin;
-    [self addSubview:_star_button];
+    [NSNotificationCenter.defaultCenter postNotificationName:files_bookmarks_changed_note object:self];
 }
 
 /*
  * setup_scroll_view — creates the scroll view that scrolls the bookmarks
  * horizontally (mouse wheel or trackpad) when there are too many to fit.
- * Offset to the right of the star button.
  */
 - (void)
 setup_scroll_view
 {
-    CGFloat offset = btn_pad_left + star_btn_w + star_btn_gap;
-    CGFloat bar_w  = self.bounds.size.width;
-    CGFloat bar_h  = self.bounds.size.height;
-
-    _scroll_view = [[FilesBookmarksScrollView alloc] initWithFrame:
-                       NSMakeRect(offset, 0, bar_w - offset, bar_h)];
+    _scroll_view = [[FilesBookmarksScrollView alloc] initWithFrame:self.bounds];
     _scroll_view.hasVerticalScroller   = NO;
     _scroll_view.hasHorizontalScroller = NO;
     _scroll_view.drawsBackground       = NO;
@@ -346,29 +423,11 @@ rebuild_buttons
         NSURL *url = _bookmarks[i];
 
         BOOL is_trash = files_same_path(url, files_directory_url(NSTrashDirectory));
-        NSString *name;
-        if (files_same_path(url, files_home_url())) {
-            name = @"Home";
-        } else if (is_trash) {
-            name = @"Trash";
-        } else {
-            /* The name Finder shows: "iCloud Drive", not com~apple~CloudDocs. */
-            NSString *localized = nil;
-            [url getResourceValue:&localized forKey:NSURLLocalizedNameKey error:nil];
-            name = localized ?: url.lastPathComponent;
-        }
-
-        NSImage *icon;
-        if (is_trash) {
-            icon = [[NSImage imageNamed:NSImageNameTrashEmpty] copy];
-            icon.size = NSMakeSize(14, 14);
-        } else {
-            icon = files_icon_for_url(url, 14, YES);
-        }
-
-        NSButton *btn = [[NSButton alloc] init];
-        btn.title         = name;
-        btn.image         = icon;
+        FilesBookmarkButton *btn = [[FilesBookmarkButton alloc] init];
+        btn.bar           = self;
+        btn.movable       = !is_trash;
+        btn.title         = files_bookmark_name(url);
+        btn.image         = files_bookmark_icon(url, 14);
         btn.imagePosition = NSImageLeft;
         btn.bezelStyle    = NSBezelStyleRecessed;
         [btn setButtonType:NSButtonTypeMomentaryPushIn];
@@ -401,28 +460,151 @@ rebuild_buttons
         [_btn_container addSubview:btn];
         x += r.size.width + btn_gap;
     }
-    [self update_trash_icon];
 
     /* Exactly as wide as the buttons, so the bar scrolls only when the
      * window is too narrow for them, however it is resized later. */
     _btn_container.frame = NSMakeRect(0, 0, x, bar_h);
     _scroll_view.documentView = _btn_container;
-    [self setNeedsDisplay:YES];
+}
+
+/*
+ * reorder_slots — the x position of each button when the bookmark buttons
+ * stand in the given order, laid out as rebuild_buttons does.
+ *
+ * Inputs:
+ *   order — the bookmark buttons, left to right
+ *
+ * Output: one x position per button, in the same order.
+ */
+static NSArray<NSNumber *> *
+reorder_slots(NSArray<NSButton *> *order)
+{
+    NSMutableArray<NSNumber *> *xs = [NSMutableArray arrayWithCapacity:order.count];
+    CGFloat x = btn_pad_left;
+    for (NSButton *b in order) {
+        [xs addObject:@(x)];
+        x += NSWidth(b.frame) + btn_gap;
+    }
+    return xs;
+}
+
+/*
+ * track_reorder_of:from_event: — follows a left press on bookmark button btn
+ * until the mouse is released. If the mouse moves reorder_threshold points
+ * the press becomes a drag: btn follows the mouse along the bar and the
+ * other bookmarks slide aside to show where it will land (never after
+ * Trash, which stays last). On release btn settles into that slot and the
+ * new order is saved and shown in every window.
+ *
+ * Inputs:
+ *   btn   — the pressed bookmark button (tag = its bookmark index)
+ *   event — the mouse-down event
+ *
+ * Output: YES if the press became a drag, NO if it was a click (the
+ *         caller sends the button's action).
+ */
+- (BOOL)
+track_reorder_of:(NSButton *)btn from_event:(NSEvent *)event
+{
+    NSPoint start = [_btn_container convertPoint:event.locationInWindow fromView:nil];
+    btn.highlighted = YES;
+
+    /* The other buttons in bookmark order; Trash, when present, is last. */
+    NSMutableArray<NSButton *> *others = [NSMutableArray array];
+    for (NSView *v in _btn_container.subviews) {
+        if (v != btn && [v isKindOfClass:NSButton.class]) [others addObject:(NSButton *)v];
+    }
+    [others sortUsingComparator:^NSComparisonResult(NSButton *a, NSButton *b) {
+        return a.tag < b.tag ? NSOrderedAscending : NSOrderedDescending;
+    }];
+    NSUInteger last_slot = others.count - (_trash_btn && _trash_btn != btn ? 1 : 0);
+    NSUInteger from      = (NSUInteger)btn.tag;
+    NSUInteger target    = from;
+    CGFloat    grab      = start.x - NSMinX(btn.frame);
+    BOOL       dragging  = NO;
+
+    for (;;) {
+        NSEvent *e = [self.window nextEventMatchingMask:NSEventMaskLeftMouseDragged |
+                                                        NSEventMaskLeftMouseUp];
+        if (e.type == NSEventTypeLeftMouseUp) break;
+        NSPoint p = [_btn_container convertPoint:e.locationInWindow fromView:nil];
+        if (!dragging) {
+            if (hypot(p.x - start.x, p.y - start.y) < reorder_threshold) continue;
+            dragging = YES;
+            btn.highlighted = NO;
+            btn.alphaValue  = 0.8;
+            [_btn_container addSubview:btn positioned:NSWindowAbove relativeTo:nil];
+        }
+        [_btn_container autoscroll:e];
+
+        NSRect f = btn.frame;
+        f.origin.x = MAX(0.0, MIN(p.x - grab, NSWidth(_btn_container.bounds) - NSWidth(f)));
+        btn.frame  = f;
+
+        /* The slot is the number of movable bookmarks whose shown centre
+         * is left of the dragged one's. */
+        NSMutableArray<NSButton *> *order = [others mutableCopy];
+        [order insertObject:btn atIndex:target];
+        NSArray<NSNumber *> *xs = reorder_slots(order);
+        NSUInteger slot = 0;
+        for (NSUInteger i = 0; i < order.count; i++) {
+            NSButton *b = order[i];
+            if (b == btn || b == _trash_btn) continue;
+            if (xs[i].doubleValue + NSWidth(b.frame) / 2.0 < NSMidX(f)) slot++;
+        }
+        slot = MIN(slot, last_slot);
+        if (slot == target) continue;
+        target = slot;
+
+        order = [others mutableCopy];
+        [order insertObject:btn atIndex:target];
+        xs = reorder_slots(order);
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
+            ctx.duration = reorder_slide_sec;
+            for (NSUInteger i = 0; i < order.count; i++) {
+                if (order[i] == btn) continue;
+                NSRect r = order[i].frame;
+                r.origin.x = xs[i].doubleValue;
+                order[i].animator.frame = r;
+            }
+        }];
+    }
+
+    btn.highlighted = NO;
+    if (!dragging) return NO;
+
+    NSMutableArray<NSButton *> *order = [others mutableCopy];
+    [order insertObject:btn atIndex:target];
+    NSRect home = btn.frame;
+    home.origin.x = reorder_slots(order)[target].doubleValue;
+    __weak FilesBookmarksBar *ws = self;
+    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
+        ctx.duration = reorder_slide_sec;
+        btn.animator.frame      = home;
+        btn.animator.alphaValue = 1.0;
+    } completionHandler:^{
+        FilesBookmarksBar *s = ws;
+        if (!s) return;
+        if (target != from) {
+            NSURL *url = s->_bookmarks[from];
+            [s->_bookmarks removeObjectAtIndex:from];
+            [s->_bookmarks insertObject:url atIndex:target];
+            [s persist_bookmarks];
+        }
+        [s rebuild_buttons];
+    }];
+    return YES;
 }
 
 /*
  * update_trash_icon — shows the Trash bookmark as full or empty, from the
  * shared Trash watcher's last check (trash_full). Called on every
- * trash_changed_note and when the buttons are rebuilt.
+ * trash_changed_note; rebuild_buttons sets it the same way.
  */
 - (void)
 update_trash_icon
 {
-    if (!_trash_btn) return;
-    NSImage *icon = [[NSImage imageNamed:trash_full ? NSImageNameTrashFull
-                                                    : NSImageNameTrashEmpty] copy];
-    icon.size = NSMakeSize(14, 14);
-    _trash_btn.image = icon;
+    _trash_btn.image = files_bookmark_icon(files_directory_url(NSTrashDirectory), 14);
 }
 
 /*
@@ -451,7 +633,23 @@ bookmark_clicked:(NSButton *)sender
 remove_bookmark_clicked:(NSMenuItem *)sender
 {
     NSUInteger idx = (NSUInteger)sender.tag;
-    if (idx >= _bookmarks.count) return;
+    if (idx < _bookmarks.count) [self remove_bookmark:_bookmarks[idx]];
+}
+
+/*
+ * remove_bookmark: — removes url from the bar, then persists and rebuilds.
+ * Ignored for Trash (always the last bookmark) or a URL not bookmarked.
+ *
+ * Inputs:
+ *   url — directory URL to remove
+ */
+- (void)
+remove_bookmark:(NSURL *)url
+{
+    if (files_same_path(url, files_directory_url(NSTrashDirectory))) return;
+    NSUInteger idx = [_bookmarks indexOfObjectPassingTest:
+        ^BOOL(NSURL *u, NSUInteger i, BOOL *stop) { return files_same_path(u, url); }];
+    if (idx == NSNotFound) return;
     [_bookmarks removeObjectAtIndex:idx];
     [self persist_bookmarks];
     [self rebuild_buttons];
@@ -476,7 +674,8 @@ add_bookmark:(NSURL *)url
 }
 
 /*
- * drawRect: — draws a 1pt separator at the bottom of the bar.
+ * drawRect: — draws a 1pt separator at the bottom of the bar: the divider
+ * between the bar and the file list.
  *
  * Inputs:
  *   dirty — region to redraw

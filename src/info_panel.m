@@ -369,7 +369,7 @@ init
         [self.icon_view.heightAnchor constraintEqualToConstant:icon_size],
     ]];
     /* Glass-pill name field: borderless field inside a rounded visual-effect
-     * view, matching the toolbar address bar's appearance. */
+     * view, matching the address bar's appearance. */
     self.name_field                 = [[NSTextField alloc] init];
     self.name_field.editable        = YES;
     self.name_field.selectable      = YES;

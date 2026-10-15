@@ -22,12 +22,15 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   titles the window with the active pane's full path instead of just the
   folder name
 - Bookmarks bar (Home, Desktop, Downloads, Documents, Applications, Trash);
-  ⌘D or the ★ button adds the current folder, and right-click ▸ Add to
-  Bookmarks on a folder in the list adds that folder (before Trash, which
-  is always last); right-click a bookmark to remove it. When the window
-  is too narrow for every bookmark, scroll over the bar (mouse wheel or
-  trackpad) to move along it. View ▸ Show Bookmarks Bar (on by default)
-  hides or shows it in every window
+  ⌘D adds the current folder, and right-click ▸ Add to Bookmarks on a
+  folder in the list adds that folder (before Trash, which is always
+  last). The star right of the address bar shows ★ when the current
+  folder is a bookmark and ☆ when it is not; click it to toggle. Drag a
+  bookmark along the bar to reorder it, and right-click it to remove it.
+  When the window is too narrow for every bookmark, scroll over the bar
+  (mouse wheel or trackpad) to move along it. View ▸ Show Bookmarks Bar or the same
+  checkbox in Preferences ▸ View (on by default) hides or shows it in
+  every window
 - Quick Look: Space previews the selection (Space or Esc closes it; the
   arrow keys move through the list and the preview follows)
 - Collapsible info sidebar with a Quick Look thumbnail and file details
@@ -102,7 +105,8 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   browser to Finder
 - Mounts menu: mounted volumes, then cloud storage (iCloud Drive and
   File Provider accounts such as Google Drive); Go menu: Home, Desktop,
-  Downloads, Documents and Trash
+  Downloads, Documents and Trash, then a Bookmarks section listing every
+  bookmark in bar order
 - An All Mounts panel with per-volume unmount; at the root
   of an unmountable volume (external disk, disk image, network share) a
   floating ⏏ button unmounts it (the status bar confirms), and any window

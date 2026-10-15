@@ -6,6 +6,7 @@
 #import "mounts_panel.h"
 #import "default_viewer.h"
 #import "prefs_window.h"
+#import "bookmarks_bar.h"
 #import "util.h"
 #import <ServiceManagement/ServiceManagement.h>
 
@@ -15,6 +16,8 @@
 @property (nonatomic, assign) BOOL launched;  /* applicationDidFinishLaunching: has run */
 @property (nonatomic, assign) BOOL synced;    /* sync_integrations has run */
 @property (nonatomic, assign) BOOL fda_asked; /* the launch Full Disk Access prompt was shown */
+@property (nonatomic, strong) NSMenu    *go_menu;           /* its Bookmarks section is rebuilt on open */
+@property (nonatomic, assign) NSInteger  go_fixed_count;    /* items above the Bookmarks section */
 @end
 
 @implementation FilesAppDelegate
@@ -603,51 +606,72 @@ validateMenuItem:(NSMenuItem *)item
     return YES;
 }
 
-/* ── Mounts menu ────────────────────────────────────────────────────────── */
+/* ── Go and Mounts menus ─────────────────────────────────────────────────── */
 
 /*
- * add_mount_item:url:name: — appends a Mounts menu item that navigates
- * the front window's active pane to url, with url's icon.
+ * add_location_item:url:name:icon: — appends a menu item that navigates the
+ * front window's active pane to url (location_menu_item_clicked:).
  *
  * Inputs:
- *   menu — the Mounts menu
- *   url  — volume root or cloud storage folder
+ *   menu — the menu to add to
+ *   url  — folder the item goes to
  *   name — item title
+ *   icon — item image, or nil for url's Workspace icon at 16 points
  */
 - (void)
-add_mount_item:(NSMenu *)menu url:(NSURL *)url name:(NSString *)name
+add_location_item:(NSMenu *)menu url:(NSURL *)url name:(NSString *)name icon:(NSImage *)icon
 {
     NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:name
-                                                  action:@selector(mount_menu_item_clicked:)
+                                                  action:@selector(location_menu_item_clicked:)
                                            keyEquivalent:@""];
     item.target            = self;
     item.representedObject = url;
-
-    NSImage *icon = [NSWorkspace.sharedWorkspace iconForFile:url.path];
-    icon.size     = NSMakeSize(16, 16);
-    item.image    = icon;
+    if (!icon) {
+        icon      = [NSWorkspace.sharedWorkspace iconForFile:url.path];
+        icon.size = NSMakeSize(16, 16);
+    }
+    item.image = icon;
 
     [menu addItem:item];
 }
 
 /*
- * menuNeedsUpdate: — NSMenuDelegate; repopulates the Mounts menu each time
- * it opens, so it never needs mount observers: the mounted volumes, then
- * (after a separator) the cloud storage locations — iCloud Drive and File
- * Provider accounts such as Google Drive — then "All Mounts…". Each location item navigates the front window's
- * active pane.
+ * menuNeedsUpdate: — NSMenuDelegate; rebuilds the dynamic part of the Go
+ * or Mounts menu each time it opens, so neither needs observers.
+ *
+ * Go: below its fixed items, a Bookmarks section listing every bookmark in
+ * bar order.
+ *
+ * Mounts: the mounted volumes, then (after a separator) the cloud storage
+ * locations — iCloud Drive and File Provider accounts such as Google
+ * Drive — then "All Mounts…".
+ *
+ * Each location item navigates the front window's active pane.
  *
  * Inputs:
- *   menu — the Mounts menu
+ *   menu — the Go or Mounts menu
  */
 - (void)
 menuNeedsUpdate:(NSMenu *)menu
 {
+    if (menu == self.go_menu) {
+        while (menu.numberOfItems > self.go_fixed_count) {
+            [menu removeItemAtIndex:menu.numberOfItems - 1];
+        }
+        [menu addItem:NSMenuItem.separatorItem];
+        [menu addItem:[NSMenuItem sectionHeaderWithTitle:@"Bookmarks"]];
+        for (NSURL *url in files_bookmark_urls()) {
+            [self add_location_item:menu url:url name:files_bookmark_name(url)
+                               icon:files_bookmark_icon(url, 16)];
+        }
+        return;
+    }
+
     [menu removeAllItems];
 
     FilesVolumeManager *vm = FilesVolumeManager.shared;
     for (NSURL *vol in vm.mounted_volumes) {
-        [self add_mount_item:menu url:vol name:[vm display_name_for_volume:vol]];
+        [self add_location_item:menu url:vol name:[vm display_name_for_volume:vol] icon:nil];
     }
 
     NSArray<NSURL *> *clouds = vm.cloud_storage_locations;
@@ -655,7 +679,7 @@ menuNeedsUpdate:(NSMenu *)menu
     for (NSURL *cloud in clouds) {
         NSString *name = nil;
         [cloud getResourceValue:&name forKey:NSURLLocalizedNameKey error:nil];
-        [self add_mount_item:menu url:cloud name:name ?: cloud.lastPathComponent];
+        [self add_location_item:menu url:cloud name:name ?: cloud.lastPathComponent icon:nil];
     }
 
     [menu addItem:NSMenuItem.separatorItem];
@@ -668,15 +692,16 @@ menuNeedsUpdate:(NSMenu *)menu
 }
 
 /*
- * mount_menu_item_clicked: — navigates the front window's active pane to the
- * location stored in the menu item's representedObject, or opens a window
- * on it when none is open (Files kept running).
+ * location_menu_item_clicked: — navigates the front window's active pane
+ * to the location stored in the menu item's representedObject, or opens a
+ * window on it when none is open (Files kept running).
  *
  * Inputs:
- *   sender — NSMenuItem with representedObject = volume or cloud folder URL
+ *   sender — NSMenuItem with representedObject = bookmark, volume or
+ *            cloud folder URL
  */
 - (void)
-mount_menu_item_clicked:(NSMenuItem *)sender
+location_menu_item_clicked:(NSMenuItem *)sender
 {
     NSURL *vol = sender.representedObject;
     if (!vol) return;
@@ -811,6 +836,9 @@ build_menu_bar
     /* No shortcut: ⇧⌘T is File ▸ Open in Terminal. */
     [go_menu addItem:make_item(@"Trash",
                                @selector(go_trash_action:),     @"",  0)];
+    go_menu.delegate    = self;  /* Bookmarks section: menuNeedsUpdate: */
+    self.go_menu        = go_menu;
+    self.go_fixed_count = go_menu.numberOfItems;
     go_mi.submenu = go_menu;
     [bar addItem:go_mi];
 

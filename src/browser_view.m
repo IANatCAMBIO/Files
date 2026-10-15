@@ -48,6 +48,15 @@ static const column_spec_t column_specs[] = {
 static const CGFloat row_height_normal = 20.0;
 static const CGFloat icon_size_normal  = 16.0;
 
+/* Column header height; AppKit's default leaves its titles cramped. */
+static const CGFloat header_height = 24.0;
+/* The scroll view starts this far above the browser's top edge, which
+ * clips it: that hides the hairline AppKit draws along the top of the
+ * column header and of the corner over the vertical scroller, since the
+ * bar above the list already has a border. A full point covers the
+ * hairline on both 1x and 2x displays. */
+static const CGFloat header_line_h = 1.0;
+
 /* Most back/forward entries kept; older ones are dropped. */
 #define HISTORY_LIMIT 100
 
@@ -757,6 +766,9 @@ build_table
         [self.table addTableColumn:tc];
     }
     self.table.headerView.menu = [self build_header_menu];
+    NSRect header_frame = self.table.headerView.frame;
+    header_frame.size.height    = header_height;
+    self.table.headerView.frame = header_frame;
 
     self.table.dataSource   = self;
     self.table.delegate     = self;
@@ -773,7 +785,10 @@ build_table
 
     self.table.menu = [self build_context_menu];
 
-    self.scroll = [[NSScrollView alloc] initWithFrame:self.bounds];
+    NSRect scroll_frame = self.bounds;
+    scroll_frame.size.height += header_line_h;   /* see header_line_h */
+    self.scroll = [[NSScrollView alloc] initWithFrame:scroll_frame];
+    self.clipsToBounds = YES;
     self.scroll.documentView          = self.table;
     self.scroll.hasVerticalScroller   = YES;
     self.scroll.hasHorizontalScroller = YES;

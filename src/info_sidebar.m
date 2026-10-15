@@ -123,7 +123,8 @@ initWithFrame:(NSRect)frame
 /* ── Drawing ─────────────────────────────────────────────────────────────── */
 
 /*
- * drawRect: — fills the background and draws a 1pt left separator.
+ * drawRect: — fills the background. The split view's divider is the
+ * separator at its left.
  *
  * Inputs:
  *   dirty — region to redraw
@@ -133,8 +134,6 @@ drawRect:(NSRect)dirty
 {
     [NSColor.windowBackgroundColor setFill];
     NSRectFill(dirty);
-    [NSColor.separatorColor setFill];
-    NSRectFill(NSMakeRect(0, 0, 1, self.bounds.size.height));
 }
 
 /* ── Construction ────────────────────────────────────────────────────────── */

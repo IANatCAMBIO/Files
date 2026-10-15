@@ -12,20 +12,20 @@ static NSString * const tb_back_forward  = @"files.back-forward";
 static NSString * const tb_up            = @"files.up";
 static NSString * const tb_reload        = @"files.reload";
 static NSString * const tb_hidden_files  = @"files.hidden-files";
-static NSString * const tb_path          = @"files.path";
 static NSString * const tb_search        = @"files.search";
 static NSString * const tb_open_terminal = @"files.open-terminal";
 static NSString * const tb_dual_pane     = @"files.dual-pane";
 static NSString * const tb_sidebar       = @"files.sidebar";
 static NSString * const tb_new_item      = @"files.new-item";
+static NSString * const tb_divider       = @"files.divider";
 
 static const CGFloat bookmarks_bar_h = 28.0;
 static const CGFloat status_h        = 20.0;
+static const CGFloat address_h       = 30.0;   /* address bar strip under the toolbar */
 static const CGFloat sidebar_w       = 180.0;  /* initial info sidebar width */
 static const CGFloat sidebar_min_w   = 140.0;
 static const CGFloat browser_min_w   = 400.0;
 static const CGFloat search_w        = 220.0;  /* toolbar search field */
-static const CGFloat address_min_w   = 200.0;  /* narrowest the address bar gets */
 
 /* How long a transient status message stays before the item count returns. */
 static const double  transient_status_sec = 4.0;
@@ -42,19 +42,9 @@ static void *first_responder_ctx = &first_responder_ctx;
 
 @interface FilesMainWindow () <NSToolbarDelegate, NSToolbarItemValidation>
 
-/* Toolbar views; address_width is the address bar's width (fit_address_bar). */
-@property (nonatomic, strong) NSTextField        *address_bar;
-@property (nonatomic, strong) NSLayoutConstraint *address_width;
-@property (nonatomic, weak)   NSToolbarItem      *address_item;
-/* Measured by fit_address_bar when every toolbar item was last laid out:
- * the row of items, its leading margin, the padding around the address
- * bar, and the other items' total width (search field at full width). */
-@property (nonatomic, weak)   NSView             *toolbar_row;
-@property (nonatomic, assign) CGFloat             toolbar_margin;
-@property (nonatomic, assign) CGFloat             toolbar_pad;
-@property (nonatomic, assign) CGFloat             toolbar_others_w;
-
 /* Layout */
+@property (nonatomic, strong) NSTextField           *address_bar;  /* full-width, under the toolbar */
+@property (nonatomic, strong) NSButton              *bookmark_star; /* right of it: ★ / ☆ (update_bookmark_star) */
 @property (nonatomic, weak)   NSSearchField         *search_field;  /* toolbar search field */
 @property (nonatomic, strong) FilesBookmarksBar     *bookmarks_bar;
 @property (nonatomic, strong) NSView                *browser_area; /* everything below the bar */
@@ -135,12 +125,12 @@ init_with_url:(NSURL *)url
                                                name:FilesVolumesChangedNotification
                                              object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self
+                                           selector:@selector(update_bookmark_star)
+                                               name:files_bookmarks_changed_note
+                                             object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self
                                            selector:@selector(window_will_close:)
                                                name:NSWindowWillCloseNotification
-                                             object:self.window];
-    [NSNotificationCenter.defaultCenter addObserver:self
-                                           selector:@selector(fit_address_bar)
-                                               name:NSWindowDidResizeNotification
                                              object:self.window];
     /* Defaults can change on any thread; the search field is only touched
      * on the main queue. */
@@ -161,10 +151,8 @@ init_with_url:(NSURL *)url
     };
     [self.primary_browser navigate_to:url];
 
-    /* Deferred so it runs after the window's initial first-responder pass
-     * and once the toolbar has been laid out. */
+    /* Deferred so it runs after the window's initial first-responder pass. */
     dispatch_async(dispatch_get_main_queue(), ^{
-        [self fit_address_bar];
         [self.window makeFirstResponder:self.address_bar];
     });
     return self;
@@ -213,10 +201,11 @@ build_toolbar
 }
 
 /*
- * build_layout — bookmarks bar on top; below it the status bar and an
- * NSSplitViewController whose left item holds the browser pane(s) and whose
- * right item is the collapsible info sidebar (collapsed at launch). The
- * split view controller manages collapsing, minimum widths and the divider.
+ * build_layout — the full-width address bar on top, the bookmarks bar
+ * under it; below them the status bar and an NSSplitViewController whose
+ * left item holds the browser pane(s) and whose right item is the
+ * collapsible info sidebar (collapsed at launch). The split view controller
+ * manages collapsing, minimum widths and the divider.
  */
 - (void)
 build_layout
@@ -225,12 +214,63 @@ build_layout
     CGFloat w = content.bounds.size.width;
     CGFloat h = content.bounds.size.height;
 
+    /* Address bar: the window's full width, under the toolbar, with the
+     * bookmark star at its right and a separator along the bottom edge:
+     * the divider above the list when the bookmarks bar is hidden. */
+    NSView *address_container = [[NSView alloc]
+        initWithFrame:NSMakeRect(0, h - address_h, w, address_h)];
+    address_container.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+    [content addSubview:address_container];
+
+    self.address_bar = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    self.address_bar.translatesAutoresizingMaskIntoConstraints = NO;
+    self.address_bar.placeholderString = @"Path";
+    self.address_bar.bezelStyle        = NSTextFieldRoundedBezel;
+    self.address_bar.font              = [NSFont monospacedSystemFontOfSize:12.0
+                                                                     weight:NSFontWeightRegular];
+    self.address_bar.target            = self;
+    self.address_bar.action            = @selector(address_bar_action:);
+    self.address_bar.focusRingType     = NSFocusRingTypeNone;
+    /* One line, the end of the path kept in view when it is too long. */
+    self.address_bar.usesSingleLineMode = YES;
+    self.address_bar.cell.wraps         = NO;
+    self.address_bar.cell.scrollable    = YES;
+    self.address_bar.lineBreakMode      = NSLineBreakByTruncatingHead;
+    [address_container addSubview:self.address_bar];
+
+    NSButton *star = [NSButton buttonWithTitle:@"☆" target:self
+                                        action:@selector(toggle_bookmark_action:)];
+    star.translatesAutoresizingMaskIntoConstraints = NO;
+    star.bezelStyle = NSBezelStyleRecessed;
+    star.font       = [NSFont systemFontOfSize:14.0];
+    [address_container addSubview:star];
+    self.bookmark_star = star;
+
+    [NSLayoutConstraint activateConstraints:@[
+        [self.address_bar.leadingAnchor  constraintEqualToAnchor:address_container.leadingAnchor
+                                                        constant:8.0],
+        [self.address_bar.trailingAnchor constraintEqualToAnchor:star.leadingAnchor
+                                                        constant:-4.0],
+        [self.address_bar.centerYAnchor  constraintEqualToAnchor:address_container.centerYAnchor],
+        [star.trailingAnchor constraintEqualToAnchor:address_container.trailingAnchor
+                                            constant:-8.0],
+        [star.centerYAnchor  constraintEqualToAnchor:self.address_bar.centerYAnchor],
+        [star.widthAnchor    constraintEqualToConstant:26.0],
+    ]];
+
+    NSBox *address_sep = [[NSBox alloc] initWithFrame:NSMakeRect(0, 0, w, 1)];
+    address_sep.boxType          = NSBoxSeparator;
+    address_sep.autoresizingMask = NSViewWidthSizable | NSViewMaxYMargin;
+    [address_container addSubview:address_sep];
+
+    CGFloat below_address = h - address_h;
     self.bookmarks_bar = [[FilesBookmarksBar alloc]
-        init_with_frame:NSMakeRect(0, h - bookmarks_bar_h, w, bookmarks_bar_h)];
+        init_with_frame:NSMakeRect(0, below_address - bookmarks_bar_h, w, bookmarks_bar_h)];
     self.bookmarks_bar.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
     [content addSubview:self.bookmarks_bar];
 
-    NSView *area = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, w, h - bookmarks_bar_h)];
+    NSView *area = [[NSView alloc]
+        initWithFrame:NSMakeRect(0, 0, w, below_address - bookmarks_bar_h)];
     area.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     [content addSubview:area];
     self.browser_area = area;
@@ -378,7 +418,8 @@ apply_bookmarks_bar_pref
     self.bookmarks_bar.hidden = !show;
     NSRect bounds = self.window.contentView.bounds;
     self.browser_area.frame = NSMakeRect(0, 0, NSWidth(bounds),
-                                         NSHeight(bounds) - (show ? bookmarks_bar_h : 0.0));
+                                         NSHeight(bounds) - address_h
+                                         - (show ? bookmarks_bar_h : 0.0));
 }
 
 /* ── Panes ───────────────────────────────────────────────────────────────── */
@@ -707,62 +748,9 @@ update_title
 update_toolbar_for_url:(NSURL *)url
 {
     self.address_bar.stringValue = url.path ?: @"";
+    [self update_bookmark_star];
     [self update_title];
     [self.window.toolbar validateVisibleItems];
-}
-
-/*
- * fit_address_bar — makes the address bar fill the toolbar between the
- * Reload button and the search field. The toolbar sizes a view item to its
- * fitting width and puts any room left over after its last item, so this
- * sets the address bar to the toolbar's width less its margins and the
- * other items (never below address_min_w). The toolbar's row of items, its
- * margin and the other items' width are measured whenever every item is
- * laid out with the search field at full width; the last measurement is
- * used while some are squeezed or in the overflow menu — the address bar
- * included, as when the window has just been made narrower. Runs whenever
- * the window is resized, and once after the first layout.
- */
-- (void)
-fit_address_bar
-{
-    NSView *viewer = self.address_bar.superview;   /* the item's viewer */
-    NSView *row    = viewer.superview;             /* the toolbar's row of items */
-    if (row) {
-        [row layoutSubtreeIfNeeded];
-        /* Against the alignment rect, which address_width sizes: a bezeled
-         * field's frame is wider than it, so measuring the frame would
-         * leave the row that much too wide. */
-        CGFloat pad   = NSWidth(viewer.frame) -
-                        NSWidth([self.address_bar alignmentRectForFrame:self.address_bar.frame]);
-        CGFloat start = CGFLOAT_MAX, end = 0, next_w = 0, next_x = CGFLOAT_MAX;
-        for (NSView *v in row.subviews) {
-            start = MIN(start, NSMinX(v.frame));
-            end   = MAX(end, NSMaxX(v.frame));
-            if (NSMinX(v.frame) >= NSMaxX(viewer.frame) && NSMinX(v.frame) < next_x) {
-                next_x = NSMinX(v.frame);   /* the search item comes next */
-                next_w = NSWidth(v.frame);
-            }
-        }
-        if (row.subviews.count == self.window.toolbar.items.count && next_w >= search_w + pad) {
-            self.toolbar_row      = row;
-            self.toolbar_margin   = start;
-            self.toolbar_pad      = pad;
-            self.toolbar_others_w = (end - start) - NSWidth(viewer.frame);
-        }
-    }
-    if (!self.toolbar_row) return;   /* never measured: keep address_min_w */
-
-    CGFloat want = MAX(address_min_w,
-                       floor(NSWidth(self.toolbar_row.bounds) - 2.0 * self.toolbar_margin
-                             - self.toolbar_others_w - self.toolbar_pad));
-    if (fabs(want - self.address_width.constant) < 1.0) return;
-    self.address_width.constant = want;
-    /* The toolbar measures an item's view when it is set, and keeps that
-     * size until the window is resized again; setting it anew makes the new
-     * width count now (otherwise a narrower window could leave items in the
-     * overflow menu). */
-    self.address_item.view = self.address_bar;
 }
 
 /* ── Dual pane ───────────────────────────────────────────────────────────── */
@@ -939,9 +927,10 @@ static NSArray<NSToolbarItemIdentifier> *
 toolbar_identifiers(void)
 {
     return @[tb_back_forward, tb_up, tb_reload,
-             tb_path,
-             tb_search, tb_new_item, tb_hidden_files, tb_open_terminal,
-             tb_dual_pane, tb_sidebar];
+             tb_divider,
+             tb_new_item, tb_hidden_files, tb_open_terminal, tb_dual_pane, tb_sidebar,
+             NSToolbarFlexibleSpaceItemIdentifier,
+             tb_search];
 }
 
 /*
@@ -1000,6 +989,31 @@ button_item(NSToolbarItemIdentifier ident, NSString *label, NSString *symbol,
 }
 
 /*
+ * divider_item — a toolbar item showing a short vertical line, to separate
+ * groups of buttons.
+ *
+ * Inputs:
+ *   ident — item identifier
+ *
+ * Output: configured NSToolbarItem.
+ */
+static NSToolbarItem *
+divider_item(NSToolbarItemIdentifier ident)
+{
+    NSBox *line = [[NSBox alloc] initWithFrame:NSMakeRect(0, 0, 1, 18)];
+    line.boxType = NSBoxSeparator;
+    line.translatesAutoresizingMaskIntoConstraints = NO;
+    [NSLayoutConstraint activateConstraints:@[
+        [line.widthAnchor  constraintEqualToConstant:1.0],
+        [line.heightAnchor constraintEqualToConstant:18.0],
+    ]];
+    NSToolbarItem *item = [[NSToolbarItem alloc] initWithItemIdentifier:ident];
+    item.view  = line;
+    item.label = @"";
+    return item;
+}
+
+/*
  * toolbar:itemForItemIdentifier:willBeInsertedIntoToolbar: — factory for each
  * toolbar item.
  *
@@ -1040,6 +1054,8 @@ willBeInsertedIntoToolbar:(BOOL)flag
         }
         return group;
     }
+    if ([identifier isEqualToString:tb_divider])
+        return divider_item(identifier);
     if ([identifier isEqualToString:tb_up])
         return button_item(identifier, @"Up", @"arrow.up", @selector(go_up_action:), self);
     if ([identifier isEqualToString:tb_reload])
@@ -1074,7 +1090,6 @@ willBeInsertedIntoToolbar:(BOOL)flag
     }
     if ([identifier isEqualToString:tb_search]) {
         NSSearchToolbarItem *item = [[NSSearchToolbarItem alloc] initWithItemIdentifier:identifier];
-        /* A fixed width, so the address bar gets the toolbar's spare room. */
         item.preferredWidthForSearchField = search_w;
         [item.searchField.widthAnchor constraintLessThanOrEqualToConstant:search_w].active = YES;
         item.searchField.target            = self;
@@ -1100,36 +1115,6 @@ willBeInsertedIntoToolbar:(BOOL)flag
         return item;
     }
 
-    if ([identifier isEqualToString:tb_path]) {
-        self.address_bar = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 400, 22)];
-        self.address_bar.placeholderString = @"Path";
-        self.address_bar.bezelStyle        = NSTextFieldRoundedBezel;
-        self.address_bar.font              = [NSFont monospacedSystemFontOfSize:12.0
-                                                                         weight:NSFontWeightRegular];
-        self.address_bar.target            = self;
-        self.address_bar.action            = @selector(address_bar_action:);
-        self.address_bar.focusRingType     = NSFocusRingTypeNone;
-        /* One line, the end of the path kept in view when it is too long. */
-        self.address_bar.usesSingleLineMode = YES;
-        self.address_bar.cell.wraps         = NO;
-        self.address_bar.cell.scrollable    = YES;
-        self.address_bar.lineBreakMode      = NSLineBreakByTruncatingHead;
-        /* The toolbar lays an item out at its view's fitting width and
-         * leaves any spare room after the last item, so fit_address_bar
-         * sets this width to fill it. */
-        self.address_width = [self.address_bar.widthAnchor
-                                 constraintEqualToConstant:address_min_w];
-        self.address_width.priority = NSLayoutPriorityDefaultLow;
-        [NSLayoutConstraint activateConstraints:@[
-            [self.address_bar.widthAnchor constraintGreaterThanOrEqualToConstant:address_min_w],
-            self.address_width,
-        ]];
-        NSToolbarItem *item = [[NSToolbarItem alloc] initWithItemIdentifier:identifier];
-        item.view  = self.address_bar;
-        item.label = @"Path";
-        self.address_item = item;
-        return item;
-    }
     return nil;
 }
 
@@ -1414,13 +1399,50 @@ search_changed:(NSSearchField *)sender
  * add_bookmark_action: — adds the active pane's folder to the bookmarks bar.
  *
  * Inputs:
- *   sender — menu item or the bookmarks bar's star button (unused)
+ *   sender — menu item (unused)
  */
 - (IBAction)
 add_bookmark_action:(id)sender
 {
     NSURL *cur = [self active_browser].current_url;
     if (cur) [self.bookmarks_bar add_bookmark:cur];
+}
+
+/*
+ * toggle_bookmark_action: — the address bar's star: bookmarks the active
+ * pane's folder, or removes its bookmark if it has one. The star follows
+ * through files_bookmarks_changed_note.
+ *
+ * Inputs:
+ *   sender — the star button (unused)
+ */
+- (IBAction)
+toggle_bookmark_action:(id)sender
+{
+    NSURL *cur = [self active_browser].current_url;
+    if (!cur) return;
+    if (files_is_bookmark(cur)) {
+        [self.bookmarks_bar remove_bookmark:cur];
+    } else {
+        [self.bookmarks_bar add_bookmark:cur];
+    }
+}
+
+/*
+ * update_bookmark_star — shows ★ when the active pane's folder is a
+ * bookmark and ☆ when it is not, with a tooltip saying what a click does.
+ * Disabled at Trash, which is always a bookmark and cannot be removed.
+ * Runs after each navigation, pane switch and bookmark-list change.
+ */
+- (void)
+update_bookmark_star
+{
+    NSURL *cur    = [self active_browser].current_url;
+    BOOL   marked = cur && files_is_bookmark(cur);
+    self.bookmark_star.title   = marked ? @"★" : @"☆";
+    self.bookmark_star.toolTip = marked ? @"Remove Current Folder from Bookmarks"
+                                        : @"Add Current Folder to Bookmarks";
+    self.bookmark_star.enabled = cur && !files_same_path(cur, files_directory_url(NSTrashDirectory));
 }
 
 /*
