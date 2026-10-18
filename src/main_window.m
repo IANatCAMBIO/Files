@@ -17,7 +17,6 @@ static NSString * const tb_open_terminal = @"files.open-terminal";
 static NSString * const tb_dual_pane     = @"files.dual-pane";
 static NSString * const tb_sidebar       = @"files.sidebar";
 static NSString * const tb_new_item      = @"files.new-item";
-static NSString * const tb_divider       = @"files.divider";
 
 static const CGFloat bookmarks_bar_h = 28.0;
 static const CGFloat status_h        = 20.0;
@@ -932,8 +931,10 @@ static NSArray<NSToolbarItemIdentifier> *
 toolbar_identifiers(void)
 {
     return @[tb_back_forward, tb_up, tb_reload,
-             tb_divider,
-             tb_new_item, tb_hidden_files, tb_open_terminal, tb_dual_pane, tb_sidebar,
+             NSToolbarSpaceItemIdentifier,
+             tb_hidden_files, tb_open_terminal, tb_dual_pane, tb_sidebar,
+             NSToolbarSpaceItemIdentifier,
+             tb_new_item,
              NSToolbarFlexibleSpaceItemIdentifier,
              tb_search];
 }
@@ -994,31 +995,6 @@ button_item(NSToolbarItemIdentifier ident, NSString *label, NSString *symbol,
 }
 
 /*
- * divider_item — a toolbar item showing a short vertical line, to separate
- * groups of buttons.
- *
- * Inputs:
- *   ident — item identifier
- *
- * Output: configured NSToolbarItem.
- */
-static NSToolbarItem *
-divider_item(NSToolbarItemIdentifier ident)
-{
-    NSBox *line = [[NSBox alloc] initWithFrame:NSMakeRect(0, 0, 1, 18)];
-    line.boxType = NSBoxSeparator;
-    line.translatesAutoresizingMaskIntoConstraints = NO;
-    [NSLayoutConstraint activateConstraints:@[
-        [line.widthAnchor  constraintEqualToConstant:1.0],
-        [line.heightAnchor constraintEqualToConstant:18.0],
-    ]];
-    NSToolbarItem *item = [[NSToolbarItem alloc] initWithItemIdentifier:ident];
-    item.view  = line;
-    item.label = @"";
-    return item;
-}
-
-/*
  * toolbar:itemForItemIdentifier:willBeInsertedIntoToolbar: — factory for each
  * toolbar item.
  *
@@ -1059,8 +1035,6 @@ willBeInsertedIntoToolbar:(BOOL)flag
         }
         return group;
     }
-    if ([identifier isEqualToString:tb_divider])
-        return divider_item(identifier);
     if ([identifier isEqualToString:tb_up])
         return button_item(identifier, @"Up", @"arrow.up", @selector(go_up_action:), self);
     if ([identifier isEqualToString:tb_reload])
