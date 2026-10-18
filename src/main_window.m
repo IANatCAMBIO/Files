@@ -241,8 +241,8 @@ build_layout
     NSButton *star = [NSButton buttonWithTitle:@"☆" target:self
                                         action:@selector(toggle_bookmark_action:)];
     star.translatesAutoresizingMaskIntoConstraints = NO;
-    star.bezelStyle = NSBezelStyleRecessed;
-    star.font       = [NSFont systemFontOfSize:14.0];
+    star.bordered = NO;   /* a bare glyph, no button background */
+    star.font     = [NSFont systemFontOfSize:14.0];
     [address_container addSubview:star];
     self.bookmark_star = star;
 
@@ -251,7 +251,12 @@ build_layout
                                                         constant:8.0],
         [self.address_bar.trailingAnchor constraintEqualToAnchor:star.leadingAnchor
                                                         constant:-4.0],
-        [self.address_bar.centerYAnchor  constraintEqualToAnchor:address_container.centerYAnchor],
+        /* Centred in the strip above the separator. The 1 pt separator
+         * takes the bottom of the container, and the rounded bezel's
+         * alignment rect sits about half a point below its drawn edge:
+         * measured together they left the field 1 pt low. */
+        [self.address_bar.centerYAnchor  constraintEqualToAnchor:address_container.centerYAnchor
+                                                        constant:-1.0],
         [star.trailingAnchor constraintEqualToAnchor:address_container.trailingAnchor
                                             constant:-8.0],
         [star.centerYAnchor  constraintEqualToAnchor:self.address_bar.centerYAnchor],
