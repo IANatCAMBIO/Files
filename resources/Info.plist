@@ -31,8 +31,10 @@
     <string>Files asks Finder to empty the Trash when it holds apps or other items that only Finder may delete.</string>
     <key>NSRequiresAquaSystemAppearance</key>
     <false/>
+    <!-- build/app_icon.icns, which the Makefile renders from
+         resources/app_icon.png. -->
     <key>CFBundleIconFile</key>
-    <string>folder</string>
+    <string>app_icon</string>
     <!-- Folders, so Files is offered in Open With for folders and accepts
          them from `open -b com.cambio.files <folder>` (the ~/.zshrc
          function default_viewer.m installs). -->

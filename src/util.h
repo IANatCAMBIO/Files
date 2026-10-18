@@ -280,12 +280,13 @@ NSString *files_format_rate(double bytes_per_sec);
 NSString *files_format_date(NSDate *date, NSDateFormatterStyle date_style);
 
 /*
- * files_app_icon — Files' icon as drawn: folder.png from the app bundle.
- * macOS 26 shows a bundle icon that is not its rounded-square shape on a
- * grey rounded-square backdrop, in alerts and the About panel too; handing
- * them this image explicitly shows just the folder. Loaded once.
+ * files_app_icon — Files' icon as drawn: app_icon.icns from the app bundle
+ * (the Makefile renders it from resources/app_icon.png). macOS 26 shows a
+ * bundle icon that is not its rounded-square shape on a grey rounded-square
+ * backdrop, in alerts and the About panel too; handing them this image
+ * explicitly shows just the folder. Loaded once.
  *
- * Output: shared NSImage, or nil if folder.png is missing.
+ * Output: shared NSImage, or nil if app_icon.icns is missing.
  */
 NSImage *files_app_icon(void);
 

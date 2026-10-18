@@ -30,7 +30,7 @@
  *
  * The icon: macOS 26 draws a bundle icon that is not its rounded-square
  * shape on a grey rounded-square backdrop. The running app's icon (the
- * Dock tile while Files runs) is set to folder.png itself; the
+ * Dock tile while Files runs) is set to app_icon.icns itself; the
  * About panel is handed it explicitly (show_about:),
  * since it would add the backdrop to the app icon themselves. Finder,
  * and the Dock while Files is not running, use the bundle icon and keep
@@ -443,9 +443,15 @@ applicationShouldHandleReopen:(NSApplication *)app hasVisibleWindows:(BOOL)visib
 static NSString * const about_site_url    = @"https://camb.io";
 static NSString * const about_license_url = @"https://opensource.org/license/bsd-3-clause";
 
+/* The About panel's credits open with the app's motto, as Notes' and Tasks'
+ * do. */
+static NSString * const about_motto =
+    @"The files are IN the computer?!?\n— Hansel McDonald";
+
 /*
- * about_credits — the About panel's credits: "camb.io · BSD License",
- * centred in the small system font, each name a link.
+ * about_credits — the About panel's credits: the motto, then
+ * "camb.io · BSD License", centred in the small system font, each name a
+ * link.
  *
  * Output: attributed string for NSAboutPanelOptionCredits.
  */
@@ -464,9 +470,10 @@ about_credits(void)
         @[@"BSD License", about_license_url],
     ];
 
-    NSMutableAttributedString *credits = [[NSMutableAttributedString alloc] init];
+    NSMutableAttributedString *credits = [[NSMutableAttributedString alloc]
+        initWithString:[about_motto stringByAppendingString:@"\n\n"] attributes:plain];
     for (NSArray<NSString *> *link in links) {
-        if (credits.length > 0) {
+        if (link != links.firstObject) {
             [credits appendAttributedString:
                 [[NSAttributedString alloc] initWithString:@"  ·  " attributes:plain]];
         }
@@ -484,8 +491,9 @@ about_credits(void)
  * Info.plist and the build date from its FilesBuildDate key (UTC, ISO
  * 8601), both written by the Makefile; without a readable build date the
  * line is just the version. The copyright line is Info.plist's
- * NSHumanReadableCopyright, and the credits link to camb.io and the
- * license (about_credits). The icon is files_app_icon(), passed explicitly
+ * NSHumanReadableCopyright, and the credits are the motto and links to
+ * camb.io and the license (about_credits). The icon is files_app_icon(),
+ * passed explicitly
  * so the panel does not put it on the grey backdrop.
  *
  * Inputs:

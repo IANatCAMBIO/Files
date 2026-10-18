@@ -122,7 +122,7 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   file browser to Files / to Finder — each opens a change log) and Keep
   Files running for faster startup (see Keeping Files running)
 - About Files shows the version (from the `VERSION` file), build date,
-  and links to camb.io and the license
+  the app's motto, and links to camb.io and the license
 - Address bar (accepts `~` and relative paths), back/forward/up, Open in
   Terminal, show/hide hidden files
 

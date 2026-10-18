@@ -61,14 +61,30 @@ all: $(BUNDLE)
 # where the app loads it by name.
 IMAGES   = $(wildcard images/*.png images/*.icns)
 
-$(BUNDLE): $(MACOS)/$(APP) resources/Info.plist VERSION $(IMAGES)
+# The app icon (Info.plist CFBundleIconFile, and files_app_icon() in the
+# app) is built from resources/app_icon.png, a 1024x1024 PNG with a
+# transparent background: sips renders it at every size an iconset holds
+# and iconutil packs those into one .icns. Both tools ship with macOS.
+ICON_SRC = resources/app_icon.png
+ICON     = build/app_icon.icns
+ICONSET  = build/app_icon.iconset
+
+$(ICON): $(ICON_SRC) | build
+	@rm -rf $(ICONSET) && mkdir -p $(ICONSET)
+	@for s in 16 32 128 256 512; do \
+	    sips -z $$s $$s $< --out $(ICONSET)/icon_$${s}x$${s}.png >/dev/null; \
+	    sips -z $$((s * 2)) $$((s * 2)) $< --out $(ICONSET)/icon_$${s}x$${s}@2x.png >/dev/null; \
+	done
+	@iconutil -c icns -o $@ $(ICONSET)
+
+$(BUNDLE): $(MACOS)/$(APP) resources/Info.plist VERSION $(IMAGES) $(ICON)
 	@rm -rf $(RSRC) && mkdir -p $(RSRC)  # fresh, so removed images do not linger
 	@cp resources/Info.plist $(CONTENTS)/Info.plist
 	@plutil -replace CFBundleExecutable -string "$(APP)" $(CONTENTS)/Info.plist
 	@plutil -replace CFBundleShortVersionString -string "$(VERSION)" $(CONTENTS)/Info.plist
 	@plutil -replace CFBundleVersion -string "$(VERSION)" $(CONTENTS)/Info.plist
 	@plutil -replace FilesBuildDate -string "$$(date -u +%Y-%m-%dT%H:%M:%SZ)" $(CONTENTS)/Info.plist
-	@cp -X $(IMAGES) $(RSRC)/
+	@cp -X $(IMAGES) $(ICON) $(RSRC)/
 	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(BUNDLE)
 	@touch $(BUNDLE)  # codesign rewrites the binary; keep the bundle newer than it
 

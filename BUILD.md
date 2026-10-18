@@ -36,6 +36,9 @@ Archive Utility's sandboxed settings only, `defaults`.
 The C library's `copyfile(3)`, `renamex_np(2)` and CommonCrypto (SHA-256 / MD5)
 are part of libSystem and need no extra linking.
 
+At build time the Makefile runs `sips` and `iconutil` (both in /usr/bin on
+macOS) to render the app icon; see [App icon](#app-icon).
+
 ## Build targets
 
 | Target          | Command         | Description                            |
@@ -73,12 +76,23 @@ Files.app/
     ├── MacOS/
     │   └── Files          ← compiled binary
     └── Resources/
-        └── folder.png, documents.png, ribbon.png, git96.png  ← git badge
+        ├── app_icon.icns   ← app icon, rendered from resources/app_icon.png
+        └── documents.png, ribbon.png, git96.png  ← git badge
 ```
 
 The Makefile copies every `.png` and `.icns` in `images/` into `Resources/`,
 so adding an image there is all it takes to bundle it; the app loads it by
 name (`NSBundle pathForResource:ofType:`).
+
+## App icon
+
+The app icon is `resources/app_icon.png`, a 1024×1024 PNG with a transparent
+background. `make` renders it at every size an iconset holds with `sips`,
+packs them into `build/app_icon.icns` with `iconutil` (both ship with macOS)
+and copies the `.icns` into `Resources/`. Info.plist names it in
+`CFBundleIconFile`, and the app loads the same file for the Dock tile and the
+About panel (`files_app_icon()`). To change the icon, replace the PNG and run
+`make`.
 
 ## Version and build date
 

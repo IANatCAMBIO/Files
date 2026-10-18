@@ -469,7 +469,7 @@ files_format_date(NSDate *date, NSDateFormatterStyle date_style)
 }
 
 /*
- * files_app_icon — folder.png, loaded once.
+ * files_app_icon — app_icon.icns, loaded once.
  * Inputs/output are documented in util.h.
  */
 NSImage *
@@ -478,7 +478,7 @@ files_app_icon(void)
     static NSImage *icon;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        icon = [NSImage imageNamed:@"folder"];  /* Resources/folder.png */
+        icon = [NSImage imageNamed:@"app_icon"];  /* Resources/app_icon.icns */
     });
     return icon;
 }
