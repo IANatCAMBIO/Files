@@ -54,7 +54,7 @@ macOS) to render the app icon; see [App icon](#app-icon).
 folder in `$TMPDIR` and on a small HFS+ disk image it creates and mounts
 (`hdiutil`): locked files and folders, Keep Both, Replace, duplicate in
 place, copy into itself, same-volume and cross-volume moves, and SHA-256
-validation (APFS clones are not hashed; copies to another volume are). It
+validation (APFS clones and copies to another volume are both hashed). It
 cleans up after itself, prints one line per check and exits non-zero on a
 failure. `make clean` and `make test` skip the keychain lookup for the
 signing identity.

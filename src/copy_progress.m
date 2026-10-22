@@ -51,7 +51,6 @@ log_attributes(void)
 
 @property (nonatomic, strong) NSTextField     *status_label;
 @property (nonatomic, strong) FilesSpeedGraph *speed_graph;
-@property (nonatomic, strong) NSTextField     *elapsed_label;
 @property (nonatomic, strong) NSButton        *cancel_button;
 @property (nonatomic, strong) NSButton        *log_toggle;
 @property (nonatomic, strong) NSScrollView    *log_scroll;
@@ -69,6 +68,7 @@ log_attributes(void)
     NSString          *_ed;           /* "Copied" or "Moved" */
     NSString          *_noun;         /* "copy" or "move" */
     NSString          *_cur_name;     /* file name shown in the status line */
+    NSString          *_only_name;    /* the one item being copied; nil for several */
     int64_t            _total_done;   /* bytes copied so far across all files */
     CFAbsoluteTime     _start_time;   /* set when the copy is started */
     FilesCopyProgress *_self_ref;     /* retains self while window is on screen */
@@ -104,7 +104,7 @@ init_with_dest:(NSURL *)dest is_cut:(BOOL)is_cut
 {
     NSString *ing = is_cut ? @"Moving" : @"Copying";
     NSPanel *panel = [[NSPanel alloc]
-        initWithContentRect:NSMakeRect(0, 0, 460, 210)
+        initWithContentRect:NSMakeRect(0, 0, 460, 188)
                   styleMask:NSWindowStyleMaskTitled
                            | NSWindowStyleMaskClosable
                            | NSWindowStyleMaskUtilityWindow
@@ -137,10 +137,11 @@ init_with_dest:(NSURL *)dest is_cut:(BOOL)is_cut
 /*
  * build_views — lay out all subviews in the panel content view.
  *
- * The status line, graph and Transfer Log row are pinned to the top; the
+ * The graph and status line are pinned to the top; the
  * Cancel/Close button is pinned to the bottom-right corner (button_margin
- * from both edges). When the window grows downward to reveal the transfer
- * log, the log fills the space between the Transfer Log row and the button.
+ * from both edges) and the Transfer Log toggle to the bottom-left on the
+ * same row. When the window grows downward to reveal the transfer
+ * log, the log fills the space between the status line and the button.
  * Uses _dest_name for the initial status text.
  */
 - (void)
@@ -150,18 +151,7 @@ build_views
     CGFloat w  = cv.bounds.size.width;
     CGFloat y  = cv.bounds.size.height - 10;
 
-    /* Status line */
-    y -= 14;
-    self.status_label = [NSTextField labelWithString:
-        [NSString stringWithFormat:@"%@ to \"%@\"...", _ing, _dest_name]];
-    self.status_label.frame            = NSMakeRect(12, y, w - 24, 14);
-    self.status_label.font             = [NSFont systemFontOfSize:12.0];
-    self.status_label.lineBreakMode    = NSLineBreakByTruncatingMiddle;
-    self.status_label.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
-    [cv addSubview:self.status_label];
-
     /* Speed graph */
-    y -= 8;
     CGFloat graph_h = 110.0;
     y -= graph_h;
     self.speed_graph = [[FilesSpeedGraph alloc]
@@ -169,28 +159,15 @@ build_views
     self.speed_graph.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
     [cv addSubview:self.speed_graph];
 
-    /* Transfer Log toggle + elapsed-time row.
-     * label_top = graph_bottom - 8 gap -> label_origin = y - 8 - 14. */
-    CGFloat label_y = y - 8 - 14;
-
-    /* Transfer Log toggle — left edge aligned with graph */
-    self.log_toggle = [NSButton buttonWithTitle:@"▶  Transfer Log"
-                                         target:self
-                                         action:@selector(toggle_log:)];
-    self.log_toggle.frame            = NSMakeRect(12, label_y - 1, 103, 16);
-    self.log_toggle.bordered         = NO;
-    self.log_toggle.font             = [NSFont systemFontOfSize:11.0];
-    self.log_toggle.autoresizingMask = NSViewMinYMargin;
-    [cv addSubview:self.log_toggle];
-
-    /* Elapsed-time label — filled in when the copy finishes */
-    self.elapsed_label = [NSTextField labelWithString:@""];
-    self.elapsed_label.frame            = NSMakeRect(220, label_y, w - 232, 14);
-    self.elapsed_label.font             = [NSFont systemFontOfSize:11.0];
-    self.elapsed_label.textColor        = NSColor.secondaryLabelColor;
-    self.elapsed_label.alignment        = NSTextAlignmentRight;
-    self.elapsed_label.autoresizingMask = NSViewWidthSizable | NSViewMinXMargin | NSViewMinYMargin;
-    [cv addSubview:self.elapsed_label];
+    /* Status line */
+    y -= 8 + 14;
+    self.status_label = [NSTextField labelWithString:
+        [NSString stringWithFormat:@"%@ to \"%@\"...", _ing, _dest_name]];
+    self.status_label.frame            = NSMakeRect(12, y, w - 24, 14);
+    self.status_label.font             = [NSFont systemFontOfSize:12.0];
+    self.status_label.lineBreakMode    = NSLineBreakByTruncatingMiddle;
+    self.status_label.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+    [cv addSubview:self.status_label];
 
     /* Cancel/Close button — fixed distance from the bottom and right edges */
     self.cancel_button = [NSButton buttonWithTitle:@"Cancel"
@@ -201,8 +178,19 @@ build_views
     self.cancel_button.keyEquivalent     = @"\033"; /* Escape */
     [cv addSubview:self.cancel_button];
 
+    /* Transfer Log toggle — on the button's row, left edge aligned with the
+     * graph and vertically centred on the button */
+    self.log_toggle = [NSButton buttonWithTitle:@"▶  Transfer Log"
+                                         target:self
+                                         action:@selector(toggle_log:)];
+    self.log_toggle.frame            = NSMakeRect(12, button_margin + (22 - 16) / 2.0, 103, 16);
+    self.log_toggle.bordered         = NO;
+    self.log_toggle.font             = [NSFont systemFontOfSize:11.0];
+    self.log_toggle.autoresizingMask = NSViewMaxYMargin;
+    [cv addSubview:self.log_toggle];
+
     /* Transfer log scroll view — hidden until expanded; toggle_log: places it
-     * between the Transfer Log row and the button. */
+     * between the status line and the button. */
     NSScrollView *sv = [[NSScrollView alloc]
         initWithFrame:NSMakeRect(12, 0, w - 24, log_height)];
     sv.hasVerticalScroller   = YES;
@@ -240,7 +228,7 @@ build_views
  * toggle_log: — expand or collapse the transfer log panel.
  *
  * Grows the window downward by log_height + log_gap when expanding, then
- * places the log between the Transfer Log row and the Cancel/Close button
+ * places the log between the status line and the Cancel/Close button
  * (log_gap from each) and scrolls it to the newest line. Collapsing hides
  * the log first, then shrinks the window back. The top rows stay pinned to
  * the top and the button to the bottom-right throughout.
@@ -265,7 +253,7 @@ toggle_log:(id)sender
         [self.window setFrame:wf display:YES animate:YES];
 
         CGFloat bottom = NSMaxY(self.cancel_button.frame) + log_gap;
-        CGFloat top    = NSMinY(self.log_toggle.frame) - log_gap;
+        CGFloat top    = NSMinY(self.status_label.frame) - log_gap;
         self.log_scroll.frame  = NSMakeRect(NSMinX(self.speed_graph.frame), bottom,
                                             NSWidth(self.speed_graph.frame), top - bottom);
         self.log_scroll.hidden = NO;
@@ -281,13 +269,16 @@ toggle_log:(id)sender
     }
 }
 
+/* Length of the "[HH:mm:ss]" stamp that stamped() puts on each log line. */
+static const NSUInteger stamp_length = 10;
+
 /*
  * stamped — line prefixed with the current time, as the log shows it.
  *
  * Inputs:
  *   line — log text
  *
- * Output: "[HH:mm:ss] line".
+ * Output: "[HH:mm:ss] line"; the bracketed stamp is stamp_length characters.
  */
 static NSString *
 stamped(NSString *line)
@@ -305,6 +296,8 @@ stamped(NSString *line)
  * append_log_lines: — append already-timestamped lines to the transfer log
  * text view in one edit.
  *
+ * Each line's timestamp is drawn bold.
+ *
  * Keeps at most log_max_lines lines: when log_trim_batch lines beyond that
  * have accumulated, the oldest ones are deleted from the start of the text
  * storage in a single edit. Scrolls to the end only while the log is
@@ -320,10 +313,19 @@ append_log_lines:(NSArray<NSString *> *)lines
     NSTextStorage *ts  = self.log_text.textStorage;
     NSString      *sep = ts.length ? @"\n" : @"";
 
-    [ts beginEditing];
-    [ts appendAttributedString:[[NSAttributedString alloc]
+    NSMutableAttributedString *added = [[NSMutableAttributedString alloc]
         initWithString:[sep stringByAppendingString:[lines componentsJoinedByString:@"\n"]]
-            attributes:log_attributes()]];
+            attributes:log_attributes()];
+    NSFont *bold = [NSFont monospacedSystemFontOfSize:10.0 weight:NSFontWeightBold];
+    NSUInteger at = sep.length;
+    for (NSString *line in lines) {
+        [added addAttribute:NSFontAttributeName value:bold
+                      range:NSMakeRange(at, MIN(stamp_length, line.length))];
+        at += line.length + 1;
+    }
+
+    [ts beginEditing];
+    [ts appendAttributedString:added];
     _log_lines += lines.count;
 
     if (_log_lines > log_max_lines + log_trim_batch) {
@@ -406,7 +408,8 @@ engine_log:(NSString *)line
  * take_engine_updates — shows what the engine reported since the last
  * call: appends its log lines, records the byte count (feed_graph reads
  * it) and updates the status line — every call while downloading from
- * iCloud ("Downloading "name" from iCloud — 312 MB of 731 MB"), otherwise
+ * iCloud ("Downloading "name" from iCloud — 312 MB of 731 MB", or "Waiting
+ * for iCloud to start downloading "name"…" until the first byte), otherwise
  * when the file changed. Main thread only.
  */
 - (void)
@@ -426,9 +429,12 @@ take_engine_updates
     _total_done = done;
     if (downloading) {
         _cur_name = @"";  /* the copy that follows sets the status line again */
-        self.status_label.stringValue = [NSString stringWithFormat:
-            @"Downloading \"%@\" from iCloud — %@ of %@", name,
-            files_format_bytes(dl_done), files_format_bytes(dl_total)];
+        self.status_label.stringValue = dl_done > 0
+            ? [NSString stringWithFormat:
+                @"Downloading \"%@\" from iCloud — %@ of %@", name,
+                files_format_bytes(dl_done), files_format_bytes(dl_total)]
+            : [NSString stringWithFormat:
+                @"Waiting for iCloud to start downloading \"%@\"…", name];
     } else if (name && ![name isEqualToString:_cur_name]) {
         _cur_name = name;
         self.status_label.stringValue = [NSString stringWithFormat:
@@ -465,11 +471,29 @@ stop_graph_timer
 }
 
 /*
+ * elapsed_text — a duration as the final status line shows it.
+ *
+ * Inputs:
+ *   elapsed — seconds, > 0
+ *
+ * Output: "0.35 sec" below a second, "12.3 sec" below a minute, otherwise
+ * "2 min 5 sec".
+ */
+static NSString *
+elapsed_text(CFTimeInterval elapsed)
+{
+    if (elapsed < 1.0)  return [NSString stringWithFormat:@"%.2f sec", elapsed];
+    if (elapsed < 60.0) return [NSString stringWithFormat:@"%.1f sec", elapsed];
+    int64_t s = (int64_t)elapsed;
+    return [NSString stringWithFormat:@"%lld min %lld sec", s / 60, s % 60];
+}
+
+/*
  * finish_with_error: — show the final state after the copy ends: feeds the
  * graph its last interval (taking the engine's last updates), logs the
  * error, sets the title ("Copied"/"Moved", or "Copy Failed"/"Move Failed")
- * and the status line, switches the button to "Close" and shows elapsed
- * time. The status line is set after the last feed, which would otherwise
+ * and the status line (with the elapsed time), switches the button to
+ * "Close". The status line is set after the last feed, which would otherwise
  * put back "Copying …" for a file reported since the previous tick. (The
  * engine logged each digest; a failed validation arrives as err.)
  *
@@ -489,40 +513,28 @@ finish_with_error:(NSError *)err
     self.window.title = all_ok
         ? _ed
         : [NSString stringWithFormat:@"%@ Failed", _noun.capitalizedString];
-    self.status_label.stringValue = all_ok
-        ? [NSString stringWithFormat:@"%@ \"%@\" to %@", _ed,
-           _cur_name.length ? _cur_name : @"files", _dest_name]
-        : [NSString stringWithFormat:@"%@ failed.", _noun.capitalizedString];
 
+    CFTimeInterval elapsed = CFAbsoluteTimeGetCurrent() - _start_time;
+    if (elapsed < 0.001) elapsed = 0.001;
+    self.status_label.stringValue = all_ok
+        ? [NSString stringWithFormat:@"%@ %@ to %@ in %@", _ed,
+           _only_name ? [NSString stringWithFormat:@"\"%@\"", _only_name]
+                      : @"selected files",
+           _dest_name, elapsed_text(elapsed)]
+        : [NSString stringWithFormat:@"%@ failed.", _noun.capitalizedString];
     self.cancel_button.title         = @"Close";
     self.cancel_button.action        = @selector(close_clicked:);
     self.cancel_button.enabled       = YES;
     self.cancel_button.keyEquivalent = @"\r";
 
-    CFTimeInterval elapsed = CFAbsoluteTimeGetCurrent() - _start_time;
-    if (elapsed < 0.001) elapsed = 0.001;
+    double avg_bps = self.speed_graph.average_bps;  /* the graph's average line */
 
-    double avg_bps = (_total_done > 0) ? (double)_total_done / elapsed : 0.0;
-
-    /* A move by rename copies no data, so it has no speed to report. */
-    NSString *rate = _total_done > 0
+    /* A move by rename or a clone copies no data, so it has no speed to report. */
+    NSString *rate = avg_bps > 0.0
         ? [NSString stringWithFormat:@"avg %@, ", files_format_rate(avg_bps)] : @"";
     [self append_log:all_ok
         ? [NSString stringWithFormat:@"✓ Done — %@%.1f sec total", rate, elapsed]
         : [NSString stringWithFormat:@"✗ %@ failed", _noun.capitalizedString]];
-
-    if (elapsed < 1.0) {
-        self.elapsed_label.stringValue =
-            [NSString stringWithFormat:@"Completed in %.2f sec", elapsed];
-    } else if (elapsed < 60.0) {
-        self.elapsed_label.stringValue =
-            [NSString stringWithFormat:@"Completed in %.1f sec", elapsed];
-    } else {
-        int64_t s = (int64_t)elapsed;
-        self.elapsed_label.stringValue =
-            [NSString stringWithFormat:@"Completed in %lld min %lld sec",
-             s / 60, s % 60];
-    }
 }
 
 /*
@@ -597,6 +609,7 @@ completion:(void (^)(NSError *))completion
     FilesCopyProgress *alive = self;
     __weak FilesCopyProgress *weak_self = self;
 
+    _only_name   = srcs.count == 1 ? srcs.firstObject.lastPathComponent : nil;
     _start_time  = CFAbsoluteTimeGetCurrent();
     _graph_time  = _start_time;
     _graph_bytes = 0;
@@ -607,8 +620,8 @@ completion:(void (^)(NSError *))completion
     NSString *src_desc = srcs.count == 1
         ? [NSString stringWithFormat:@"\"%@\"", srcs.firstObject.lastPathComponent]
         : [NSString stringWithFormat:@"%lu files", (unsigned long)srcs.count];
-    [self append_log:[NSString stringWithFormat:@"%@ %@ -> %@%@",
-        _ing, src_desc, _dest_name, hash_validate ? @" (SHA256)" : @""]];
+    [self append_log:[NSString stringWithFormat:@"Starting %@ job %@ -> %@%@",
+        _noun, src_desc, _dest_name, hash_validate ? @" (SHA256)" : @""]];
 
     FileCopyProgressBlock progress = ^(NSString *name, int64_t f_done, int64_t f_total,
                                        int64_t t_done, BOOL downloading)

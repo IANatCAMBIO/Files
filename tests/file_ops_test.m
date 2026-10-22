@@ -170,13 +170,13 @@ main(void)
                   isEqualToString:@"inner"], @"locked folder copy has its contents");
         check(leftovers(b).count == 0, @"no staging items left after a locked folder copy");
 
-        /* Same-volume validation: clones are not hashed. */
+        /* Same-volume validation: a clone is hashed like any other copy. */
         NSURL *plain = [a URLByAppendingPathComponent:@"plain.txt"];
         write_file(plain, @"plain data");
         NSMutableArray *log = [NSMutableArray array];
         err = transfer(@[plain], b, NO, YES, FilesConflictKeepBoth, log);
         check(err == nil, @"validated copy on the same volume");
-        check(log_has(log, @"Not hashing"), @"APFS clone is not hashed");
+        check(log_has(log, @"SHA-256 match"), @"APFS clone is hashed");
 
         /* Keep Both and duplicate in place. */
         err = transfer(@[plain], b, NO, NO, FilesConflictKeepBoth, nil);

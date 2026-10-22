@@ -14,10 +14,21 @@
  * (bytes and seconds summed) so each slot covers twice as much time as
  * before. Long transfers therefore lose time resolution, never history.
  *
+ * The plot starts at the first byte: intervals before any data has moved
+ * are dropped, so a slow start (waiting on iCloud) leaves no blank lead-in
+ * and the average covers only the time data was flowing.
+ *
  * Call add_bytes:seconds: on the main thread once per sampling interval;
  * the view redraws after each.
  */
 @interface FilesSpeedGraph : NSView
+
+/*
+ * average_bps — the average rate the graph's line shows: bytes recorded
+ * over the seconds recorded (so excluding any lead-in before the first
+ * byte). 0 until data has arrived.
+ */
+@property (nonatomic, readonly) double average_bps;
 
 /*
  * add_bytes:seconds: — record one sampling interval.
@@ -25,6 +36,8 @@
  * Inputs:
  *   bytes   — bytes transferred during the interval (≥ 0)
  *   seconds — length of the interval; ignored unless > 0
+ *
+ * Intervals with no bytes are ignored until the first one with data.
  */
 - (void)add_bytes:(int64_t)bytes seconds:(double)seconds;
 

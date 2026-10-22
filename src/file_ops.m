@@ -364,14 +364,17 @@ is_placeholder(NSURL *url)
  * first lets the transfer report it. All downloads are started at once;
  * their bytes come from the progress iCloud publishes for each file (as
  * Finder shows it) and are reported with c->downloading set. A file whose
- * download cannot be started is left to the transfer itself.
+ * download cannot be started is left to the transfer itself. Once they
+ * finish, each downloaded file's size must equal the size it had as a
+ * placeholder, so a truncated download fails the transfer.
  *
  * Inputs:
  *   src — item about to be moved or copied
  *   c   — copy context (progress, log, cancel flag)
  *
  * Output: nil once nothing in src is a placeholder (or nothing more can be
- *         downloaded); NSUserCancelledError on cancel.
+ *         downloaded); NSUserCancelledError on cancel; an error naming the
+ *         file if a download's size does not match.
  */
 static NSError *
 download_placeholders(NSURL *src, copy_ctx_t *c)
@@ -447,9 +450,24 @@ download_placeholders(NSURL *src, copy_ctx_t *c)
     c->downloading = NO;
 
     for (id subscriber in subscribers) [NSProgress removeSubscriber:subscriber];
+    if (!result) {
+        for (NSString *path in sizes) {
+            int64_t expected = sizes[path].longLongValue;
+            struct stat st;
+            int64_t got = lstat(path.fileSystemRepresentation, &st) == 0 ? st.st_size : -1;
+            if (got != expected) {
+                log_line(c, @"✗ \"%@\" downloaded as %@ but iCloud reported %@",
+                         path, got < 0 ? @"nothing" : byte_count(got), byte_count(expected));
+                return described_error([NSString stringWithFormat:
+                    @"\"%@\" did not download completely from iCloud (got %@, expected %@).",
+                    path.lastPathComponent, got < 0 ? @"nothing" : byte_count(got),
+                    byte_count(expected)]);
+            }
+        }
+    }
     if (!result && to_download > 0) {
-        log_line(c, @"✓ Downloaded %@ from iCloud in %.1f sec", byte_count(to_download),
-                 CFAbsoluteTimeGetCurrent() - start);
+        log_line(c, @"✓ Downloaded %@ from iCloud in %.1f sec; sizes match what iCloud reported",
+                 byte_count(to_download), CFAbsoluteTimeGetCurrent() - start);
     }
     return result;
 }
@@ -518,8 +536,8 @@ same_contents(const char *src, const char *copy, copy_ctx_t *c)
     if (!src_ok || !copy_ok) return NO;
 
     BOOL same = memcmp(ds, dc, sizeof ds) == 0;
-    log_line(c, same ? @"✓ SHA-256 match: \"%s\" and \"%s\""
-                     : @"✗ SHA-256 MISMATCH: \"%s\" and \"%s\"", src, copy);
+    log_line(c, same ? @"✓ Hash check passed (SHA-256 match): \"%s\" and \"%s\""
+                     : @"✗ Hash check FAILED (SHA-256 MISMATCH): \"%s\" and \"%s\"", src, copy);
     return same;
 }
 
@@ -532,8 +550,7 @@ same_contents(const char *src, const char *copy, copy_ctx_t *c)
  *
  * With hash validation on, each regular file is SHA-256 compared with its
  * copy as soon as that copy is complete, and the copy stops at the first
- * mismatch. APFS clones are not hashed: a clone shares the original's
- * blocks, so it is identical by construction.
+ * mismatch. APFS clones are hashed like any other copy.
  *
  * Inputs:
  *   what, stage — copyfile event (COPYFILE_RECURSE_FILE / COPYFILE_COPY_DATA,
@@ -582,10 +599,11 @@ copy_status_cb(int what, int stage, copyfile_state_t state,
         copyfile_state_get(state, COPYFILE_STATE_COPIED, &copied);
         report_progress(c, copied);
     } else if (what == COPYFILE_RECURSE_FILE && stage == COPYFILE_FINISH) {
-        /* Clones produce no COPY_DATA events; account for the whole file. */
-        report_progress(c, c->file_total);
         bool cloned = false;
         copyfile_state_get(state, COPYFILE_STATE_WAS_CLONED, &cloned);
+        /* Clones produce no COPY_DATA events and move no data, so they add
+         * nothing to the byte count (like a rename); a real copy is whole. */
+        if (!cloned) report_progress(c, c->file_total);
         if (c->log) {
             struct stat st;
             int64_t written = (lstat(dst, &st) == 0) ? st.st_size : 0;
@@ -595,10 +613,7 @@ copy_status_cb(int what, int stage, copyfile_state_t state,
                             : @"");
         }
         if (c->hash_validate && c->is_regular) {
-            if (cloned) {
-                log_line(c, @"Not hashing \"%s\": an APFS clone is identical to its "
-                            @"original by construction", dst);
-            } else if (!same_contents(src, dst, c)) {
+            if (!same_contents(src, dst, c)) {
                 c->hash_failed = YES;
                 return COPYFILE_QUIT;
             }
@@ -735,18 +750,21 @@ commit_item(NSURL *staged, NSURL *dst, BOOL replace, BOOL hidden, copy_ctx_t *c)
     }
 
     NSURL *old = nil;
-    if (!replace || !item_exists(dst)) {
-        if (renamex_np(staged_p, dst_p, RENAME_EXCL) != 0) return posix_error(errno, dst);
-    } else {
+    BOOL old_hidden = NO;
+    if (replace && item_exists(dst)) {
         struct stat old_st;
-        BOOL old_hidden = lstat(dst_p, &old_st) == 0 && (old_st.st_flags & UF_HIDDEN);
+        old_hidden = lstat(dst_p, &old_st) == 0 && (old_st.st_flags & UF_HIDDEN);
         old = sibling_temp_url(dst, @"old");
         if (rename(dst_p, old.fileSystemRepresentation) != 0) {
             return posix_error(errno, dst);
         }
         log_line(c, @"Renamed the existing \"%@\" aside to \"%@\"", dst.path, old.path);
-        if (rename(staged_p, dst_p) != 0) {
-            int saved_errno = errno;
+    }
+
+    log_line(c, @"Renaming \"%@\" to \"%@\"", staged.path, dst.path);
+    if (renamex_np(staged_p, dst_p, RENAME_EXCL) != 0) {
+        int saved_errno = errno;
+        if (old) {
             if (rename(old.fileSystemRepresentation, dst_p) != 0) {
                 int back_errno = errno;
                 log_line(c, @"✗ Could not rename \"%@\" back to \"%@\"", old.path, dst.path);
@@ -754,10 +772,9 @@ commit_item(NSURL *staged, NSURL *dst, BOOL replace, BOOL hidden, copy_ctx_t *c)
             }
             log_line(c, @"Renamed \"%@\" back to \"%@\"", old.path, dst.path);
             match_hidden_flag(dst, old_hidden, c);
-            return posix_error(saved_errno, dst);
         }
+        return posix_error(saved_errno, dst);
     }
-    log_line(c, @"Renamed \"%@\" to \"%@\"", staged.path, dst.path);
     match_hidden_flag(dst, hidden, c);
     if (lock && (lstat(dst_p, &st) != 0 || lchflags(dst_p, st.st_flags | lock) != 0)) {
         log_line(c, @"✗ Could not lock \"%@\" again as its original is (%s)",
@@ -843,7 +860,8 @@ transfer_item(NSURL *src, NSURL *dst, BOOL replace, BOOL is_cut, copy_ctx_t *c)
                     @"removing the original", src.path, dst.path);
     }
 
-    log_line(c, @"Copying \"%@\" to the hidden staging item \"%@\"", src.path, staged.path);
+    log_line(c, @"Staging \"%@\" as \"%@\" until %@.", src.path, staged.path,
+             c->hash_validate ? @"hash checks complete" : @"the copy completes");
     NSError *err = copy_tree(src, staged, c);
     if (err) return err;
 

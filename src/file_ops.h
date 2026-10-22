@@ -127,7 +127,7 @@ typedef FilesConflictResolution (^FilesConflictBlock)(NSURL *src, NSURL *dst);
  * and renamed into place only when complete, so cancel, errors and failed
  * validation never damage an existing destination or delete the source.
  * Validation hashes each file as soon as it is copied, stopping at the
- * first mismatch; APFS clones are identical by construction and not hashed.
+ * first mismatch; APFS clones are hashed like any other copy.
  * Copying a folder into itself is rejected; pasting into the source's own
  * folder duplicates on copy and is a no-op on cut.
  *
