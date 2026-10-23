@@ -6,6 +6,17 @@ RSRC     = $(CONTENTS)/Resources
 
 CC       = clang
 
+# The interface Files shares with Notes and Tasks (the tool panel, notices
+# and confirmations, colours, ...) lives in the shared_ui repository beside
+# this one and is compiled in from source.
+SHARED_UI_DIR ?= $(CURDIR)/../shared_ui
+# shared_hotkey (Quick Task's system-wide shortcut) needs Carbon, which Files
+# has no use for, so it is left out.
+SHARED_UI_SRCS = $(filter-out %/shared_hotkey.m,$(wildcard $(SHARED_UI_DIR)/src/*.m))
+ifeq ($(SHARED_UI_SRCS),)
+$(error $(SHARED_UI_DIR)/src has no sources: check out shared_ui beside this repository or set SHARED_UI_DIR)
+endif
+
 # The version shown in the About panel; edit VERSION to change it.
 VERSION := $(strip $(shell cat VERSION))
 
@@ -43,11 +54,12 @@ endif
 # would otherwise each need a (void) cast.
 CFLAGS   = -fobjc-arc -O2 -Wall -Wextra -Wno-unused-parameter \
            -Werror=unguarded-availability \
-           -mmacosx-version-min=14.0 -I src -MMD -MP
+           -mmacosx-version-min=14.0 -I src -I $(SHARED_UI_DIR)/src -MMD -MP
 LDFLAGS  = -framework Cocoa -framework CoreServices -framework QuickLookThumbnailing \
            -framework UniformTypeIdentifiers -framework ServiceManagement -framework Quartz
 SRCS     = $(wildcard src/*.m)
-OBJS     = $(patsubst src/%.m,build/%.o,$(SRCS))
+OBJS     = $(patsubst src/%.m,build/%.o,$(SRCS)) \
+           $(patsubst $(SHARED_UI_DIR)/src/%.m,build/%.o,$(SHARED_UI_SRCS))
 DEPS     = $(OBJS:.o=.d)
 
 .PHONY: all run install clean test
@@ -95,6 +107,9 @@ $(MACOS)/$(APP): $(OBJS)
 # Objects also depend on the Makefile so flag changes (e.g. the deployment
 # target) rebuild everything.
 build/%.o: src/%.m Makefile | build
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+build/%.o: $(SHARED_UI_DIR)/src/%.m Makefile | build
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 -include $(DEPS)

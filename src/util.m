@@ -1,5 +1,6 @@
 #import "util.h"
-#import "tool_panel.h"
+#import "shared_ui.h"
+#import "shared_tool_panel.h"
 #import "git_info.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <fcntl.h>
@@ -23,6 +24,7 @@ NSString * const files_pref_folder_sizes         = @"files.folder_sizes";
 NSString * const files_pref_show_used_space      = @"files.show_used_space";
 NSString * const files_pref_human_readable_sizes = @"files.human_readable_sizes";
 NSString * const files_pref_full_path_title      = @"files.full_path_title";
+NSString * const files_pref_hide_system_mounts   = @"files.mounts.hide_system";
 
 /*
  * files_register_defaults — registers non-NO preference defaults.
@@ -37,6 +39,8 @@ files_register_defaults(void)
         files_pref_show_bookmarks:         @YES,
         files_pref_human_readable_sizes:   @YES,
         files_pref_full_path_title:        @YES,
+        files_pref_hidden_columns:         @[@"perms", @"comment"],
+        files_pref_hide_system_mounts:     @YES,
     }];
 }
 
@@ -490,12 +494,7 @@ files_app_icon(void)
 void
 files_show_error(NSString *title, NSError *err, NSWindow *window)
 {
-    [FilesToolPanel show_message:title
-                         message:err.localizedDescription ?: @"Unknown error"
-                          symbol:@"exclamationmark.triangle.fill"
-                         buttons:@[@"OK"]
-                            over:window
-                         handler:nil];
+    shared_ui_notice(window, title, err.localizedDescription ?: @"Unknown error", nil);
 }
 
 @implementation FilesCancelToken {

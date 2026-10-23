@@ -11,6 +11,7 @@ static NSString * const col_options     = @"options";
 static NSString * const col_unmountable = @"unmountable";
 static NSString * const col_total       = @"total";
 static NSString * const col_free        = @"free";
+static NSString * const col_description = @"description";
 
 /* ── FilesMountRecord ─────────────────────────────────────────────────────── */
 
@@ -22,6 +23,8 @@ static NSString * const col_free        = @"free";
 @property (nonatomic, copy)   NSString *mount_point;
 @property (nonatomic, copy)   NSString *fs_type;
 @property (nonatomic, copy)   NSString *options;
+@property (nonatomic, copy)   NSString *mount_description; /* what it is, what macOS uses it for */
+@property (nonatomic)         BOOL      is_system;  /* mounted by macOS, not by the user */
 @property (nonatomic)         BOOL      can_unmount;
 @property (nonatomic, strong) NSURL    *volume_url; /* nil for pseudo mounts */
 @property (nonatomic)         int64_t   total_bytes;
@@ -62,6 +65,58 @@ format_mount_flags(uint32_t flags)
 }
 
 /*
+ * mount_description — a short explanation of what a system mount is and
+ * what macOS uses it for: the volumes macOS mounts by default are matched
+ * by mount point, other system mounts by path pattern or filesystem type.
+ *
+ * Inputs:
+ *   mount_point — where it is mounted
+ *   fs_type     — filesystem type name (f_fstypename)
+ *
+ * Output: description string, never nil.
+ */
+static NSString *
+mount_description(NSString *mount_point, NSString *fs_type)
+{
+    static NSDictionary<NSString *, NSString *> *by_mount_point;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        by_mount_point = @{
+            @"/":                              @"System volume: the sealed, read-only copy of macOS itself",
+            @"/System/Volumes/Data":           @"Data volume: your files, apps and settings (merged into / for you)",
+            @"/System/Volumes/VM":             @"Virtual memory: swap files macOS uses when RAM is full",
+            @"/System/Volumes/Preboot":        @"Boot support: per-volume boot files used at startup and FileVault unlock",
+            @"/System/Volumes/Update":         @"Software Update: working space for downloading and staging macOS updates",
+            @"/System/Volumes/Update/mnt1":    @"Update snapshot: the system volume as the updater sees it while installing",
+            @"/System/Volumes/xarts":          @"Secure Enclave anti-replay storage (xART) for secure boot and data protection",
+            @"/System/Volumes/iSCPreboot":     @"Boot data for the iBoot System Container, read early at startup (Apple silicon)",
+            @"/System/Volumes/Hardware":       @"Hardware support data for this Mac's own hardware (Apple silicon)",
+            @"/dev":                           @"Device files: /dev/null, terminals and disks, created by the kernel",
+            @"/System/Volumes/Data/home":      @"Automounter for /home: network home folders, normally empty",
+        };
+    });
+    NSString *known = by_mount_point[mount_point];
+    if (known) return known;
+
+    if ([mount_point containsString:@"/AppTranslocation/"])
+        return @"Gatekeeper: a read-only view of a downloaded app so it runs from a random location";
+    if ([mount_point containsString:@"cryptex"] || [mount_point hasPrefix:@"/System/Cryptexes/"])
+        return @"Cryptex: a signed system component (such as Safari) kept apart from the system volume";
+    if ([mount_point hasPrefix:@"/Library/Developer/CoreSimulator/Volumes/"])
+        return @"Xcode: a simulator runtime disk image";
+    if ([fs_type isEqualToString:@"devfs"])   return @"Device files created by the kernel";
+    if ([fs_type isEqualToString:@"autofs"])  return @"Automounter: mounts network folders on demand";
+    if ([fs_type isEqualToString:@"nullfs"])  return @"A second view of another folder, with no copy of its data";
+    if ([fs_type isEqualToString:@"smbfs"] || [fs_type isEqualToString:@"nfs"] ||
+        [fs_type isEqualToString:@"afpfs"] || [fs_type isEqualToString:@"webdav"])
+        return @"Network share";
+    if ([fs_type isEqualToString:@"cd9660"] || [fs_type isEqualToString:@"udf"])
+        return @"Optical disc or disk image";
+    if ([mount_point hasPrefix:@"/Volumes/"]) return @"Hidden volume mounted for the system";
+    return @"";
+}
+
+/*
  * make_col — allocates and configures one NSTableColumn.
  *
  * Inputs:
@@ -88,7 +143,9 @@ make_col(NSString *ident, NSString *title, CGFloat width, BOOL resizable)
 
 @interface FilesMountsPanel () <NSTableViewDataSource, NSTableViewDelegate>
 @property (nonatomic, strong) NSTableView                        *table;
-@property (nonatomic, strong) NSMutableArray<FilesMountRecord *> *records;
+@property (nonatomic, strong) NSMutableArray<FilesMountRecord *> *records;      /* the rows shown */
+@property (nonatomic, copy)   NSArray<FilesMountRecord *>        *all_records;  /* everything mounted */
+@property (nonatomic, strong) NSButton                           *hide_system_check;
 @property (nonatomic, strong) NSButton                           *unmount_btn;
 @property (nonatomic, assign) NSUInteger                          load_generation;
 @end
@@ -188,6 +245,7 @@ build_table
     [self.table addTableColumn:make_col(col_total,       @"Total",        80, YES)];
     [self.table addTableColumn:make_col(col_free,        @"Free",         80, YES)];
     [self.table addTableColumn:make_col(col_unmountable, @"Unmountable",  72, YES)];
+    [self.table addTableColumn:make_col(col_description, @"Description", 300, YES)];
 
     /* Sort descriptors — clicking a header sorts that column ascending/descending. */
     [self.table tableColumnWithIdentifier:col_device].sortDescriptorPrototype =
@@ -204,6 +262,9 @@ build_table
         [NSSortDescriptor sortDescriptorWithKey:@"free_bytes"  ascending:YES];
     [self.table tableColumnWithIdentifier:col_unmountable].sortDescriptorPrototype =
         [NSSortDescriptor sortDescriptorWithKey:@"can_unmount" ascending:YES];
+    [self.table tableColumnWithIdentifier:col_description].sortDescriptorPrototype =
+        [NSSortDescriptor sortDescriptorWithKey:@"mount_description" ascending:YES
+                                       selector:@selector(localizedCompare:)];
 
     scroll.documentView = self.table;
     [content addSubview:scroll];
@@ -211,9 +272,10 @@ build_table
 
 /*
  * build_toolbar_row — adds Unmount and Refresh buttons at the bottom-right and
- * the low-free-space legend at the bottom-left.
+ * the Hide System Volumes checkbox at the bottom-left.
  *
- * Output: none; sets self.unmount_btn (initially disabled).
+ * Output: none; sets self.unmount_btn (initially disabled) and
+ *         self.hide_system_check.
  */
 - (void)
 build_toolbar_row
@@ -238,28 +300,16 @@ build_toolbar_row
     self.unmount_btn.enabled       = NO;
     [content addSubview:self.unmount_btn];
 
-    /* Legend: coloured swatch + label on the left. */
-    NSView *swatch = [[NSView alloc] initWithFrame:NSMakeRect(10, 11, 12, 12)];
-    swatch.wantsLayer              = YES;
-    swatch.layer.backgroundColor   = [NSColor colorWithRed:1.0
-                                                     green:0.3
-                                                      blue:0.2
-                                                     alpha:0.30].CGColor;
-    swatch.layer.borderColor       = [NSColor colorWithRed:0.8
-                                                     green:0.2
-                                                      blue:0.1
-                                                     alpha:0.50].CGColor;
-    swatch.layer.borderWidth       = 1.0;
-    swatch.layer.cornerRadius      = 2.0;
-    swatch.autoresizingMask        = NSViewMaxXMargin;
-    [content addSubview:swatch];
-
-    NSTextField *legend = [NSTextField labelWithString:@"< 10% free space"];
-    legend.font          = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
-    legend.textColor     = NSColor.secondaryLabelColor;
-    legend.frame         = NSMakeRect(27, 8, 140, 16);
-    legend.autoresizingMask = NSViewMaxXMargin;
-    [content addSubview:legend];
+    /* Checkbox on the left: list only the volumes the user mounted. */
+    self.hide_system_check = [NSButton checkboxWithTitle:@"Hide System Volumes"
+                                                  target:self
+                                                  action:@selector(hide_system_toggled:)];
+    self.hide_system_check.state = [NSUserDefaults.standardUserDefaults
+        boolForKey:files_pref_hide_system_mounts] ? NSControlStateValueOn : NSControlStateValueOff;
+    self.hide_system_check.font  = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
+    self.hide_system_check.frame = NSMakeRect(10, 6, 190, 18);
+    self.hide_system_check.autoresizingMask = NSViewMaxXMargin;
+    [content addSubview:self.hide_system_check];
 }
 
 /* ── Data ────────────────────────────────────────────────────────────────── */
@@ -296,6 +346,11 @@ read_mounts(void)
         rec.mount_point = [NSString stringWithUTF8String:buf[i].f_mntonname];
         rec.fs_type     = [NSString stringWithUTF8String:buf[i].f_fstypename];
         rec.options     = format_mount_flags((uint32_t)buf[i].f_flags);
+        /* A volume Finder does not show, and the startup volume, are the
+         * system's; everything else was mounted by the user. */
+        rec.is_system   = (buf[i].f_flags & MNT_DONTBROWSE) || [rec.mount_point isEqualToString:@"/"];
+        rec.mount_description = rec.is_system
+            ? mount_description(rec.mount_point, rec.fs_type) : @"";
 
         NSDictionary<NSURLResourceKey, id> *cap = nil;
         if (!(buf[i].f_flags & MNT_DONTBROWSE)) {
@@ -341,6 +396,7 @@ cell_text_for_col:(NSString *)ident
     if ([ident isEqualToString:col_free])
         return rec.total_bytes > 0 ? files_format_bytes(rec.free_bytes) : @"—";
     if ([ident isEqualToString:col_unmountable]) return rec.can_unmount ? @"Yes" : @"No";
+    if ([ident isEqualToString:col_description]) return rec.mount_description;
     return @"";
 }
 
@@ -379,11 +435,50 @@ fit_columns
 }
 
 /*
+ * show_records — fills the table from all_records: only the volumes the
+ * user mounted while Hide System Volumes is checked, else every mount;
+ * the Description column, which only system mounts have, is hidden along
+ * with them. Applies the table's sort descriptors, reloads, refits the columns and
+ * clears the selection (which disables Unmount via
+ * tableViewSelectionDidChange:).
+ */
+- (void)
+show_records
+{
+    BOOL hide_system = self.hide_system_check.state == NSControlStateValueOn;
+    self.records = [NSMutableArray array];
+    for (FilesMountRecord *rec in self.all_records) {
+        if (!(hide_system && rec.is_system)) [self.records addObject:rec];
+    }
+    [self.records sortUsingDescriptors:self.table.sortDescriptors];
+    [self.table tableColumnWithIdentifier:col_description].hidden = hide_system;
+    [self.table reloadData];
+    [self fit_columns];
+    [self.table deselectAll:nil];
+}
+
+/*
+ * hide_system_toggled: — the Hide System Volumes checkbox: remembers the
+ * choice, shows or hides the system volumes and resizes the window to the
+ * rows now listed.
+ *
+ * Inputs:
+ *   sender — the checkbox (unused)
+ */
+- (void)
+hide_system_toggled:(id)sender
+{
+    [NSUserDefaults.standardUserDefaults
+        setBool:self.hide_system_check.state == NSControlStateValueOn
+         forKey:files_pref_hide_system_mounts];
+    [self show_records];
+    [self resize_to_fit];
+}
+
+/*
  * reload_table_then: — the one reload path: reads the mount records on a
- * background queue (read_mounts), then on the main queue applies the
- * table's current sort descriptors, reloads the table, refits the columns
- * and clears the selection (which disables Unmount via
- * tableViewSelectionDidChange:). A newer reload supersedes an older one.
+ * background queue (read_mounts), then on the main queue shows them
+ * (show_records). A newer reload supersedes an older one.
  *
  * Inputs:
  *   done — called on the main queue once the table shows the new records;
@@ -399,11 +494,8 @@ reload_table_then:(void (^)(void))done
         dispatch_async(dispatch_get_main_queue(), ^{
             FilesMountsPanel *s = ws;
             if (!s || generation != s.load_generation) return;
-            s.records = [records mutableCopy];
-            [s.records sortUsingDescriptors:s.table.sortDescriptors];
-            [s.table reloadData];
-            [s fit_columns];
-            [s.table deselectAll:nil];
+            s.all_records = records;
+            [s show_records];
             if (done) done();
         });
     });
@@ -420,11 +512,13 @@ reload_table_then:(void (^)(void))done
 resize_to_fit
 {
     CGFloat col_total = 0.0;
+    NSUInteger shown  = 0;
     for (NSTableColumn *col in self.table.tableColumns) {
+        if (col.hidden) continue;
         col_total += col.width;
+        shown++;
     }
-    CGFloat spacing    = self.table.intercellSpacing.width
-                         * (CGFloat)(self.table.tableColumns.count - 1);
+    CGFloat spacing    = self.table.intercellSpacing.width * (CGFloat)(shown - 1);
     CGFloat content_w  = col_total + spacing + 2.0; /* 1pt each side for borders */
 
     CGFloat max_w      = NSScreen.mainScreen.visibleFrame.size.width  * 0.9;
@@ -598,31 +692,6 @@ sortDescriptorsDidChange:(NSArray<NSSortDescriptor *> *)old
 {
     [self.records sortUsingDescriptors:tv.sortDescriptors];
     [tv reloadData];
-}
-
-/*
- * tableView:didAddRowView:forRow: — tints rows with less than 10% free space.
- *
- * Inputs:
- *   tv      — table view
- *   rowView — the row view just added
- *   row     — row index
- *
- * Output: none.
- */
-- (void)
-tableView:(NSTableView *)tv
-didAddRowView:(NSTableRowView *)rowView
-   forRow:(NSInteger)row
-{
-    if (row < 0 || row >= (NSInteger)self.records.count) return;
-    FilesMountRecord *rec = self.records[row];
-    BOOL low = rec.total_bytes > 0 &&
-               (double)rec.free_bytes / (double)rec.total_bytes < 0.10;
-    /* nil restores the default alternating-row background. */
-    rowView.backgroundColor = low
-        ? [NSColor colorWithRed:1.0 green:0.3 blue:0.2 alpha:0.10]
-        : nil;
 }
 
 /*

@@ -1,5 +1,6 @@
 #import "copy_progress.h"
-#import "tool_panel.h"
+#import "shared_ui.h"
+#import "shared_tool_panel.h"
 #import "file_ops.h"
 #import "speed_graph.h"
 #import "util.h"
@@ -676,16 +677,17 @@ make_conflict_block
                 dispatch_semaphore_signal(sem);
                 return;
             }
-            [FilesToolPanel show_message:[NSString stringWithFormat:
-                                             @"\"%@\" already exists in this location.",
-                                             dst.lastPathComponent]
-                                 message:[NSString stringWithFormat:
-                                             @"Keep both files, replace the existing one, "
-                                             @"or stop the %@?", p->_noun]
-                                  symbol:@"doc.on.doc"
-                                 buttons:@[@"Keep Both", @"Replace", @"Cancel"]
-                                    over:p.window
-                                 handler:^(NSInteger resp) {
+            [SharedToolPanel show_message:[NSString stringWithFormat:
+                                              @"\"%@\" already exists in this location.",
+                                              dst.lastPathComponent]
+                                  message:[NSString stringWithFormat:
+                                              @"Keep both files, replace the existing one, "
+                                              @"or stop the %@?", p->_noun]
+                                   symbol:@"doc.on.doc"
+                                  buttons:@[@"Keep Both", @"Replace", @"Cancel"]
+                              destructive:1
+                                     over:p.window
+                                  handler:^(NSInteger resp) {
                 if (resp == 0)      result = FilesConflictKeepBoth;
                 else if (resp == 1) result = FilesConflictOverwrite;
                 else                result = FilesConflictCancel;

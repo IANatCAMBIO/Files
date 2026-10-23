@@ -14,7 +14,13 @@ xcode-select --install
 
 ## Dependencies
 
-No third-party libraries. All dependencies are Apple system frameworks:
+No third-party libraries, but one sibling repository: the `shared_ui`
+interface module Files shares with Notes and Tasks (the tool panel and the
+notices and confirmations built on it, colours, symbols). Check it out beside
+this one (`../shared_ui`) or set `SHARED_UI_DIR`; the Makefile compiles its
+`src/*.m` into `build/` (all but `shared_hotkey.m`, which needs Carbon) and
+puts `shared_ui/src` on the include path. The system dependencies are Apple
+frameworks:
 
 | Framework       | Purpose                                      |
 |-----------------|----------------------------------------------|
@@ -154,9 +160,6 @@ src/
 ├── archive.h/.m            — zip / tar.gz / tar create and extract (system
 │                             tools, passwords via a pty, staged commits)
 │                             and the Create Archive / password windows
-├── tool_panel.h/.m         — small floating tool window (blue header,
-│                             controls, Cancel / action buttons), styled
-│                             like the Tasks reminders window
 ├── default_viewer.h/.m     — takes over from Finder as default file viewer
 │                             (NSFileViewer, Finder settings) and restores
 │                             the recorded originals

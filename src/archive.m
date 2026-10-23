@@ -1,5 +1,6 @@
 #import "archive.h"
-#import "tool_panel.h"
+#import "shared_ui.h"
+#import "shared_tool_panel.h"
 #import "util.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -567,7 +568,7 @@ static const CGFloat text_pt = 11.0;   /* every control, as in the other tool wi
  * actions, and the validation of what was entered.
  */
 @interface FilesArchiveDialog : NSObject
-@property (nonatomic, strong) FilesToolPanel    *panel;
+@property (nonatomic, strong) SharedToolPanel   *panel;
 @property (nonatomic, strong) NSPopUpButton     *format_popup;
 @property (nonatomic, strong) NSTextField       *name_field;
 @property (nonatomic, strong) NSButton          *password_check;
@@ -682,14 +683,16 @@ init_for:(NSArray<NSURL *> *)items
     NSString *what = items.count == 1
         ? [NSString stringWithFormat:@"\"%@\"", items.firstObject.lastPathComponent]
         : [NSString stringWithFormat:@"%lu items", (unsigned long)items.count];
-    self.panel = [FilesToolPanel
+    self.panel = [SharedToolPanel
         panel_with_title:@"Create Archive"
-              hero_title:[NSString stringWithFormat:@"Archive %@", what]
+                headline:[NSString stringWithFormat:@"Archive %@", what]
                 subtitle:[NSString stringWithFormat:@"In \"%@\"", self.folder.lastPathComponent]
                   symbol:@"archivebox"
                  content:grid
-           primary_title:@"Create"
-         primary_handler:^NSString *{
+                 buttons:@[@"Create", @"Cancel"]
+             destructive:-1
+                 handler:^NSString *(NSInteger index) {
+        if (index != 0) return nil;
         NSString *problem = [self validation_error];
         if (problem) return problem;
         handler([self final_name], self.format,
@@ -885,16 +888,18 @@ prompt_password_for:(NSURL *)archive
     row.spacing = 8;
     row.alignment = NSLayoutAttributeCenterY;
 
-    FilesToolPanel *panel = [FilesToolPanel
+    SharedToolPanel *panel = [SharedToolPanel
         panel_with_title:@"Password"
-              hero_title:[NSString stringWithFormat:@"\"%@\" is password protected",
+                headline:[NSString stringWithFormat:@"\"%@\" is password protected",
                           archive.lastPathComponent]
                 subtitle:incorrect ? @"The password was incorrect. Try again."
                                    : @"Enter the password to extract it."
                   symbol:@"lock.fill"
                  content:row
-           primary_title:@"Extract"
-         primary_handler:^NSString *{
+                 buttons:@[@"Extract", @"Cancel"]
+             destructive:-1
+                 handler:^NSString *(NSInteger index) {
+        if (index != 0) return nil;
         if (field.stringValue.length == 0) return @"Enter a password.";
         handler(field.stringValue);
         return nil;

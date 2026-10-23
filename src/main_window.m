@@ -1,5 +1,6 @@
 #import "main_window.h"
-#import "tool_panel.h"
+#import "shared_ui.h"
+#import "shared_tool_panel.h"
 #import "bookmarks_bar.h"
 #import "browser_view.h"
 #import "info_panel.h"
@@ -17,6 +18,10 @@ static NSString * const tb_open_terminal = @"files.open-terminal";
 static NSString * const tb_dual_pane     = @"files.dual-pane";
 static NSString * const tb_sidebar       = @"files.sidebar";
 static NSString * const tb_new_item      = @"files.new-item";
+
+/* Size of a first-launch window, frame including the title bar and toolbar. */
+static const CGFloat default_win_w   = 700.0;
+static const CGFloat default_win_h   = 478.0;
 
 static const CGFloat bookmarks_bar_h = 28.0;
 static const CGFloat status_h        = 20.0;
@@ -102,20 +107,27 @@ init_with_url:(NSURL *)url
     NSWindowStyleMask style =
         NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
         NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable;
-    NSWindow *win = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 940, 620)
+    NSWindow *win = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, default_win_w, default_win_h)
                                                 styleMask:style
                                                   backing:NSBackingStoreBuffered
                                                     defer:NO];
     win.title        = @"Files";
     win.minSize      = NSMakeSize(700, 450);
     win.toolbarStyle = NSWindowToolbarStyleExpanded;  /* titlebar above toolbar */
-    if (![win setFrameUsingName:@"FilesMainWindow"]) [win center];
+    BOOL has_saved_frame = [win setFrameUsingName:@"FilesMainWindow"];
     win.frameAutosaveName = @"FilesMainWindow";
 
     self = [super initWithWindow:win];
     if (!self) return nil;
 
     [self build_toolbar];
+    if (!has_saved_frame) {
+        /* The toolbar grows the frame; set the frame itself once it is there. */
+        NSRect f = self.window.frame;
+        f.size = NSMakeSize(default_win_w, default_win_h);
+        [self.window setFrame:f display:NO];
+        [self.window center];
+    }
     [self build_layout];
     [self.window addObserver:self forKeyPath:@"firstResponder"
                      options:0 context:first_responder_ctx];
@@ -932,8 +944,9 @@ toolbar_identifiers(void)
 {
     return @[tb_back_forward, tb_up, tb_reload,
              NSToolbarSpaceItemIdentifier,
-             tb_hidden_files, tb_open_terminal, tb_dual_pane, tb_sidebar,
+             tb_hidden_files, tb_dual_pane, tb_sidebar,
              NSToolbarSpaceItemIdentifier,
+             tb_open_terminal,
              tb_new_item,
              NSToolbarFlexibleSpaceItemIdentifier,
              tb_search];
@@ -1519,14 +1532,11 @@ show_pending_unmount:(NSString *)name items:(NSArray<NSString *> *)items
         [lines addObject:[NSString stringWithFormat:@"…and %lu more",
                           (unsigned long)(items.count - pending_list_max)]];
     }
-    [FilesToolPanel show_message:[NSString stringWithFormat:@"Unmounting \"%@\" is pending", name]
-                         message:[NSString stringWithFormat:
-                                     @"It will be unmounted automatically once these are closed:"
-                                      "\n\n%@", [lines componentsJoinedByString:@"\n"]]
-                          symbol:@"eject"
-                         buttons:@[@"OK"]
-                            over:self.window
-                         handler:nil];
+    shared_ui_notice(self.window,
+                     [NSString stringWithFormat:@"Unmounting \"%@\" is pending", name],
+                     [NSString stringWithFormat:
+                         @"It will be unmounted automatically once these are closed:"
+                          "\n\n%@", [lines componentsJoinedByString:@"\n"]], nil);
 }
 
 /*

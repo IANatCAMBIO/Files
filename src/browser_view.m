@@ -1,5 +1,6 @@
 #import "browser_view.h"
-#import "tool_panel.h"
+#import "shared_ui.h"
+#import "shared_tool_panel.h"
 #import "archive.h"
 #import "file_ops.h"
 #import "git_info.h"
@@ -2138,13 +2139,9 @@ apply_auto_fit_measured:(NSDictionary<NSString *, NSNumber *> *)measured
 empty_trash_action:(id)sender
 {
     __weak FilesBrowserView *ws = self;
-    [FilesToolPanel show_message:@"Permanently delete the items in the Trash?"
-                         message:@"You cannot undo this action."
-                          symbol:@"trash"
-                         buttons:@[@"Empty Trash", @"Cancel"]
-                            over:self.window
-                         handler:^(NSInteger index) {
-        if (index != 0) return;
+    shared_ui_confirm(self.window, @"Permanently delete the items in the Trash?",
+                      @"You cannot undo this action.", @"Empty Trash", YES, ^(BOOL confirmed) {
+        if (!confirmed) return;
         [FilesFileOps empty_trash:^(NSArray<NSURL *> *failed, NSArray<NSString *> *reasons) {
             FilesBrowserView *s = ws;
             if (!s) return;
@@ -2160,16 +2157,17 @@ empty_trash_action:(id)sender
                                         @"developers' apps and items owned by root. "
                                         @"Empty with Finder hands the rest of the Trash "
                                         @"to Finder, which may ask for your password."];
-            [FilesToolPanel show_message:headline
-                                 message:body
-                                  symbol:@"exclamationmark.triangle.fill"
-                                 buttons:@[@"Empty with Finder", @"Cancel"]
-                                    over:s.window
-                                 handler:^(NSInteger r) {
+            [SharedToolPanel show_message:headline
+                                  message:body
+                                   symbol:@"exclamationmark.triangle.fill"
+                                  buttons:@[@"Empty with Finder", @"Cancel"]
+                              destructive:-1
+                                     over:s.window
+                                  handler:^(NSInteger r) {
                 if (r == 0) [ws empty_trash_with_finder];
             }];
         }];
-    }];
+    });
 }
 
 /*
@@ -2185,12 +2183,7 @@ empty_trash_with_finder
         if (!s) return;
         [s reload_directory];
         if (!error) return;
-        [FilesToolPanel show_message:@"The Trash was not emptied"
-                             message:error
-                              symbol:@"exclamationmark.triangle.fill"
-                             buttons:@[@"OK"]
-                                over:s.window
-                             handler:nil];
+        shared_ui_notice(s.window, @"The Trash was not emptied", error, nil);
     }];
 }
 
@@ -3037,13 +3030,9 @@ delete_permanently:(id)sender
            (unsigned long)sel.count];
 
     __weak FilesBrowserView *ws = self;
-    [FilesToolPanel show_message:headline
-                         message:@"This cannot be undone."
-                          symbol:@"trash"
-                         buttons:@[@"Delete", @"Cancel"]
-                            over:self.window
-                         handler:^(NSInteger r) {
-        if (r != 0) return;
+    shared_ui_confirm(self.window, headline, @"This cannot be undone.", @"Delete", YES,
+                      ^(BOOL confirmed) {
+        if (!confirmed) return;
         FilesBrowserView *s = ws;
         if (!s) return;
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -3059,16 +3048,12 @@ delete_permanently:(id)sender
                 if (!t) return;
                 [t reload_directory];
                 if (failed.count > 0) {
-                    [FilesToolPanel show_message:@"Some items could not be deleted"
-                                         message:[failed componentsJoinedByString:@"\n"]
-                                          symbol:@"exclamationmark.triangle.fill"
-                                         buttons:@[@"OK"]
-                                            over:t.window
-                                         handler:nil];
+                    shared_ui_notice(t.window, @"Some items could not be deleted",
+                                     [failed componentsJoinedByString:@"\n"], nil);
                 }
             });
         });
-    }];
+    });
 }
 
 /*

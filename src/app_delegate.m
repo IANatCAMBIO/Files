@@ -1,5 +1,6 @@
 #import "app_delegate.h"
-#import "tool_panel.h"
+#import "shared_ui.h"
+#import "shared_tool_panel.h"
 #import "main_window.h"
 #import "browser_view.h"
 #import "volume_manager.h"
@@ -229,13 +230,14 @@ sync_keep_running_reporting:(BOOL)report
 - (void)
 ask_login_item_approval
 {
-    [FilesToolPanel show_message:@"Allow Files to open at login"
-                         message:@"Files is turned off in Login Items. Turn it on in System "
-                                  "Settings ▸ General ▸ Login Items so Files starts at login."
-                          symbol:@"power"
-                         buttons:@[@"Open Login Items Settings", @"Not Now"]
-                            over:[self front_window].window
-                         handler:^(NSInteger index) {
+    [SharedToolPanel show_message:@"Allow Files to open at login"
+                          message:@"Files is turned off in Login Items. Turn it on in System "
+                                   "Settings ▸ General ▸ Login Items so Files starts at login."
+                           symbol:@"power"
+                          buttons:@[@"Open Login Items Settings", @"Not Now"]
+                      destructive:-1
+                             over:[self front_window].window
+                          handler:^(NSInteger index) {
         if (index == 0) [SMAppService openSystemSettingsLoginItems];
     }];
 }
@@ -257,12 +259,13 @@ prompt_full_disk_access:(NSString *)reason
          "1. Click Open System Settings (Privacy & Security ▸ Full Disk Access).\n"
          "2. Turn on Files, or click + and add:\n    %@\n"
          "3. When asked, choose Quit & Reopen.", reason, app_path];
-    [FilesToolPanel show_message:@"Files needs Full Disk Access"
-                         message:message
-                          symbol:@"lock.shield"
-                         buttons:@[@"Open System Settings", @"Not Now"]
-                            over:[self front_window].window
-                         handler:^(NSInteger index) {
+    [SharedToolPanel show_message:@"Files needs Full Disk Access"
+                          message:message
+                           symbol:@"lock.shield"
+                          buttons:@[@"Open System Settings", @"Not Now"]
+                      destructive:-1
+                             over:[self front_window].window
+                          handler:^(NSInteger index) {
         if (index != 0) return;
         [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:
             @"x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"]];

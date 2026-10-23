@@ -1,5 +1,6 @@
 #import "default_viewer.h"
-#import "tool_panel.h"
+#import "shared_ui.h"
+#import "shared_tool_panel.h"
 #import "util.h"
 #include <pwd.h>
 #include <signal.h>
@@ -963,14 +964,10 @@ files_default_viewer_choose(BOOL files, NSWindow *window, void (^finished)(void)
                     files_show_error(@"Files could not write the change log", err, window);
                 }
                 if (log.failures > 0) {
-                    [FilesToolPanel show_message:files ? @"Some settings could not be changed"
-                                                       : @"Some settings could not be restored"
-                                         message:@"The log lists which ones (marked ✗). Files will "
-                                                  "try again the next time it opens."
-                                          symbol:@"exclamationmark.triangle.fill"
-                                         buttons:@[@"OK"]
-                                            over:window
-                                         handler:nil];
+                    shared_ui_notice(window, files ? @"Some settings could not be changed"
+                                                   : @"Some settings could not be restored",
+                                     @"The log lists which ones (marked ✗). Files will "
+                                      "try again the next time it opens.", nil);
                 }
                 if (finished) finished();
             });
@@ -981,21 +978,18 @@ files_default_viewer_choose(BOOL files, NSWindow *window, void (^finished)(void)
         return;
     }
 
-    [FilesToolPanel show_message:@"Restore Finder as the default file browser?"
-                         message:@"\"Show in Finder\" requests will go to Finder again, `open` in "
+    shared_ui_confirm(window, @"Restore Finder as the default file browser?",
+                      @"\"Show in Finder\" requests will go to Finder again, `open` in "
                                   "Terminal loses Files' shell function, and the settings Files "
                                   "changed (desktop icons, Finder's Quit menu item, Archive Utility "
                                   "revealing its results) go back "
                                   "to what they were before Files. Do this before uninstalling "
-                                  "Files. A log of every change opens when it is done."
-                          symbol:@"questionmark.circle"
-                         buttons:@[@"Restore Finder", @"Cancel"]
-                            over:window
-                         handler:^(NSInteger resp) {
-        if (resp == 0) {
+                                  "Files. A log of every change opens when it is done.",
+                      @"Restore Finder", NO, ^(BOOL confirmed) {
+        if (confirmed) {
             apply();
         } else if (finished) {
             finished();
         }
-    }];
+    });
 }

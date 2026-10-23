@@ -23,9 +23,11 @@ extern NSString * const files_pref_folder_sizes;         /* Size column totals f
 extern NSString * const files_pref_show_used_space;      /* status bar shows used, not free, space */
 extern NSString * const files_pref_human_readable_sizes; /* format sizes as KB/MB/… (default on) */
 extern NSString * const files_pref_full_path_title;      /* window title shows the full path, not the folder name (default on) */
+extern NSString * const files_pref_hide_system_mounts;   /* All Mounts lists only volumes the user mounted (default on) */
 
 /* NSUserDefaults key (array of column identifiers): file-list columns the
- * user has hidden from the column-header menu. Absent = all shown. */
+ * user has hidden from the column-header menu. Default: Permissions and
+ * Comment hidden. */
 extern NSString * const files_pref_hidden_columns;
 
 /*

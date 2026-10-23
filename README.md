@@ -130,6 +130,8 @@ A minimalist macOS file manager written in Objective-C + AppKit.
 
 - macOS 14.0 (Sonoma) or later
 - Xcode Command Line Tools (`xcode-select --install`)
+- The `shared_ui` repository checked out beside this one (`../shared_ui`); its
+  tool panel and helpers are compiled in
 
 ## Installation
 
