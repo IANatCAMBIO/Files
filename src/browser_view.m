@@ -20,6 +20,7 @@ static NSString * const col_size     = @"size";
 static NSString * const col_kind     = @"kind";
 static NSString * const col_perms    = @"perms";
 static NSString * const col_modified = @"modified";
+static NSString * const col_created  = @"created";
 static NSString * const col_comment  = @"comment";
 static NSString * const col_git      = @"git";   /* shown only inside a repo */
 
@@ -39,6 +40,7 @@ static const column_spec_t column_specs[] = {
     { @"kind",     @"Kind",          120,  80 },
     { @"perms",    @"Permissions",    90,  70 },
     { @"modified", @"Date Modified", 160, 120 },
+    { @"created",  @"Date Created",  160, 120 },
     { @"comment",  @"Comment",       200, 100 },
     { @"git",      @"Git",            60,  40 },
 };
@@ -91,6 +93,7 @@ listing_keys(void)
         NSURLTypeIdentifierKey,
         NSURLLocalizedTypeDescriptionKey,
         NSURLContentModificationDateKey,
+        NSURLCreationDateKey,
         NSURLFileSecurityKey,
         NSURLIsHiddenKey,
     ];
@@ -128,6 +131,7 @@ sort_resource_key(NSString *col_id)
     if ([col_id isEqualToString:col_size])     return NSURLFileSizeKey;
     if ([col_id isEqualToString:col_kind])     return NSURLLocalizedTypeDescriptionKey;
     if ([col_id isEqualToString:col_modified]) return NSURLContentModificationDateKey;
+    if ([col_id isEqualToString:col_created])  return NSURLCreationDateKey;
     return NSURLNameKey;
 }
 
@@ -413,6 +417,11 @@ cell_text(NSString *col_id, NSURL *url, const cell_context_t *ctx)
     } else if ([col_id isEqualToString:col_modified]) {
         NSDate *date = nil;
         [url getResourceValue:&date forKey:NSURLContentModificationDateKey error:nil];
+        return files_format_date(date, NSDateFormatterShortStyle);
+
+    } else if ([col_id isEqualToString:col_created]) {
+        NSDate *date = nil;
+        [url getResourceValue:&date forKey:NSURLCreationDateKey error:nil];
         return files_format_date(date, NSDateFormatterShortStyle);
 
     } else if ([col_id isEqualToString:col_comment]) {

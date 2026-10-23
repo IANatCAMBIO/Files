@@ -6,8 +6,8 @@ A minimalist macOS file manager written in Objective-C + AppKit.
 
 ## Features
 
-- List-view browser with Name, Size, Kind, Permissions and Date Modified
-  columns; click a header to sort (folders first, Finder-style name order),
+- List-view browser with Name, Size, Kind, Permissions, Date Modified and
+  Date Created (hidden by default) columns; click a header to sort (folders first, Finder-style name order),
   right-click the headers to show or hide columns (every list follows)
 - Auto-fit columns (View ▸ Auto-Fit Columns, on by default) and optional
   double-height rows with larger icons (View ▸ Large Rows)

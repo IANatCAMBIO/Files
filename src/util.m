@@ -39,7 +39,7 @@ files_register_defaults(void)
         files_pref_show_bookmarks:         @YES,
         files_pref_human_readable_sizes:   @YES,
         files_pref_full_path_title:        @YES,
-        files_pref_hidden_columns:         @[@"perms", @"comment"],
+        files_pref_hidden_columns:         @[@"perms", @"created", @"comment"],
         files_pref_hide_system_mounts:     @YES,
     }];
 }
