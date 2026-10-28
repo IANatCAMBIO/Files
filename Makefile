@@ -28,8 +28,8 @@ VERSION := $(strip $(shell cat VERSION))
 #   make CODESIGN_IDENTITY="…"   (list: security find-identity -v -p codesigning)
 #
 # Only goals that build the bundle look the identity up: `make clean` and
-# `make test` do not sign anything, so they skip the keychain query.
-SIGNING_GOALS := $(if $(MAKECMDGOALS),$(filter-out clean test,$(MAKECMDGOALS)),all)
+# the test targets other than test-build do not sign anything, so they skip the keychain query.
+SIGNING_GOALS := $(if $(MAKECMDGOALS),$(filter-out clean test test-unit test-features test-ui,$(MAKECMDGOALS)),all)
 ifneq ($(SIGNING_GOALS),)
 ifeq ($(origin CODESIGN_IDENTITY),undefined)
 CODESIGN_IDENTITY := $(or $(shell security find-identity -v -p codesigning 2>/dev/null \
@@ -62,7 +62,7 @@ OBJS     = $(patsubst src/%.m,build/%.o,$(SRCS)) \
            $(patsubst $(SHARED_UI_DIR)/src/%.m,build/%.o,$(SHARED_UI_SRCS))
 DEPS     = $(OBJS:.o=.d)
 
-.PHONY: all run install clean test
+.PHONY: all run install clean test test-build test-unit test-features test-ui
 
 all: $(BUNDLE)
 
@@ -127,7 +127,7 @@ run: all
 # If the installed Files is running — with Keep Files running it stays up
 # with no windows open — it is stopped first (SIGTERM; Files has nothing to
 # save on quit) and reopened afterwards, so the new build is what runs.
-# Install stops if it has not exited after 5 s.
+# It is killed (SIGKILL) if it has not exited after 5 s.
 INSTALL_DIR   = $(HOME)/Applications
 INSTALLED_BIN = $(INSTALL_DIR)/$(BUNDLE)/Contents/MacOS/$(APP)
 
@@ -140,11 +140,8 @@ install: all
 	    for i in 1 2 3 4 5 6 7 8 9 10; do \
 	        pgrep -qxf "$(INSTALLED_BIN)" || break; sleep 0.5; \
 	    done; \
-	    if pgrep -qxf "$(INSTALLED_BIN)"; then \
-	        echo "Files did not quit; quit it (⌘Q) and run make install again" >&2; \
-	        exit 1; \
-	    fi; \
-	    echo "Quit the running Files"; \
+	    pkill -KILL -xf "$(INSTALLED_BIN)" 2>/dev/null; \
+	    echo "Stopped the running Files"; \
 	fi; \
 	rm -rf "$(INSTALL_DIR)/$(BUNDLE)" && \
 	cp -R $(BUNDLE) "$(INSTALL_DIR)/$(BUNDLE)" && \
@@ -160,8 +157,39 @@ APP_OBJS  = $(filter-out build/main.o,$(OBJS))
 build/%_test: tests/%_test.m $(APP_OBJS) Makefile | build
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< $(APP_OBJS)
 
-test: $(TEST_BINS)
+test-unit: $(TEST_BINS)
 	@for t in $(TEST_BINS); do echo "== $$t"; ./$$t || exit 1; done
+	@echo "test-unit: ok"
+
+# ── Release checks ───────────────────────────────────────────────────────
+# Not dependencies of all/run/install: they run only when asked for (a
+# release). `make test` runs all four; each is also a target of its own.
+test: test-build test-unit test-features test-ui
+	@echo "all release checks passed"
+
+# test-build: a from-scratch build has zero warnings, and the bundle is
+# sound (valid Info.plist, executable present, signature verifies).
+BUILD_LOG = build/build.log
+
+test-build:
+	@$(MAKE) clean
+	@mkdir -p build
+	@$(MAKE) all > $(BUILD_LOG) 2>&1 || { cat $(BUILD_LOG); exit 1; }
+	@! grep -q 'warning:' $(BUILD_LOG) || { grep 'warning:' $(BUILD_LOG); echo "test-build: warnings"; exit 1; }
+	@plutil -lint $(CONTENTS)/Info.plist >/dev/null
+	@test -x $(MACOS)/$(APP)
+	@codesign --verify --strict $(BUNDLE)
+	@echo "test-build: ok"
+
+# test-features: each user-visible feature driven through the app's own
+# code on seeded scratch data (tests/features/). None written yet.
+test-features:
+	@echo "test-features: no feature tests yet (tests/features/)"
+
+# test-ui: the real windows built in-process (title bar, toolbar,
+# light/dark snapshots). None written yet (tests/ui/ui_check.m).
+test-ui:
+	@echo "test-ui: no interface check yet (tests/ui/ui_check.m)"
 
 clean:
 	@rm -rf build $(BUNDLE)

@@ -51,11 +51,15 @@ macOS) to render the app icon; see [App icon](#app-icon).
 |-----------------|-----------------|----------------------------------------|
 | Build (default) | `make`          | Compiles and assembles `Files.app`     |
 | Run             | `make run`      | Builds then opens the app with `open`  |
-| Install         | `make install`  | Replaces `~/Applications/Files.app` with the new build |
-| Test            | `make test`     | Builds and runs the copy-engine and archive tests (`tests/`) |
+| Install         | `make install`  | Replaces `~/Applications/Files.app` with the new build; a running copy is sent SIGTERM, killed after 5 s, and reopened |
+| Test            | `make test`     | Release checks: `test-build`, `test-unit`, `test-features`, `test-ui` |
+| Test (build)    | `make test-build` | From-scratch build with zero warnings; valid `Info.plist`, executable and signature |
+| Test (unit)     | `make test-unit` | Builds and runs the copy-engine and archive tests (`tests/`) |
+| Test (features) | `make test-features` | Feature tests (`tests/features/`); none written yet |
+| Test (UI)       | `make test-ui`  | Interface check (`tests/ui/ui_check.m`); none written yet |
 | Clean           | `make clean`    | Removes `build/` and `Files.app`       |
 
-`make test` links each `tests/*_test.m` against the app's objects (all but
+The tests are never run by a normal build. `make test-unit` links each `tests/*_test.m` against the app's objects (all but
 `main.o`) and runs it. `file_ops_test` exercises the copy engine on a scratch
 folder in `$TMPDIR` and on a small HFS+ disk image it creates and mounts
 (`hdiutil`): locked files and folders, Keep Both, Replace, duplicate in
