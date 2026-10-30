@@ -25,6 +25,15 @@ static NSString * const col_comment  = @"comment";
 static NSString * const col_git      = @"git";   /* shown only inside a repo */
 
 /*
+ * column_sort_t — how far a column can be sorted by.
+ */
+typedef enum {
+    column_sort_none = 0,   /* nothing of its own to compare: header clicks do nothing */
+    column_sort_click,      /* sortable by a header click, but never a default order */
+    column_sort_default,    /* sortable, and offered as a default order */
+} column_sort_t;
+
+/*
  * column_spec_t — static description of one table column.
  */
 typedef struct {
@@ -32,17 +41,20 @@ typedef struct {
     NSString * __unsafe_unretained title;   /* header title without sort arrow */
     CGFloat width;
     CGFloat min_width;
+    column_sort_t sort;
 } column_spec_t;
 
 static const column_spec_t column_specs[] = {
-    { @"name",     @"Name",          260, 120 },
-    { @"size",     @"Size",           80,  50 },
-    { @"kind",     @"Kind",          120,  80 },
-    { @"perms",    @"Permissions",    90,  70 },
-    { @"modified", @"Date Modified", 160, 120 },
-    { @"created",  @"Date Created",  160, 120 },
-    { @"comment",  @"Comment",       200, 100 },
-    { @"git",      @"Git",            60,  40 },
+    { @"name",     @"Name",          260, 120, column_sort_default },
+    { @"size",     @"Size",           80,  50, column_sort_default },
+    { @"kind",     @"Kind",          120,  80, column_sort_default },
+    { @"perms",    @"Permissions",    90,  70, column_sort_none    },
+    { @"modified", @"Date Modified", 160, 120, column_sort_default },
+    { @"created",  @"Date Created",  160, 120, column_sort_default },
+    { @"comment",  @"Comment",       200, 100, column_sort_none    },
+    /* Git sorts tracked items first, but only inside a repository, so it
+     * is no use as the order every window starts in. */
+    { @"git",      @"Git",            60,  40, column_sort_click   },
 };
 #define COLUMN_COUNT (sizeof(column_specs) / sizeof(column_specs[0]))
 
@@ -133,6 +145,74 @@ sort_resource_key(NSString *col_id)
     if ([col_id isEqualToString:col_modified]) return NSURLContentModificationDateKey;
     if ([col_id isEqualToString:col_created])  return NSURLCreationDateKey;
     return NSURLNameKey;
+}
+
+/*
+ * column_sort_mode — how far a column can be sorted by.
+ *
+ * Inputs:
+ *   col_id — column identifier
+ *
+ * Output: the column's column_sort_t; column_sort_none for an identifier
+ *         that is not a column.
+ */
+static column_sort_t
+column_sort_mode(NSString *col_id)
+{
+    for (size_t i = 0; i < COLUMN_COUNT; i++) {
+        if ([column_specs[i].id isEqualToString:col_id]) return column_specs[i].sort;
+    }
+    return column_sort_none;
+}
+
+/*
+ * files_column_sorts — whether the list can be sorted by a column.
+ * Inputs/output are documented in browser_view.h.
+ */
+BOOL
+files_column_sorts(NSString *col_id)
+{
+    return column_sort_mode(col_id) != column_sort_none;
+}
+
+/*
+ * files_sort_columns — the columns a default sort order can name.
+ * Inputs/output are documented in browser_view.h.
+ */
+NSArray<NSArray<NSString *> *> *
+files_sort_columns(void)
+{
+    NSMutableArray<NSArray<NSString *> *> *columns = [NSMutableArray array];
+    for (size_t i = 0; i < COLUMN_COUNT; i++) {
+        if (column_specs[i].sort == column_sort_default) {
+            [columns addObject:@[column_specs[i].title, column_specs[i].id]];
+        }
+    }
+    return columns;
+}
+
+/*
+ * files_sort_default_column — the column a new file list sorts by.
+ * Inputs/output are documented in browser_view.h.
+ */
+NSString *
+files_sort_default_column(void)
+{
+    NSString *stored = [NSUserDefaults.standardUserDefaults stringForKey:files_pref_sort_column];
+    return (column_sort_mode(stored) == column_sort_default) ? stored : col_modified;
+}
+
+/*
+ * files_sort_order_titles — the two directions a column sorts in.
+ * Inputs/output are documented in browser_view.h.
+ */
+NSArray<NSString *> *
+files_sort_order_titles(NSString *col_id)
+{
+    if ([col_id isEqualToString:col_size]) return @[@"Smallest first", @"Largest first"];
+    if ([col_id isEqualToString:col_modified] ||
+        [col_id isEqualToString:col_created]) return @[@"Oldest first", @"Newest first"];
+    return @[@"A → Z", @"Z → A"];
 }
 
 /*
@@ -229,26 +309,29 @@ list_folder(NSURL *dir, NSError **err)
 
 /*
  * listing_rows — the rows to show for a set of items: hidden items dropped
- * (unless show_hidden), then sorted folders-first and by the sort column
- * using prefetched values (Finder-style natural order for names and
- * kinds). The Git column sorts tracked items first (ascending), then by
- * name. Pure and thread-safe, so listings are prepared off the main thread.
+ * (unless show_hidden), then sorted by the sort column using prefetched
+ * values (Finder-style natural order for names and kinds), with folders
+ * kept ahead of files when folders_first is set. The Git column sorts
+ * tracked items first (ascending), then by name. Pure and thread-safe, so
+ * listings are prepared off the main thread.
  *
  * Inputs:
- *   items       — listed URLs with listing_keys() prefetched
- *   sort_key    — column identifier to sort by
- *   ascending   — sort direction
- *   tracked     — git-tracked names (used only when sorting by Git); may be nil
- *   sizes       — folder sizes by path (Show Folder Sizes), used when
- *                 sorting by Size; may be nil
- *   show_hidden — YES to keep items whose NSURLIsHiddenKey is set
+ *   items         — listed URLs with listing_keys() prefetched
+ *   sort_key      — column identifier to sort by
+ *   ascending     — sort direction
+ *   folders_first — YES to put every folder before every file, as Finder
+ *                   does; NO to sort folders among the files
+ *   tracked       — git-tracked names (used only when sorting by Git); may be nil
+ *   sizes         — folder sizes by path (Show Folder Sizes), used when
+ *                   sorting by Size; may be nil
+ *   show_hidden   — YES to keep items whose NSURLIsHiddenKey is set
  *
  * Output: new sorted, filtered array.
  */
 static NSArray<NSURL *> *
 listing_rows(NSArray<NSURL *> *items, NSString *sort_key, BOOL ascending,
-             NSSet<NSString *> *tracked, NSDictionary<NSString *, NSNumber *> *sizes,
-             BOOL show_hidden)
+             BOOL folders_first, NSSet<NSString *> *tracked,
+             NSDictionary<NSString *, NSNumber *> *sizes, BOOL show_hidden)
 {
     NSMutableArray<NSURL *> *rows = [NSMutableArray arrayWithCapacity:items.count];
     for (NSURL *url in items) {
@@ -263,11 +346,13 @@ listing_rows(NSArray<NSURL *> *items, NSString *sort_key, BOOL ascending,
     NSURLResourceKey key = sort_resource_key(sort_key);
     if (![sort_key isEqualToString:col_git]) tracked = nil;
     [rows sortUsingComparator:^NSComparisonResult(NSURL *a, NSURL *b) {
-        NSNumber *a_dir = nil, *b_dir = nil;
-        [a getResourceValue:&a_dir forKey:NSURLIsDirectoryKey error:nil];
-        [b getResourceValue:&b_dir forKey:NSURLIsDirectoryKey error:nil];
-        if (a_dir.boolValue != b_dir.boolValue) {
-            return a_dir.boolValue ? NSOrderedAscending : NSOrderedDescending;
+        if (folders_first) {
+            NSNumber *a_dir = nil, *b_dir = nil;
+            [a getResourceValue:&a_dir forKey:NSURLIsDirectoryKey error:nil];
+            [b getResourceValue:&b_dir forKey:NSURLIsDirectoryKey error:nil];
+            if (a_dir.boolValue != b_dir.boolValue) {
+                return a_dir.boolValue ? NSOrderedAscending : NSOrderedDescending;
+            }
         }
         if (tracked) {
             BOOL a_git = [tracked containsObject:a.lastPathComponent];
@@ -604,6 +689,14 @@ mouseDown:(NSEvent *)event
 @property (nonatomic, copy)   NSString                *sort_key;
 @property (nonatomic, assign) BOOL                     sort_ascending;
 
+/* The default sort order (files_pref_sort_column,
+ * files_pref_sort_ascending) as last applied to this browser. Kept so
+ * apply_view_prefs can tell a changed default, which re-sorts the list,
+ * from any other preference change, which must leave a header click's
+ * order alone. */
+@property (nonatomic, copy)   NSString                *default_sort_key;
+@property (nonatomic, assign) BOOL                     default_sort_ascending;
+
 /* Spotlight search state */
 @property (nonatomic, strong) NSMetadataQuery         *search_query;
 @property (nonatomic, assign) BOOL                     search_active;
@@ -615,6 +708,7 @@ mouseDown:(NSEvent *)event
 @property (nonatomic, assign) BOOL                     show_hidden;
 @property (nonatomic, assign) BOOL                     show_folder_sizes;
 @property (nonatomic, assign) BOOL                     human_readable_sizes;
+@property (nonatomic, assign) BOOL                     folders_first;
 
 /* NSUserDefaultsDidChangeNotification observer (main queue). */
 @property (nonatomic, strong) id                       defaults_observer;
@@ -693,9 +787,12 @@ init_with_frame:(NSRect)frame
     self.forward_stack  = [NSMutableArray array];
     self.all_items      = @[];
     self.filtered_items = @[];
-    self.sort_key       = col_name;
-    self.sort_ascending = YES;
+    self.sort_key       = files_sort_default_column();
+    self.sort_ascending = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_sort_ascending];
+    self.default_sort_key       = self.sort_key;
+    self.default_sort_ascending = self.sort_ascending;
     self.show_hidden    = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_show_hidden];
+    self.folders_first  = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_folders_first];
     self.folder_sizes   = [NSMutableDictionary dictionary];
     self.sizes_pending  = [NSMutableSet set];
     self.size_queue     = dispatch_queue_create("files.browser.folder_sizes",
@@ -1105,13 +1202,19 @@ dealloc
 /*
  * apply_view_prefs — applies files_pref_large_rows (normal rows: 20pt,
  * 16pt icons; large rows: twice both), files_pref_auto_fit,
- * files_pref_show_hidden, files_pref_folder_sizes and
- * files_pref_hidden_columns. Cheap when
+ * files_pref_show_hidden, files_pref_folder_sizes,
+ * files_pref_hidden_columns, files_pref_folders_first and the default
+ * sort order (files_pref_sort_column, files_pref_sort_ascending). Cheap when
  * nothing changed, so it runs on every defaults change; otherwise the
  * table is redrawn for a new row height, the rows are re-filtered for
  * Show Hidden Files, the columns are fitted when auto-fit is on and it
  * was just turned on, the icon size changed or a column appeared or went,
  * and the Finder comments are read when the Comment column appears.
+ *
+ * A changed default sort order re-sorts this list, so choosing one in
+ * Preferences is visible in the windows already open. Only a change to
+ * the default does: an order the user set by clicking a column header
+ * survives every other preference change.
  */
 - (void)
 apply_view_prefs
@@ -1133,6 +1236,22 @@ apply_view_prefs
     if (hidden != self.show_hidden) {
         self.show_hidden = hidden;
         [self resort_revealing:NO];
+    }
+    BOOL folders = [ud boolForKey:files_pref_folders_first];
+    if (folders != self.folders_first) {
+        self.folders_first = folders;
+        [self resort_revealing:YES];
+    }
+    NSString *sort_col = files_sort_default_column();
+    BOOL sort_asc      = [ud boolForKey:files_pref_sort_ascending];
+    if (![sort_col isEqualToString:self.default_sort_key] ||
+        sort_asc != self.default_sort_ascending) {
+        self.default_sort_key       = sort_col;
+        self.default_sort_ascending = sort_asc;
+        self.sort_key               = sort_col;
+        self.sort_ascending         = sort_asc;
+        [self resort_revealing:YES];
+        [self update_sort_indicators];
     }
     if (sizes != self.show_folder_sizes) {
         self.show_folder_sizes = sizes;
@@ -1542,8 +1661,8 @@ shows_hidden_items
 - (NSString *)
 row_order
 {
-    return [NSString stringWithFormat:@"%@/%d/%d", self.sort_key, self.sort_ascending,
-            [self shows_hidden_items]];
+    return [NSString stringWithFormat:@"%@/%d/%d/%d", self.sort_key, self.sort_ascending,
+            self.folders_first, [self shows_hidden_items]];
 }
 
 /*
@@ -1573,6 +1692,7 @@ reload_directory
     NSString *order       = [self row_order];
     NSString *sort_key    = self.sort_key;
     BOOL ascending        = self.sort_ascending;
+    BOOL folders_first    = self.folders_first;
     BOOL show_hidden      = [self shows_hidden_items];
     BOOL same_dir         = [self.git_cache_dir isEqualToString:dir.path];
     NSString *cache_stamp = same_dir ? self.git_cache_stamp : nil;
@@ -1595,7 +1715,7 @@ reload_directory
         BOOL git_current    = cache_tracked && stamp && [stamp isEqualToString:cache_stamp];
         NSSet<NSString *> *tracked = work_tree ? (cache_tracked ?: [NSSet set]) : nil;
         NSArray<NSURL *> *rows = listing_rows(items ?: @[], sort_key, ascending,
-                                              tracked, sizes, show_hidden);
+                                              folders_first, tracked, sizes, show_hidden);
         NSString *error = items ? nil
             : (err.localizedFailureReason ?: err.localizedDescription ?: @"It cannot be read.");
         NSDictionary<NSString *, NSImage *> *icons = item_icons(items ?: @[], icon_sz);
@@ -1817,7 +1937,8 @@ refresh
 resort_revealing:(BOOL)reveal
 {
     [self show_rows:listing_rows(self.all_items, self.sort_key, self.sort_ascending,
-                                 self.git_tracked, self.folder_sizes, [self shows_hidden_items])
+                                 self.folders_first, self.git_tracked, self.folder_sizes,
+                                 [self shows_hidden_items])
           selecting:[self selected_paths] reveal:reveal];
 }
 
@@ -1848,7 +1969,7 @@ show_listing:(NSArray<NSURL *> *)items rows:(NSArray<NSURL *> *)rows
 
     self.all_items = items;
     if (!rows) {
-        rows = listing_rows(items, self.sort_key, self.sort_ascending,
+        rows = listing_rows(items, self.sort_key, self.sort_ascending, self.folders_first,
                             self.git_tracked, self.folder_sizes, [self shows_hidden_items]);
     }
     [self show_rows:rows selecting:want reveal:reveal];
@@ -1981,6 +2102,7 @@ search_results_updated:(NSNotification *)note
     NSString *order       = [self row_order];
     NSString *sort_key    = self.sort_key;
     BOOL ascending        = self.sort_ascending;
+    BOOL folders_first    = self.folders_first;
     BOOL show_hidden      = [self shows_hidden_items];
     NSDictionary<NSString *, NSNumber *> *sizes = [self.folder_sizes copy];
     CGFloat icon_sz       = [self icon_size];
@@ -1996,7 +2118,8 @@ search_results_updated:(NSNotification *)note
             [url resourceValuesForKeys:listing_keys() error:nil];  /* caches them */
             [items addObject:url];
         }
-        NSArray<NSURL *> *rows = listing_rows(items, sort_key, ascending, nil, sizes, show_hidden);
+        NSArray<NSURL *> *rows = listing_rows(items, sort_key, ascending, folders_first,
+                                              nil, sizes, show_hidden);
         NSDictionary<NSString *, NSImage *> *icons = item_icons(items, icon_sz);
         NSDictionary<NSString *, NSString *> *comments = want_comments ? item_comments(items) : nil;
         cell_context_t ctx = { show_sizes, sizes, nil, comments };
@@ -2384,9 +2507,15 @@ viewForTableColumn:(NSTableColumn *)col
 /*
  * tableView:didClickTableColumn: — handles column header clicks for sorting.
  * Clicking the active sort column flips ascending/descending; clicking another
- * column sorts by it ascending. Works for folder listings and search results.
+ * column sorts by it ascending. A click on Permissions or Comment does
+ * nothing, as neither holds a value the list can be put in order by.
+ * Works for folder listings and search results.
  * The selection follows its items to their new rows, and the first of them
  * is scrolled into view, as in Finder.
+ *
+ * This re-sorts this window only and leaves the default sort order
+ * (Preferences ▸ View ▸ Default sort) as it is, so a one-off look at a
+ * folder in another order does not change where every later window starts.
  *
  * Inputs:
  *   tv  — the table view
@@ -2397,6 +2526,7 @@ tableView:(NSTableView *)tv
 didClickTableColumn:(NSTableColumn *)col
 {
     NSString *new_key = col.identifier;
+    if (!files_column_sorts(new_key)) return;
     if ([new_key isEqualToString:self.sort_key]) {
         self.sort_ascending = !self.sort_ascending;
     } else {

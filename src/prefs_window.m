@@ -1,4 +1,5 @@
 #import "prefs_window.h"
+#import "browser_view.h"
 #import "default_viewer.h"
 #import "util.h"
 
@@ -13,7 +14,8 @@ NSArray<NSArray<NSArray<NSString *> *> *> *
 files_view_pref_groups(void)
 {
     return @[
-        @[ @[@"Show Bookmarks Bar", files_pref_show_bookmarks],
+        @[ @[@"Always Show Folders First", files_pref_folders_first],
+           @[@"Show Bookmarks Bar", files_pref_show_bookmarks],
            @[@"Auto-Fit Columns", files_pref_auto_fit],
            @[@"Large Rows",       files_pref_large_rows],
            @[@"Show Folder Sizes", files_pref_folder_sizes],
@@ -65,6 +67,11 @@ note_label(NSString *text)
 @property (nonatomic, strong) NSTextField                *browser_label;  /* current choice */
 @property (nonatomic, strong) NSButton                   *files_button;
 @property (nonatomic, strong) NSButton                   *finder_button;
+/* Default sort: the column to sort by (item representedObject = column
+ * identifier) and its direction (item 0 ascending, item 1 descending),
+ * whose titles are re-worded for the chosen column. */
+@property (nonatomic, strong) NSPopUpButton              *sort_column_popup;
+@property (nonatomic, strong) NSPopUpButton              *sort_order_popup;
 @end
 
 @implementation FilesPrefsWindow
@@ -145,28 +152,82 @@ pref_box:(NSString *)title key:(NSString *)key
 }
 
 /*
- * build_content — lays out the View and Integration sections in a
- * vertical stack and sizes the window to fit.
+ * sort_row — the Default sort controls: a label, the column to sort new
+ * file lists by, and its direction. The column menu is built from
+ * files_sort_columns(), so Preferences offers exactly the columns the
+ * listing can sort by; the direction menu is filled in by refresh, which
+ * words it for the chosen column.
+ *
+ * Output: the row, with sort_column_popup and sort_order_popup recorded.
+ */
+- (NSView *)
+sort_row
+{
+    self.sort_column_popup = [NSPopUpButton buttonWithTitle:@""
+                                                     target:self
+                                                     action:@selector(choose_sort:)];
+    for (NSArray<NSString *> *column in files_sort_columns()) {
+        [self.sort_column_popup addItemWithTitle:column[0]];
+        self.sort_column_popup.lastItem.representedObject = column[1];
+    }
+    self.sort_order_popup = [NSPopUpButton buttonWithTitle:@""
+                                                    target:self
+                                                    action:@selector(choose_sort:)];
+
+    NSStackView *row = [NSStackView stackViewWithViews:@[
+        [NSTextField labelWithString:@"Default sort:"],
+        self.sort_column_popup,
+        self.sort_order_popup,
+    ]];
+    row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    row.spacing     = 6.0;
+    return row;
+}
+
+/*
+ * build_content — lays out the View, Move/Copy and Integration sections in
+ * a vertical stack and sizes the window to fit. Each section heading gets
+ * the same space above and below it, so a new section needs no extra
+ * spacing rules.
  */
 - (void)
 build_content
 {
-    NSMutableArray<NSView *> *rows = [NSMutableArray array];
-    NSTextField *view_heading        = section_label(@"View");
-    NSTextField *integration_heading = section_label(@"Integration");
+    NSMutableArray<NSView *> *rows        = [NSMutableArray array];
+    NSMutableArray<NSView *> *headings    = [NSMutableArray array];
+    NSArray<NSArray<NSArray<NSString *> *> *> *groups = files_view_pref_groups();
 
+    /* View: the order new lists start in, the View menu's first group of
+     * preferences, and Show Hashes in Get Info. */
+    NSTextField *view_heading = section_label(@"View");
     [rows addObject:view_heading];
-    for (NSArray<NSArray<NSString *> *> *group in files_view_pref_groups()) {
+    [headings addObject:view_heading];
+    NSView *sort_row = [self sort_row];
+    [rows addObject:sort_row];
+    for (NSArray<NSString *> *item in groups.firstObject) {
+        [rows addObject:[self pref_box:item[0] key:item[1]]];
+    }
+    [rows addObject:[self pref_box:@"Show Hashes in Get Info (SHA-256 / MD5) *"
+                               key:files_pref_show_hashes]];
+    [rows addObject:note_label(@"* When Show Hashes is enabled, Get Info will have to read the "
+                                "entire file to compute the hash. For large files, this may "
+                                "take a while.")];
+
+    /* Move/Copy: the View menu's remaining preference groups, which all
+     * govern how transfers run. */
+    NSTextField *transfer_heading = section_label(@"Move/Copy");
+    [rows addObject:transfer_heading];
+    [headings addObject:transfer_heading];
+    for (NSArray<NSArray<NSString *> *> *group in groups) {
+        if (group == groups.firstObject) continue;
         for (NSArray<NSString *> *item in group) {
             [rows addObject:[self pref_box:item[0] key:item[1]]];
         }
     }
-    [rows addObject:[self pref_box:@"Show Hashes in Get Info (SHA-256 / MD5)"
-                               key:files_pref_show_hashes]];
-    [rows addObject:note_label(@"Get Info reads the whole file to compute them, which takes "
-                                "a while for large files.")];
 
+    NSTextField *integration_heading = section_label(@"Integration");
     [rows addObject:integration_heading];
+    [headings addObject:integration_heading];
     self.browser_label = [NSTextField labelWithString:@""];
     self.files_button  = [NSButton buttonWithTitle:@"Set default file browser to Files"
                                             target:self
@@ -197,11 +258,13 @@ build_content
     stack.alignment   = NSLayoutAttributeLeading;
     stack.spacing     = 6.0;
     stack.edgeInsets  = NSEdgeInsetsMake(16, 20, 20, 20);
-    /* Space under each heading, and between the sections. */
-    [stack setCustomSpacing:8.0 afterView:view_heading];
-    [stack setCustomSpacing:8.0 afterView:integration_heading];
-    [stack setCustomSpacing:18.0
-                  afterView:rows[[rows indexOfObject:integration_heading] - 1]];
+    /* Space under the Default sort row, and around every section heading. */
+    [stack setCustomSpacing:10.0 afterView:sort_row];
+    for (NSView *heading in headings) {
+        [stack setCustomSpacing:8.0 afterView:heading];
+        NSUInteger index = [rows indexOfObject:heading];
+        if (index > 0) [stack setCustomSpacing:18.0 afterView:rows[index - 1]];
+    }
 
     self.window.contentView = stack;
     [self.window setContentSize:stack.fittingSize];
@@ -220,6 +283,43 @@ refresh
     }
     self.browser_label.stringValue = [NSString stringWithFormat:@"Default file browser: %@",
                                       [ud boolForKey:files_pref_default_viewer] ? @"Files" : @"Finder"];
+
+    NSString *sort_column = files_sort_default_column();
+    for (NSMenuItem *item in self.sort_column_popup.itemArray) {
+        if ([item.representedObject isEqual:sort_column]) [self.sort_column_popup selectItem:item];
+    }
+    /* The direction menu is worded for the column, so it is refilled
+     * whenever the column changes (which clears the selection, set below). */
+    NSArray<NSString *> *titles = files_sort_order_titles(sort_column);
+    if (![self.sort_order_popup.itemTitles isEqualToArray:titles]) {
+        [self.sort_order_popup removeAllItems];
+        [self.sort_order_popup addItemsWithTitles:titles];
+    }
+    [self.sort_order_popup selectItemAtIndex:[ud boolForKey:files_pref_sort_ascending] ? 0 : 1];
+}
+
+/*
+ * choose_sort: — writes both Default sort menus to their preferences;
+ * every browser applies the new order (apply_view_prefs), and refresh
+ * re-words the direction menu for the column just chosen.
+ *
+ * Both menus are read before either preference is written: writing the
+ * first one brings refresh straight back, which re-selects the direction
+ * menu from the preference still to be written, so reading it afterwards
+ * would write back the direction the user just replaced.
+ *
+ * Inputs:
+ *   sender — sort_column_popup or sort_order_popup (unused: both are read)
+ */
+- (void)
+choose_sort:(NSPopUpButton *)sender
+{
+    NSString *column = self.sort_column_popup.selectedItem.representedObject;
+    BOOL ascending   = self.sort_order_popup.indexOfSelectedItem == 0;
+
+    NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
+    [ud setObject:column    forKey:files_pref_sort_column];
+    [ud setBool:ascending   forKey:files_pref_sort_ascending];
 }
 
 /*

@@ -24,16 +24,26 @@ extern NSString * const files_pref_show_used_space;      /* status bar shows use
 extern NSString * const files_pref_human_readable_sizes; /* format sizes as KB/MB/… (default on) */
 extern NSString * const files_pref_full_path_title;      /* window title shows the full path, not the folder name (default on) */
 extern NSString * const files_pref_hide_system_mounts;   /* All Mounts lists only volumes the user mounted (default on) */
+extern NSString * const files_pref_folders_first;        /* folders sort before files, whatever the sort column (default on) */
 
 /* NSUserDefaults key (array of column identifiers): file-list columns the
  * user has hidden from the column-header menu. Default: Permissions and
  * Comment hidden. */
 extern NSString * const files_pref_hidden_columns;
 
+/* NSUserDefaults keys for the order a file list starts in (Preferences
+ * ▸ View ▸ Default sort): the identifier of the column to sort by and
+ * its direction. Neither has a registered default: unset means Date
+ * Modified (files_sort_default_column, which also owns which columns are
+ * valid) and newest first. Clicking a column header re-sorts that window
+ * alone, leaving the default untouched. */
+extern NSString * const files_pref_sort_column;
+extern NSString * const files_pref_sort_ascending;
+
 /*
  * files_register_defaults — registers the default value of every preference
- * whose default is not NO (currently: Auto-Fit Columns and Files as the
- * default file viewer on). A value the user
+ * whose default is not NO (currently: Auto-Fit Columns, Files as the
+ * default file viewer and Always Show Folders First on). A value the user
  * has set is never overridden. Call once at launch, before anything reads
  * preferences.
  */

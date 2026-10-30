@@ -10,9 +10,12 @@ CC       = clang
 # and confirmations, colours, ...) lives in the shared_ui repository beside
 # this one and is compiled in from source.
 SHARED_UI_DIR ?= $(CURDIR)/../shared_ui
-# shared_hotkey (Quick Task's system-wide shortcut) needs Carbon, which Files
-# has no use for, so it is left out.
-SHARED_UI_SRCS = $(filter-out %/shared_hotkey.m,$(wildcard $(SHARED_UI_DIR)/src/*.m))
+# Modules for parts of the interface Files does not have are left out, along
+# with the frameworks they would pull in: shared_hotkey (Quick Task's
+# system-wide shortcut) needs Carbon, and the day planner and the Calendar
+# it reads need EventKit.
+SHARED_UI_SRCS = $(filter-out %/shared_hotkey.m %/shared_day_planner.m %/shared_calendar.m,\
+                   $(wildcard $(SHARED_UI_DIR)/src/*.m))
 ifeq ($(SHARED_UI_SRCS),)
 $(error $(SHARED_UI_DIR)/src has no sources: check out shared_ui beside this repository or set SHARED_UI_DIR)
 endif

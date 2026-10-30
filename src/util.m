@@ -25,6 +25,9 @@ NSString * const files_pref_show_used_space      = @"files.show_used_space";
 NSString * const files_pref_human_readable_sizes = @"files.human_readable_sizes";
 NSString * const files_pref_full_path_title      = @"files.full_path_title";
 NSString * const files_pref_hide_system_mounts   = @"files.mounts.hide_system";
+NSString * const files_pref_sort_column          = @"files.sort_column";
+NSString * const files_pref_sort_ascending       = @"files.sort_ascending";
+NSString * const files_pref_folders_first        = @"files.folders_first";
 
 /*
  * files_register_defaults — registers non-NO preference defaults.
@@ -41,6 +44,7 @@ files_register_defaults(void)
         files_pref_full_path_title:        @YES,
         files_pref_hidden_columns:         @[@"perms", @"created", @"comment"],
         files_pref_hide_system_mounts:     @YES,
+        files_pref_folders_first:          @YES,
     }];
 }
 

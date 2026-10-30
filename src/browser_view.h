@@ -6,6 +6,56 @@
  * It has no status bar of its own; it reports status text through
  * status_text_handler. All methods must be called on the main thread.
  */
+/*
+ * files_column_sorts — whether the file list can be sorted by a column,
+ * i.e. whether it has a value of its own to compare. Permissions and
+ * Comment do not, so their headers do nothing when clicked.
+ *
+ * Inputs:
+ *   col_id — column identifier
+ *
+ * Output: YES if clicking that column's header sorts the list.
+ */
+BOOL files_column_sorts(NSString *col_id);
+
+/*
+ * files_sort_columns — the file-list columns a default sort order can name,
+ * in header order. Those are the sortable columns (files_column_sorts)
+ * bar Git, which is left out because it exists only inside a repository.
+ * Preferences builds its Default sort menu from this, so the choices and
+ * the sorting cannot disagree.
+ *
+ * Output: array of @[title, column identifier] pairs, never empty.
+ */
+NSArray<NSArray<NSString *> *> *files_sort_columns(void);
+
+/*
+ * files_sort_default_column — the column a new file list sorts by
+ * (files_pref_sort_column), worded as a column identifier. This is where
+ * the shipped default lives, so files_pref_sort_column registers none.
+ *
+ * Output: an identifier from files_sort_columns(); Date Modified when the
+ *         preference is unset or names no column that can be a default
+ *         (an older or hand-edited defaults value), so a stale setting
+ *         cannot leave lists sorted by something no header shows an arrow
+ *         for. Date Modified rather than Date Created because the Date
+ *         Created column is hidden by default.
+ */
+NSString *files_sort_default_column(void);
+
+/*
+ * files_sort_order_titles — the two directions a column sorts in, worded
+ * for what that column holds ("Newest first" rather than "Descending"),
+ * for the Default sort menu.
+ *
+ * Inputs:
+ *   col_id — column identifier, normally from files_sort_columns()
+ *
+ * Output: @[ascending title, descending title]; the A → Z pair for an
+ *         identifier that is not a column of its own.
+ */
+NSArray<NSString *> *files_sort_order_titles(NSString *col_id);
+
 @interface FilesBrowserView : NSView
 
 /*

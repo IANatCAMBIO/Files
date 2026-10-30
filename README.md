@@ -7,8 +7,19 @@ A minimalist macOS file manager written in Objective-C + AppKit.
 ## Features
 
 - List-view browser with Name, Size, Kind, Permissions, Date Modified and
-  Date Created (hidden by default) columns; click a header to sort (folders first, Finder-style name order),
-  right-click the headers to show or hide columns (every list follows)
+  Date Created (hidden by default) columns; click a header to sort
+  (Finder-style name order), right-click the headers to show or hide
+  columns (every list follows). The Permissions and Comment headers do not
+  sort, as neither holds a value a list can be put in order by
+- Default sort (Preferences ▸ View): the column every new window and
+  folder starts sorted by — Name, Size, Kind, Date Modified or Date
+  Created — and its direction, worded for the column ("Newest first",
+  "Largest first", "Z → A"). Date Modified, newest first, out of the box.
+  Changing it re-sorts the windows already open; clicking a column header
+  re-sorts that window alone and leaves the setting as it is
+- View ▸ Always Show Folders First (on by default; also in Preferences)
+  keeps every folder above the files, as Finder does. Turn it off and
+  folders take their place among the files in whatever order is in force
 - Auto-fit columns (View ▸ Auto-Fit Columns, on by default) and optional
   double-height rows with larger icons (View ▸ Large Rows)
 - Single- or dual-pane browsing (View ▸ Dual Pane, ⇧⌘2; Tab switches panes; right-click a folder ▸ Open in Split Pane)
@@ -53,8 +64,9 @@ A minimalist macOS file manager written in Objective-C + AppKit.
 - Copy, cut and paste, and drag and drop (moves by default; hold ⌥ to
   copy), with a progress panel (speed graph, transfer log, cancel), Keep
   Both / Replace prompts, and optional SHA-256 verification (View ▸
-  Validate Copies with SHA-256). View ▸ Simple Copies (off by default)
-  skips the panel: transfers run silently, keeping both on name clashes,
+  Validate Copies with SHA-256, also in Preferences ▸ Move/Copy). View ▸
+  Simple Copies (off by default; also in Preferences ▸ Move/Copy) skips
+  the panel: transfers run silently, keeping both on name clashes,
   and only errors are shown. Copies use APFS clones when possible and
   keep extended attributes, tags, ACLs, the Locked flag and dates; nothing
   at the destination is replaced until the new copy is complete. With

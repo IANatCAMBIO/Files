@@ -18,8 +18,10 @@ No third-party libraries, but one sibling repository: the `shared_ui`
 interface module Files shares with Notes and Tasks (the tool panel and the
 notices and confirmations built on it, colours, symbols). Check it out beside
 this one (`../shared_ui`) or set `SHARED_UI_DIR`; the Makefile compiles its
-`src/*.m` into `build/` (all but `shared_hotkey.m`, which needs Carbon) and
-puts `shared_ui/src` on the include path. The system dependencies are Apple
+`src/*.m` into `build/` and puts `shared_ui/src` on the include path. The
+modules for parts of the interface Files does not have are left out, along
+with the frameworks they would pull in: `shared_hotkey.m` (needs Carbon) and
+`shared_day_planner.m` with `shared_calendar.m` (need EventKit). The system dependencies are Apple
 frameworks:
 
 | Framework       | Purpose                                      |
@@ -54,7 +56,7 @@ macOS) to render the app icon; see [App icon](#app-icon).
 | Install         | `make install`  | Replaces `~/Applications/Files.app` with the new build; a running copy is sent SIGTERM, killed after 5 s, and reopened |
 | Test            | `make test`     | Release checks: `test-build`, `test-unit`, `test-features`, `test-ui` |
 | Test (build)    | `make test-build` | From-scratch build with zero warnings; valid `Info.plist`, executable and signature |
-| Test (unit)     | `make test-unit` | Builds and runs the copy-engine and archive tests (`tests/`) |
+| Test (unit)     | `make test-unit` | Builds and runs the copy-engine, archive and sort tests (`tests/`) |
 | Test (features) | `make test-features` | Feature tests (`tests/features/`); none written yet |
 | Test (UI)       | `make test-ui`  | Interface check (`tests/ui/ui_check.m`); none written yet |
 | Clean           | `make clean`    | Removes `build/` and `Files.app`       |
@@ -74,6 +76,13 @@ folder in `$TMPDIR`: round trips (symbolic links, names starting with `-`,
 brackets and accents), passwords (missing, wrong, right), name clashes,
 refusals, damaged archives, an entry named `../x`, and that no hidden
 staging item is left behind.
+
+`sort_test` checks the default sort order (Preferences ▸ View ▸ Default
+sort): which columns sort at all, which of those a default order may name,
+how each one words its two directions, and that a missing, stale or
+misspelled preference resolves to Date Modified rather than to a column the
+list cannot sort by. It writes only to a preference domain of its own,
+which it removes when it finishes.
 
 ## Output
 
@@ -176,7 +185,8 @@ src/
                               the icon cache, size/date formatting, alerts
 tests/
 ├── file_ops_test.m         — copy-engine tests (`make test`)
-└── archive_test.m          — archive tests (`make test`)
+├── archive_test.m          — archive tests (`make test`)
+└── sort_test.m             — default sort order tests (`make test`)
 ```
 
 ## Code signing

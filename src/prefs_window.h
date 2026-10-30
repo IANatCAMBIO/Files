@@ -3,8 +3,12 @@
 /*
  * prefs_window — the Preferences tool window (Files ▸ Preferences…, ⌘,).
  *
- * View: the View menu's preferences, as checkboxes, and Show Hashes in
- * Get Info (files_pref_show_hashes; FilesInfoPanel follows it).
+ * View: the order new file lists start in (files_pref_sort_column,
+ * files_pref_sort_ascending; every browser follows it), the View menu's
+ * first group of preferences, as checkboxes, and Show Hashes in Get Info
+ * (files_pref_show_hashes; FilesInfoPanel follows it).
+ * Move/Copy: the View menu's remaining preference groups, which govern
+ * how transfers run (files_pref_simple_copies, files_pref_hash_validation).
  * Integration: the default file browser (its current choice and "Set
  * default file browser to Files" / "… to Finder" buttons, each opening a
  * change log; files_default_viewer_choose, which also sets whether Archive
