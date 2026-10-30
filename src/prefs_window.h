@@ -9,11 +9,13 @@
  * (files_pref_show_hashes; FilesInfoPanel follows it).
  * Move/Copy: the View menu's remaining preference groups, which govern
  * how transfers run (files_pref_simple_copies, files_pref_hash_validation).
- * Integration: the default file browser (its current choice and "Set
- * default file browser to Files" / "… to Finder" buttons, each opening a
- * change log; files_default_viewer_choose, which also sets whether Archive
+ * Integration: the default file browser (its current choice and "Set Files
+ * as default" / "Set Finder as default" buttons, each opening a change
+ * log; files_default_viewer_choose, which also sets whether Archive
  * Utility reveals its results in Finder) and "Keep Files running for
  * faster startup" (files_pref_keep_running; FilesAppDelegate applies it).
+ * What follows the default browser is in the tooltip of the ⓘ at the right
+ * of the heading.
  *
  * Controls write NSUserDefaults and redraw from them whenever any
  * preference changes, so the window, the menus and the app never disagree.

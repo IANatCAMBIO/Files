@@ -1,5 +1,6 @@
 #import "prefs_window.h"
 #import "browser_view.h"
+#import "shared_ui.h"
 #import "default_viewer.h"
 #import "util.h"
 
@@ -60,6 +61,25 @@ note_label(NSString *text)
     label.textColor = NSColor.secondaryLabelColor;
     label.preferredMaxLayoutWidth = note_width;
     return label;
+}
+
+/*
+ * info_glyph — the ⓘ that carries a section's explanation in its tooltip,
+ * so the window stays short.
+ *
+ * Inputs:
+ *   tip — tooltip text, one line per point
+ *
+ * Output: configured image view, laid out by the caller.
+ */
+static NSImageView *
+info_glyph(NSString *tip)
+{
+    NSImageView *glyph = [NSImageView imageViewWithImage:
+                             shared_ui_symbol(@"info.circle", NSFont.systemFontSize)];
+    glyph.contentTintColor = NSColor.secondaryLabelColor;
+    glyph.toolTip          = tip;
+    return glyph;
 }
 
 @interface FilesPrefsWindow ()
@@ -228,31 +248,27 @@ build_content
     NSTextField *integration_heading = section_label(@"Integration");
     [rows addObject:integration_heading];
     [headings addObject:integration_heading];
+    NSImageView *integration_info = info_glyph(
+        @"• \"Show in Finder\" and other reveal requests from other apps go to the "
+         "default file browser\n"
+         "• Archive Utility will reveal expanded files in Files\n"
+         "• In zsh, `open <folder>` will open in Files\n"
+         "• A folder another app opens rather than reveals (a Dock folder, a "
+         "Spotlight result) always opens in Finder.\n"
+         "• Either button opens a log of every setting it checked or changed, the "
+         "matching Terminal command, and whether the change took effect.");
     self.browser_label = [NSTextField labelWithString:@""];
-    self.files_button  = [NSButton buttonWithTitle:@"Set default file browser to Files"
+    self.files_button  = [NSButton buttonWithTitle:@"Set Files as default"
                                             target:self
                                             action:@selector(choose_browser:)];
-    self.finder_button = [NSButton buttonWithTitle:@"Set default file browser to Finder"
+    self.finder_button = [NSButton buttonWithTitle:@"Set Finder as default"
                                             target:self
                                             action:@selector(choose_browser:)];
     [rows addObject:self.browser_label];
     [rows addObject:self.files_button];
     [rows addObject:self.finder_button];
-    [rows addObject:note_label(@"\"Show in Finder\" and other reveal requests from other apps go to the "
-                                "default file browser, and Archive Utility opens "
-                                "a Finder window on what it creates or expands only while "
-                                "Finder is the default. In zsh, `open <folder>` follows the "
-                                "default too. A folder another app opens rather than reveals "
-                                "(a Dock folder, a Spotlight result) always opens in Finder. "
-                                "Each button opens a log of every "
-                                "setting it checked or changed, the matching Terminal "
-                                "command, and whether the change took effect.")];
-
     [rows addObject:[self pref_box:@"Keep Files running for faster startup"
                                key:files_pref_keep_running]];
-    [rows addObject:note_label(@"Files opens at login and stays open when its last window "
-                                "closes, so new windows appear instantly.")];
-
     NSStackView *stack = [NSStackView stackViewWithViews:rows];
     stack.orientation = NSUserInterfaceLayoutOrientationVertical;
     stack.alignment   = NSLayoutAttributeLeading;
@@ -265,6 +281,16 @@ build_content
         NSUInteger index = [rows indexOfObject:heading];
         if (index > 0) [stack setCustomSpacing:18.0 afterView:rows[index - 1]];
     }
+
+    /* The glyph sits on the heading's line at the window's right edge, so
+     * it is a subview of the stack rather than one of its rows. */
+    integration_info.translatesAutoresizingMaskIntoConstraints = NO;
+    [stack addSubview:integration_info];
+    [NSLayoutConstraint activateConstraints:@[
+        [integration_info.trailingAnchor constraintEqualToAnchor:stack.trailingAnchor
+                                                        constant:-stack.edgeInsets.right],
+        [integration_info.centerYAnchor constraintEqualToAnchor:integration_heading.centerYAnchor],
+    ]];
 
     self.window.contentView = stack;
     [self.window setContentSize:stack.fittingSize];

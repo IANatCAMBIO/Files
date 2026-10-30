@@ -127,12 +127,14 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   (and the apps using them) and the volume unmounts automatically once
   they are closed
 - Default file viewer in place of Finder: "Show in Finder" from other apps
-  opens Files; Preferences ▸ Set default file browser to Finder undoes
-  every change (see Replacing Finder)
-- Preferences window (Files ▸ Preferences…, ⌘,): View has the View-menu
-  preferences; Integration has the default file browser (Set default
-  file browser to Files / to Finder — each opens a change log) and Keep
-  Files running for faster startup (see Keeping Files running)
+  opens Files; Preferences ▸ Set Finder as default undoes every change
+  (see Replacing Finder)
+- Preferences window (Files ▸ Preferences…, ⌘,): View has the Default sort
+  order and the View-menu preferences; Move/Copy has Simple Copies and
+  Validate Copies with SHA-256; Integration has the default file browser
+  (Set Files as default / Set Finder as default — each opens a change
+  log, and the ⓘ beside the heading lists what follows the default) and
+  Keep Files running for faster startup (see Keeping Files running)
 - About Files shows the version (from the `VERSION` file), build date,
   the app's motto, and links to camb.io and the license
 - Address bar (accepts `~` and relative paths), back/forward/up, Open in
@@ -232,12 +234,12 @@ take them:
 
 ### Uninstalling
 
-Before removing Files, open **Files ▸ Preferences…**, click **Set default
-file browser to Finder**, and turn off **Keep Files running for faster
+Before removing Files, open **Files ▸ Preferences…**, click **Set Finder
+as default**, and turn off **Keep Files running for faster
 startup** so it is no longer a login item. Files writes every recorded setting back exactly as it was,
 turns Archive Utility's reveal back on, and relaunches Finder. Then quit
-Files and delete `~/Applications/Files.app`. **Set default file browser
-to Files** switches back.
+Files and delete `~/Applications/Files.app`. **Set Files as default**
+switches back.
 
 Either button opens a change log (in Console, from
 `~/Library/Logs/Files/default-file-browser-<date>.log`) listing every
