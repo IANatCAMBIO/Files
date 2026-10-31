@@ -7,9 +7,9 @@
  * Use begin_copy:to:is_cut:hash_validate:completion: to start a copy. The
  * panel appears immediately so Cancel is available from the start.
  *
- * It shows a status line, one text progress bar for the file being
- * transferred and, when the job covers more than one file, a second bar for
- * the job as a whole, over a collapsible transfer log. Progress is measured
+ * It shows a status line, one progress bar for the file being transferred
+ * and, when the job covers more than one file, a second bar for the job as
+ * a whole, over a collapsible transfer log. Progress is measured
  * in steps rather than bytes, because byte totals say little about how much
  * of a transfer is left: hashing a file costs about as much as copying it,
  * and a same-volume move or an APFS clone moves no data at all. The engine

@@ -8,4 +8,15 @@
  * file viewer — see default_viewer.h).
  */
 @interface FilesAppDelegate : NSObject <NSApplicationDelegate>
+
+/*
+ * show_all_mounts: — opens the All Mounts window. Declared here so the
+ * Mounts menu item and the toolbar's All Mounts button, which reaches the
+ * delegate through the responder chain, name one implementation.
+ *
+ * Inputs:
+ *   sender — the menu or toolbar item (unused)
+ */
+- (void)show_all_mounts:(id)sender;
+
 @end

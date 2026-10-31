@@ -169,28 +169,29 @@ shared
 }
 
 /*
- * init — builds the mounts panel window and table and subscribes to
- * FilesVolumesChangedNotification.
+ * init — builds the mounts window and table and subscribes to
+ * FilesVolumesChangedNotification. An ordinary window, not a utility
+ * panel: the list is something to read and work in alongside a browser
+ * window, so it keeps a full-size title bar and minimises like any other.
  *
  * Output: self or nil.
  */
 - (instancetype)
 init
 {
-    NSPanel *panel = [[NSPanel alloc]
+    NSWindow *window = [[NSWindow alloc]
         initWithContentRect:NSMakeRect(0, 0, 800, 300)
                   styleMask:NSWindowStyleMaskTitled |
                             NSWindowStyleMaskClosable |
-                            NSWindowStyleMaskResizable |
-                            NSWindowStyleMaskUtilityWindow
+                            NSWindowStyleMaskMiniaturizable |
+                            NSWindowStyleMaskResizable
                     backing:NSBackingStoreBuffered
                       defer:NO];
-    panel.title              = @"All Mounts";
-    panel.minSize            = NSMakeSize(600, 150);
-    panel.hidesOnDeactivate  = NO;
-    [panel center];
+    window.title   = @"All Mounts";
+    window.minSize = NSMakeSize(600, 150);
+    [window center];
 
-    self = [super initWithWindow:panel];
+    self = [super initWithWindow:window];
     if (!self) return nil;
 
     self.records = [NSMutableArray array];
@@ -544,7 +545,7 @@ resize_to_fit
 /* ── Actions ─────────────────────────────────────────────────────────────── */
 
 /*
- * show_panel — brings the panel forward, then reloads the table and, once
+ * show_panel — brings the window forward, then reloads the table and, once
  * the mounts are read, sizes the window to fit and scrolls to the top.
  *
  * Output: none.
@@ -602,7 +603,7 @@ unmount_clicked:(id)sender
 
 /*
  * volumes_changed: — notification handler; reloads the table when a volume
- * is mounted, unmounted or renamed while the panel is visible.
+ * is mounted, unmounted or renamed while the window is visible.
  *
  * Inputs:
  *   note — FilesVolumesChangedNotification

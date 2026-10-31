@@ -43,17 +43,18 @@ static const struct {
  * archive_suffix_of — the archive extension a file name ends with.
  *
  * Inputs:
- *   name   — file name
+ *   name   — file name; may be nil
  *   format — receives the extension's format; may be NULL
  *
  * Output: the matching suffix from archive_suffixes (e.g. ".tar.gz"), or
- * NULL if the name is not an archive's.
+ * NULL if the name is nil or not an archive's.
  */
 static const char *
 archive_suffix_of(NSString *name, FilesArchiveFormat *format)
 {
     const char *s = name.UTF8String;
-    size_t n      = strlen(s);
+    if (!s) return NULL;  /* a nil name (an URL with no last component) */
+    size_t n = strlen(s);
     for (size_t i = 0; i < ARCHIVE_SUFFIX_COUNT; i++) {
         size_t m = strlen(archive_suffixes[i].suffix);
         if (n >= m && strcasecmp(s + n - m, archive_suffixes[i].suffix) == 0) {

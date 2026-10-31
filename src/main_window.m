@@ -7,6 +7,7 @@
 #import "info_sidebar.h"
 #import "util.h"
 #import "volume_manager.h"
+#import "app_delegate.h"
 
 /* Toolbar item identifiers */
 static NSString * const tb_back_forward  = @"files.back-forward";
@@ -18,6 +19,7 @@ static NSString * const tb_open_terminal = @"files.open-terminal";
 static NSString * const tb_dual_pane     = @"files.dual-pane";
 static NSString * const tb_sidebar       = @"files.sidebar";
 static NSString * const tb_new_item      = @"files.new-item";
+static NSString * const tb_all_mounts    = @"files.all-mounts";
 
 /* Size of a first-launch window, frame including the title bar and toolbar. */
 static const CGFloat default_win_w   = 700.0;
@@ -819,7 +821,10 @@ toggle_dual_pane:(id)sender
         }];
         [self.window.toolbar validateVisibleItems];
     } else {
-        [self open_secondary_pane_at:self.primary_browser.current_url];
+        /* The primary has no folder until its first listing lands; opening
+         * the window and hitting ⇧⌘2 at once would otherwise give a blank
+         * pane. */
+        [self open_secondary_pane_at:self.primary_browser.current_url ?: files_home_url()];
     }
 }
 
@@ -827,8 +832,9 @@ toggle_dual_pane:(id)sender
  * open_secondary_pane_at: — switches to dual-pane mode with the second pane
  * showing url. The pane slides in from the right edge with the split view
  * collapse animation the info sidebar uses: it is added collapsed at half
- * the width, then expanded. The primary pane stays active. Call only in
- * single-pane mode and when no slide is under way.
+ * the width, then expanded. The new pane becomes the active one and takes
+ * keyboard focus, since it is the one the user just asked for. Call only
+ * in single-pane mode and when no slide is under way.
  *
  * Inputs:
  *   url — folder the second pane shows
@@ -847,7 +853,7 @@ open_secondary_pane_at:(NSURL *)url
     item.collapsed   = YES;
     [self.pane_split_vc addSplitViewItem:item];
     self.secondary_item = item;
-    [self set_active_pane:0];
+    [self set_active_pane:1];
     [self.secondary_browser navigate_to:url];
     /* Expand on the next pass, once the item is laid out collapsed. */
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -855,6 +861,10 @@ open_secondary_pane_at:(NSURL *)url
             item.animator.collapsed = NO;
         } completionHandler:^{
             ws.panes_animating = NO;
+            /* Last of all, once the pane is fully in place: a collapsed or
+             * half-slid item cannot take keyboard focus. Closing the pane
+             * hands focus back to the one that remains (toggle_dual_pane:). */
+            [ws.window makeFirstResponder:ws.secondary_browser];
         }];
     });
     [self.window.toolbar validateVisibleItems];
@@ -935,21 +945,80 @@ observeValueForKeyPath:(NSString *)keyPath
 /* ── NSToolbarDelegate ───────────────────────────────────────────────────── */
 
 /*
- * toolbar_identifiers — the toolbar's items, left to right.
+ * any_unmountable_volume — whether anything is mounted that the user may
+ * unmount, by the one rule the ⏏ button and All Mounts also use
+ * (FilesVolumeManager can_unmount_volume:): external, ejectable, removable
+ * or network, but never the boot volume or a fixed internal one.
+ *
+ * Output: YES if at least one mounted volume may be unmounted.
+ */
+static BOOL
+any_unmountable_volume(void)
+{
+    FilesVolumeManager *vm = FilesVolumeManager.shared;
+    for (NSURL *volume in vm.mounted_volumes) {
+        if ([vm can_unmount_volume:volume]) return YES;
+    }
+    return NO;
+}
+
+/*
+ * toolbar_identifiers — the toolbar's items, left to right. All Mounts is
+ * only worth a button when there is something mounted to unmount, so it
+ * and the space before it come and go with removable volumes
+ * (update_all_mounts_item).
+ *
+ * Inputs:
+ *   with_all_mounts — YES to include the All Mounts button
  *
  * Output: array of item identifiers.
  */
 static NSArray<NSToolbarItemIdentifier> *
-toolbar_identifiers(void)
+toolbar_identifiers(BOOL with_all_mounts)
 {
-    return @[tb_back_forward, tb_up, tb_reload,
-             NSToolbarSpaceItemIdentifier,
-             tb_hidden_files, tb_dual_pane, tb_sidebar,
-             NSToolbarSpaceItemIdentifier,
-             tb_open_terminal,
-             tb_new_item,
-             NSToolbarFlexibleSpaceItemIdentifier,
-             tb_search];
+    NSMutableArray<NSToolbarItemIdentifier> *ids =
+        [@[tb_back_forward, tb_up, tb_reload,
+           NSToolbarSpaceItemIdentifier,
+           tb_hidden_files, tb_dual_pane, tb_sidebar,
+           NSToolbarSpaceItemIdentifier,
+           tb_open_terminal,
+           tb_new_item] mutableCopy];
+    if (with_all_mounts) {
+        [ids addObject:NSToolbarSpaceItemIdentifier];
+        [ids addObject:tb_all_mounts];
+    }
+    [ids addObject:NSToolbarFlexibleSpaceItemIdentifier];
+    [ids addObject:tb_search];
+    return ids;
+}
+
+/*
+ * update_all_mounts_item — puts the All Mounts button and its space in the
+ * toolbar, or takes them out, to match what is mounted now. Inserting and
+ * removing is how a macOS 14 toolbar hides an item: NSToolbarItem's own
+ * hidden property is macOS 15. The toolbar's items are exactly
+ * toolbar_identifiers(), customization being off, so the identifier's index
+ * in that array is its index in the toolbar.
+ */
+- (void)
+update_all_mounts_item
+{
+    NSToolbar *tb = self.window.toolbar;
+    BOOL shown = NO;
+    for (NSToolbarItem *item in tb.items) {
+        if ([item.itemIdentifier isEqualToString:tb_all_mounts]) { shown = YES; break; }
+    }
+    BOOL want = any_unmountable_volume();
+    if (shown == want) return;
+
+    NSUInteger at = [toolbar_identifiers(YES) indexOfObject:tb_all_mounts];
+    if (want) {
+        [tb insertItemWithItemIdentifier:NSToolbarSpaceItemIdentifier atIndex:(NSInteger)at - 1];
+        [tb insertItemWithItemIdentifier:tb_all_mounts atIndex:(NSInteger)at];
+    } else {
+        [tb removeItemAtIndex:(NSInteger)at];
+        [tb removeItemAtIndex:(NSInteger)at - 1];
+    }
 }
 
 /*
@@ -963,11 +1032,12 @@ toolbar_identifiers(void)
 - (NSArray<NSToolbarItemIdentifier> *)
 toolbarAllowedItemIdentifiers:(NSToolbar *)toolbar
 {
-    return toolbar_identifiers();
+    return toolbar_identifiers(YES);
 }
 
 /*
- * toolbarDefaultItemIdentifiers: — the items shown (customization is off).
+ * toolbarDefaultItemIdentifiers: — the items shown (customization is off),
+ * All Mounts among them only if something unmountable is mounted.
  *
  * Inputs:
  *   toolbar — the toolbar (unused)
@@ -977,7 +1047,7 @@ toolbarAllowedItemIdentifiers:(NSToolbar *)toolbar
 - (NSArray<NSToolbarItemIdentifier> *)
 toolbarDefaultItemIdentifiers:(NSToolbar *)toolbar
 {
-    return toolbar_identifiers();
+    return toolbar_identifiers(any_unmountable_volume());
 }
 
 /*
@@ -1064,6 +1134,12 @@ willBeInsertedIntoToolbar:(BOOL)flag
     if ([identifier isEqualToString:tb_sidebar])
         return button_item(identifier, @"Info Sidebar", @"sidebar.right",
                            @selector(toggle_sidebar_action:), self);
+    if ([identifier isEqualToString:tb_all_mounts]) {
+        /* The app delegate owns the window, so the item has no target and
+         * finds it up the responder chain, as the Mounts menu item does. */
+        return button_item(identifier, @"All Mounts", @"eject",
+                           @selector(show_all_mounts:), nil);
+    }
 
     if ([identifier isEqualToString:tb_new_item]) {
         NSMenu *menu = [[NSMenu alloc] initWithTitle:@"New"];
@@ -1588,9 +1664,9 @@ watch_pending_unmount:(NSURL *)volume name:(NSString *)name delay:(double)delay
 
 /*
  * volumes_changed: — after any mount, unmount or rename (from this app,
- * Finder, or elsewhere), moves each pane whose folder no longer exists —
- * e.g. it was on an unmounted volume — to /Volumes, where the remaining
- * volumes are listed.
+ * Finder, or elsewhere), shows or hides the All Mounts button and moves
+ * each pane whose folder no longer exists — e.g. it was on an unmounted
+ * volume — to /Volumes, where the remaining volumes are listed.
  *
  * Inputs:
  *   note — FilesVolumesChangedNotification (unused)
@@ -1598,6 +1674,7 @@ watch_pending_unmount:(NSURL *)volume name:(NSString *)name delay:(double)delay
 - (void)
 volumes_changed:(NSNotification *)note
 {
+    [self update_all_mounts_item];
     for (FilesBrowserView *b in [self all_browsers]) {
         NSURL *url = b.current_url;
         if (url && ![url checkResourceIsReachableAndReturnError:nil]) {
@@ -1613,7 +1690,7 @@ volumes_changed:(NSNotification *)note
  * in every window applies it (FilesBrowserView apply_view_prefs).
  *
  * Inputs:
- *   sender — toolbar item (unused)
+ *   sender — toolbar item or View ▸ Show Hidden Files (unused)
  */
 - (IBAction)
 toggle_hidden_files_action:(id)sender
@@ -1636,7 +1713,10 @@ toggle_hidden_files_action:(id)sender
 validateMenuItem:(NSMenuItem *)item
 {
     SEL action = item.action;
-    if (action == @selector(toggle_dual_pane:)) {
+    if (action == @selector(toggle_hidden_files_action:)) {
+        item.state = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_show_hidden]
+                         ? NSControlStateValueOn : NSControlStateValueOff;
+    } else if (action == @selector(toggle_dual_pane:)) {
         item.state = self.secondary_browser ? NSControlStateValueOn : NSControlStateValueOff;
     } else if (action == @selector(set_search_scope:)) {
         BOOL mac   = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_search_this_mac];

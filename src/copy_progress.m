@@ -15,8 +15,8 @@ static const CFTimeInterval tick_interval = 0.25;
 static const CGFloat panel_width   = 500.0;
 static const CGFloat edge          = 12.0;  /* content inset from the window edges */
 static const CGFloat status_height = 16.0;
-static const CGFloat bar_height    = 15.0;
-static const CGFloat bar_gap       = 4.0;   /* between the two bars */
+static const CGFloat bar_height    = 18.0;  /* one progress row: label, bar, percentage */
+static const CGFloat bar_gap       = 6.0;   /* between the two rows */
 static const CGFloat status_gap    = 10.0;  /* status line to the first bar */
 static const CGFloat button_height = 22.0;
 static const CGFloat button_gap    = 14.0;  /* last bar to the button row */
@@ -24,63 +24,128 @@ static const CGFloat button_gap    = 14.0;  /* last bar to the button row */
 static const CGFloat log_height = 160.0;    /* extra window height for the transfer log */
 static const CGFloat log_gap    = 8.0;      /* space above and below the log */
 
-/* Cells in a progress bar, chosen so the widest bar — label, percentage
- * and rate included — fits the panel's width in the bar font. */
-static const NSUInteger bar_cells = 40;
+/* Widths inside a progress row: the label on the left, and the percentage
+ * on the right, wide enough for "100% @ 999.9 MB/s". The bar takes the
+ * rest, so it follows the panel's width. */
+static const CGFloat bar_label_width = 38.0;
+static const CGFloat bar_text_gap    = 8.0;
+static const CGFloat bar_pct_width   = 120.0;
 
 /* The transfer log keeps at most log_max_lines lines; once log_trim_batch
  * extra lines have accumulated, the oldest are dropped in one edit. */
 static const NSUInteger log_max_lines  = 1000;
 static const NSUInteger log_trim_batch = 100;
 
-/*
- * bar_font — the type the progress bars are drawn in: monospaced, so the
- * block characters butt up against each other and the two bars line up
- * cell for cell.
- *
- * Output: the shared bar font.
- */
-static NSFont *
-bar_font(void)
-{
-    static NSFont *font;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        font = [NSFont monospacedSystemFontOfSize:11.0 weight:NSFontWeightRegular];
-    });
-    return font;
-}
+/* ── copy_bar_row ───────────────────────────────────────────────────────── */
 
 /*
- * bar_text — one text progress bar: an optional label, the bar itself with
- * the part done in full blocks and the rest in light shade, then the
- * percentage and, for the bar that stands for the whole job, the rate it
- * has averaged.
+ * copy_bar_row — one progress row of the panel: a short label ("File",
+ * "Total"), a determinate NSProgressIndicator that takes whatever width is
+ * left, and the percentage on the right, followed by the rate on the row
+ * that stands for the whole job.
+ */
+@interface copy_bar_row : NSView
+
+@property (nonatomic, strong) NSTextField         *label;
+@property (nonatomic, strong) NSProgressIndicator *bar;
+@property (nonatomic, strong) NSTextField         *percent;
+
+/*
+ * init_with_frame:label: — builds the row's three views, laid out with
+ * frames and autoresizing so only the bar grows with the panel.
  *
  * Inputs:
- *   label — short prefix such as @"File ", or nil for none
- *   frac  — 0..1; values outside that range are clamped
- *   rate  — bytes a second to show after the percentage; 0 for none
+ *   frame — the row's frame in its superview
+ *   text  — label text, e.g. @"File"
  *
- * Output: e.g. "Total  ██████░░░░░░  52% @ 5.7 MB/s". The percentage is
- * rounded down, so it reads 100% only once the bar is actually full.
+ * Output: the row, or nil.
  */
-static NSString *
-bar_text(NSString *label, double frac, double rate)
+- (instancetype)init_with_frame:(NSRect)frame label:(NSString *)text;
+
+/*
+ * show_frac:rate: — moves the bar and rewrites the percentage.
+ *
+ * Inputs:
+ *   frac — 0..1; values outside that range are clamped
+ *   rate — bytes a second to show after the percentage; 0 for none
+ */
+- (void)show_frac:(double)frac rate:(double)rate;
+
+/*
+ * hide_label — drops the label and gives the bar the width it had, for a
+ * single-file job where there is nothing to tell the rows apart.
+ */
+- (void)hide_label;
+
+@end
+
+@implementation copy_bar_row
+
+- (instancetype)
+init_with_frame:(NSRect)frame label:(NSString *)text
+{
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+
+    CGFloat h       = frame.size.height;
+    CGFloat bar_x   = bar_label_width + bar_text_gap;
+    CGFloat bar_w   = frame.size.width - bar_x - bar_text_gap - bar_pct_width;
+    NSFont *font    = [NSFont systemFontOfSize:11.0];
+
+    _label                  = [NSTextField labelWithString:text];
+    _label.frame            = NSMakeRect(0, 0, bar_label_width, h);
+    _label.font             = font;
+    _label.textColor        = NSColor.secondaryLabelColor;
+    _label.autoresizingMask = NSViewMaxXMargin;
+    [self addSubview:_label];
+
+    /* The bar draws a track of its own fixed thickness, centred in its
+     * frame, so the row's height sets the spacing, not the bar's. */
+    _bar                  = [[NSProgressIndicator alloc]
+                                initWithFrame:NSMakeRect(bar_x, 0, bar_w, h)];
+    _bar.style            = NSProgressIndicatorStyleBar;
+    _bar.indeterminate    = NO;
+    _bar.minValue         = 0.0;
+    _bar.maxValue         = 1.0;
+    _bar.doubleValue      = 0.0;
+    _bar.autoresizingMask = NSViewWidthSizable;
+    [self addSubview:_bar];
+
+    _percent                  = [NSTextField labelWithString:@"0%"];
+    _percent.frame            = NSMakeRect(frame.size.width - bar_pct_width, 0,
+                                           bar_pct_width, h);
+    _percent.font             = font;
+    _percent.textColor        = NSColor.secondaryLabelColor;
+    _percent.autoresizingMask = NSViewMinXMargin;
+    [self addSubview:_percent];
+
+    return self;
+}
+
+- (void)
+hide_label
+{
+    self.label.hidden = YES;
+    NSRect f = self.bar.frame;
+    f.size.width  += f.origin.x;
+    f.origin.x     = 0.0;
+    self.bar.frame = f;
+}
+
+- (void)
+show_frac:(double)frac rate:(double)rate
 {
     if (frac < 0.0) frac = 0.0;
     if (frac > 1.0) frac = 1.0;
-
-    NSUInteger filled = (NSUInteger)(frac * bar_cells + 0.5);
-    NSString *done = [@"" stringByPaddingToLength:filled
-                                       withString:@"█" startingAtIndex:0];
-    NSString *left = [@"" stringByPaddingToLength:bar_cells - filled
-                                       withString:@"░" startingAtIndex:0];
-    return [NSString stringWithFormat:@"%@%@%@  %3d%%%@",
-            label ? [label stringByAppendingString:@"  "] : @"",
-            done, left, (int)(frac * 100.0),
-            rate > 0.0 ? [@" @ " stringByAppendingString:files_format_rate(rate)] : @""];
+    self.bar.doubleValue = frac;
+    /* Rounded down, so it reads 100% only once the bar is actually full. */
+    self.percent.stringValue = rate > 0.0
+        ? [NSString stringWithFormat:@"%d%% @ %@", (int)(frac * 100.0),
+           files_format_rate(rate)]
+        : [NSString stringWithFormat:@"%d%%", (int)(frac * 100.0)];
 }
+
+@end
 
 /*
  * log_attributes — how transfer log text is drawn: small monospaced type
@@ -114,8 +179,8 @@ log_attributes(void)
 @interface FilesCopyProgress () <NSWindowDelegate>
 
 @property (nonatomic, strong) NSTextField  *status_label;
-@property (nonatomic, strong) NSTextField  *file_bar;
-@property (nonatomic, strong) NSTextField  *total_bar;
+@property (nonatomic, strong) copy_bar_row *file_bar;
+@property (nonatomic, strong) copy_bar_row *total_bar;
 @property (nonatomic, strong) NSButton     *cancel_button;
 @property (nonatomic, strong) NSButton     *log_toggle;
 @property (nonatomic, strong) NSScrollView *log_scroll;
@@ -220,9 +285,9 @@ build_views_with_verb:(NSString *)verb dest:(NSString *)dest
     self.status_label.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
     [cv addSubview:self.status_label];
 
-    /* Progress bars — the current file, and the whole job under it */
+    /* Progress rows — the current file, and the whole job under it */
     y -= status_gap + bar_height;
-    self.file_bar = [self add_bar_at:y label:@"File " to:cv];
+    self.file_bar = [self add_bar_at:y label:@"File" to:cv];
     y -= bar_gap + bar_height;
     self.total_bar = [self add_bar_at:y label:@"Total" to:cv];
 
@@ -283,27 +348,25 @@ build_views_with_verb:(NSString *)verb dest:(NSString *)dest
 }
 
 /*
- * add_bar_at:label:to: — builds one empty progress bar and adds it to the
- * content view. The bar sticks to the top of the window, like the status
+ * add_bar_at:label:to: — builds one empty progress row and adds it to the
+ * content view. The row sticks to the top of the window, like the status
  * line above it.
  *
  * Inputs:
- *   y     — bottom edge of the bar in the content view
- *   label — short prefix, as bar_text takes it
+ *   y     — bottom edge of the row in the content view
+ *   label — short prefix, e.g. @"File"
  *   cv    — content view to add it to
  *
- * Output: the new label, retained by cv.
+ * Output: the new row, retained by cv.
  */
-- (NSTextField *)
+- (copy_bar_row *)
 add_bar_at:(CGFloat)y label:(NSString *)label to:(NSView *)cv
 {
-    NSTextField *bar = [NSTextField labelWithString:bar_text(label, 0.0, 0.0)];
-    bar.frame            = NSMakeRect(edge, y, cv.bounds.size.width - 2 * edge, bar_height);
-    bar.font             = bar_font();
-    bar.textColor        = NSColor.secondaryLabelColor;
-    bar.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
-    [cv addSubview:bar];
-    return bar;
+    NSRect frame = NSMakeRect(edge, y, cv.bounds.size.width - 2 * edge, bar_height);
+    copy_bar_row *row = [[copy_bar_row alloc] init_with_frame:frame label:label];
+    row.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+    [cv addSubview:row];
+    return row;
 }
 
 /*
@@ -322,8 +385,8 @@ show_bars:(int64_t)files
     _bars_set = YES;
     if (files > 1) return;  /* the panel was built with both bars */
 
-    self.total_bar.hidden     = YES;
-    self.file_bar.stringValue = bar_text(nil, 0.0, 0.0);
+    self.total_bar.hidden = YES;
+    [self.file_bar hide_label];
 
     CGFloat delta = bar_height + bar_gap;
     NSRect  wf    = self.window.frame;
@@ -360,7 +423,7 @@ toggle_log:(id)sender
         wf.size.height += delta;
         [self.window setFrame:wf display:YES animate:YES];
 
-        NSTextField *last   = self.total_bar.hidden ? self.file_bar : self.total_bar;
+        copy_bar_row *last  = self.total_bar.hidden ? self.file_bar : self.total_bar;
         CGFloat      bottom = NSMaxY(self.cancel_button.frame) + log_gap;
         CGFloat      top    = NSMinY(last.frame) - log_gap;
         self.log_scroll.frame  = NSMakeRect(NSMinX(last.frame), bottom,
@@ -525,10 +588,9 @@ take_engine_updates
      * job: the Total bar, or the single bar of a one-file job. */
     if (files > 0) [self show_bars:files];
     BOOL one_bar = self.total_bar.hidden;
-    self.file_bar.stringValue = bar_text(one_bar ? nil : @"File ", file_frac,
-                                         one_bar ? rate : 0.0);
+    [self.file_bar show_frac:file_frac rate:one_bar ? rate : 0.0];
     if (!one_bar) {
-        self.total_bar.stringValue = bar_text(@"Total", job_frac, rate);
+        [self.total_bar show_frac:job_frac rate:rate];
     }
 }
 

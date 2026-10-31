@@ -167,7 +167,7 @@ src/
 ├── copy_progress.h/.m      — copy progress panel (step status line, text
 │                             progress bars, transfer log) and conflict prompts
 ├── file_hash.h/.m          — single-pass, cancellable SHA-256 / MD5
-├── mounts_panel.h/.m       — All Mounts panel (mount table read off the
+├── mounts_panel.h/.m       — All Mounts window (mount table read off the
 │                             main thread; per-volume unmount)
 ├── volume_manager.h/.m     — mounted-volume list, unmount, disk images
 ├── archive.h/.m            — zip / tar.gz / tar create and extract (system

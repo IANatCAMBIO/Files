@@ -725,10 +725,8 @@ location_menu_item_clicked:(NSMenuItem *)sender
 }
 
 /*
- * show_all_mounts: — opens the All Mounts utility panel.
- *
- * Inputs:
- *   sender — "All Mounts…" menu item
+ * show_all_mounts: — opens the All Mounts window.
+ * Inputs/output are documented in app_delegate.h.
  */
 - (void)
 show_all_mounts:(id)sender
@@ -816,6 +814,11 @@ build_menu_bar
     [view_menu addItem:make_item(@"Dual Pane",
                                  @selector(toggle_dual_pane:),
                                  @"2", NSEventModifierFlagShift)];
+    /* ⇧⌘. as in Finder; the window controller owns the action and sets the
+     * checkmark, so the menu and the toolbar's eye button agree. */
+    [view_menu addItem:make_item(@"Show Hidden Files",
+                                 @selector(toggle_hidden_files_action:),
+                                 @".", NSEventModifierFlagShift)];
     /* Preference items, in groups shared with Preferences ▸ View. */
     NSArray<NSArray<NSArray<NSString *> *> *> *groups = files_view_pref_groups();
     for (NSArray<NSArray<NSString *> *> *group in groups) {

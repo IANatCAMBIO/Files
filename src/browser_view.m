@@ -1358,14 +1358,15 @@ load_location:(NSURL *)url
  * (at its real path), and a link whose target is missing reports an error.
  * The item is examined on a background queue, so a slow volume never
  * blocks the UI; a folder is shown only if no newer navigate_to: came
- * since.
+ * since. A nil url does nothing.
  *
  * Inputs:
- *   url — target URL
+ *   url — target URL; nil is ignored
  */
 - (void)
 navigate_to:(NSURL *)url
 {
+    if (!url) return;
     NSUInteger generation = ++self.navigate_generation;
     NSUInteger loading    = [self begin_loading];
     __weak FilesBrowserView *ws = self;

@@ -160,10 +160,11 @@ NSArray<NSString *> *files_sort_order_titles(NSString *col_id);
  * next to itself and the new folder shown the same way; any other item is
  * opened with its default application. Symbolic links are followed to their target first.
  * Asynchronous: the item is examined on a background queue, and a folder
- * is shown only if no newer navigate_to: was called meanwhile.
+ * is shown only if no newer navigate_to: was called meanwhile. A nil url
+ * does nothing.
  *
  * Inputs:
- *   url — target URL
+ *   url — target URL; nil is ignored
  */
 - (void)navigate_to:(NSURL *)url;
 

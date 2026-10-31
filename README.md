@@ -86,8 +86,8 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   covers. The job's steps are
   counted before anything moves, so there is a progress bar for the file
   being transferred and, when the job covers more than one file, a second
-  one for the job as a whole. The bar that stands for the job reads
-  "52% @ 5.7 MB/s": the rate is every byte of every file copied over the
+  one for the job as a whole. The bar that stands for the job is followed
+  by "52% @ 5.7 MB/s": the rate is every byte of every file copied over the
   time since the job started, so hashing, which moves no bytes but does
   take time, pulls a validated copy's average well under the volume's own
   speed, and a same-volume move shows no rate at all because it copies
@@ -141,7 +141,9 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   File Provider accounts such as Google Drive); Go menu: Home, Desktop,
   Downloads, Documents and Trash, then a Bookmarks section listing every
   bookmark in bar order
-- An All Mounts panel with per-volume unmount; at the root
+- An All Mounts window (Mounts ▸ All Mounts…, or the toolbar's ⏏ button,
+  which is there only while a volume is mounted that can be unmounted)
+  with per-volume unmount; at the root
   of an unmountable volume (external disk, disk image, network share) a
   floating ⏏ button unmounts it (the status bar confirms), and any window
   showing it moves to /Volumes. If files on it are open, a sheet lists them
@@ -159,7 +161,11 @@ A minimalist macOS file manager written in Objective-C + AppKit.
 - About Files shows the version (from the `VERSION` file), build date,
   the app's motto, and links to camb.io and the license
 - Address bar (accepts `~` and relative paths), back/forward/up, Open in
-  Terminal, show/hide hidden files
+  Terminal, show/hide hidden files (View ▸ Show Hidden Files, ⇧⌘., or the
+  toolbar's eye button — macOS flags `/Volumes`, `/usr`, `/private` and
+  the other Unix directories hidden, so `/` lists only four items until
+  this is on). An ⏏ toolbar button opens All Mounts, and appears only
+  while something unmountable is mounted
 
 ## Prerequisites
 
@@ -310,6 +316,7 @@ folder.
 | Add Bookmark   | ⌘D                 |
 | Open in Terminal | ⌘⇧T              |
 | Dual Pane      | ⌘⇧2                |
+| Show Hidden Files | ⌘⇧.             |
 | New Folder     | ⌘⇧N                |
 | Get Info       | ⌘I                 |
 | Select All     | ⌘A                 |

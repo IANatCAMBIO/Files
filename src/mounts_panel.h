@@ -1,7 +1,7 @@
 #import <Cocoa/Cocoa.h>
 
 /*
- * FilesMountsPanel — utility panel listing all currently mounted filesystems.
+ * FilesMountsPanel — ordinary window listing all currently mounted filesystems.
  * Shows device name, mount point, filesystem type, mount options, capacity,
  * free space, whether the volume can be unmounted, and a short description
  * of what it is (for macOS's own system volumes: what macOS uses it for),
