@@ -24,10 +24,11 @@
 
 /*
  * transfer_urls:to:is_cut:completion: — copies or moves srcs into dest.
- * Normally shows the progress panel (conflict prompts, cancel, speed
- * graph). With files_pref_simple_copies on, runs silently instead: no
- * panel, name clashes resolved as Keep Both, errors still reported through
- * completion. Honours files_pref_hash_validation either way (util.h).
+ * Normally shows the progress panel (step status line, progress bars,
+ * transfer log, conflict prompts, cancel). With files_pref_simple_copies
+ * on, runs silently instead: no panel, no step counting, name clashes
+ * resolved as Keep Both, errors still reported through completion.
+ * Honours files_pref_hash_validation either way (util.h).
  *
  * Inputs:
  *   srcs       — source file/directory URLs
@@ -51,42 +52,61 @@
 + (void)paste_to_directory:(NSURL *)dest completion:(void (^)(NSError *))completion;
 
 /*
- * FileCopyProgressBlock — progress callback for copies.
+ * FileCopyProgressBlock — progress callback for copies and moves.
  *
- * Called on the background copy queue when each file starts, after every
- * 1 MB of data copied (cloned files report no intermediate chunks), and when
- * each file finishes. While iCloud placeholders are downloaded before an
- * item is transferred, it is called about ten times a second with
- * downloading set: file_done and file_total then count the bytes of all of
- * that item's downloads, and current_file names one still downloading.
- * All byte counts are in bytes.
+ * Progress is counted in steps, not bytes, because the byte totals of a
+ * transfer say little about how much of it is left: hashing a file costs
+ * about as much as copying it, and a same-volume move or an APFS clone
+ * moves no data at all. Every regular file costs five steps with hash
+ * validation on — hash the source, copy it into a staging file, hash the
+ * staged copy, compare the two, then rename the staged file into place or
+ * delete it — and two steps without: copy it into a staging file, then
+ * rename it into place. A move that stays on one volume is a single
+ * rename(2), so it is one step however many files it covers.
+ *
+ * Called on the background copy queue once the job's steps have been
+ * counted (so the first call reports the file count with no progress), as
+ * each step starts, and as the step in progress advances: after every 1 MB
+ * of data copied and about ten times a second while an iCloud placeholder
+ * is downloaded.
  *
  * Parameters:
- *   current_file — filename (last path component) of the file being copied
- *   file_done    — bytes copied so far for the current file
- *   file_total   — total bytes in the current file
- *   total_done   — bytes copied (and downloaded) across this operation
- *   downloading  — YES while downloading from iCloud, NO while copying
+ *   files_total — regular files the job will touch; counts a same-volume
+ *                 move as the one rename it is. Never 0.
+ *   file_frac   — 0..1 through the current file's own steps
+ *   job_frac    — 0..1 through the whole job's steps
+ *   rate        — bytes a second the job has averaged so far: every byte
+ *                 of every file copied, counted once whether it was
+ *                 written out or cloned, over the time since the job
+ *                 started. Hashing moves no bytes but does take time, so a
+ *                 validated copy averages well under the volume's own
+ *                 speed. 0 when there is nothing to measure — before the
+ *                 first file lands, and throughout a same-volume move,
+ *                 which copies nothing.
  */
-typedef void (^FileCopyProgressBlock)(NSString *current_file,
-                                       int64_t   file_done,
-                                       int64_t   file_total,
-                                       int64_t   total_done,
-                                       BOOL      downloading);
+typedef void (^FileCopyProgressBlock)(int64_t files_total,
+                                      double  file_frac,
+                                      double  job_frac,
+                                      double  rate);
 
 /*
  * FileCopyLogBlock — transfer-log callback for copies and moves.
  *
- * Called on the background copy queue with one human-readable line per
- * step, naming files by their full paths as they are at that moment —
- * including the hidden staging item an item is copied into: each file
- * started and finished ("15,000 bytes of 15,000 bytes copied", noting
- * APFS clones), each SHA-256 being computed and then its digest, for the
- * source and the copy, and whether they match, conflict decisions, every
- * rename (staging item into place, an existing item set aside, a
- * same-volume move), every deletion (a replaced item, a staging item
- * after a failure, the original after a move across volumes) and iCloud
- * downloads (started, finished, or not startable).
+ * Called on the background copy queue with the lines the progress panel
+ * shows: it puts each one in the transfer log and the latest one in its
+ * status line, so the two always agree. In order, for a job:
+ *
+ *   - one "Starting copy job: …" / "Starting move job: …" line;
+ *   - per file, one line as each of its steps begins, numbered "[2/5]"
+ *     with hash validation on and "[1/2]" without (a single-step file is
+ *     not numbered), plus
+ *     a "✓ Copy of "name" successful" line carrying the verified SHA-256;
+ *   - one "Copy job completed …" line with the error count and elapsed time.
+ *
+ * Anything that needs the user's attention is logged as well, on its own
+ * line and marked "✗" if it failed: conflict decisions, iCloud downloads,
+ * hash mismatches and I/O errors. Routine bookkeeping — the staging item's
+ * hidden name, each rename and each cleanup deletion — is not logged.
  *
  * Parameters:
  *   line — log text, without timestamp or trailing newline
@@ -126,10 +146,15 @@ typedef FilesConflictResolution (^FilesConflictBlock)(NSURL *src, NSURL *dst);
  * iCloud Drive. Each copy is staged under a hidden name
  * and renamed into place only when complete, so cancel, errors and failed
  * validation never damage an existing destination or delete the source.
- * Validation hashes each file as soon as it is copied, stopping at the
- * first mismatch; APFS clones are hashed like any other copy.
+ * Validation hashes each file's source before copying it and its staged
+ * copy straight after, stopping at the first mismatch; APFS clones are
+ * hashed like any other copy.
  * Copying a folder into itself is rejected; pasting into the source's own
  * folder duplicates on copy and is a no-op on cut.
+ *
+ * Unless both progress and log are nil, the job's steps are counted before
+ * any data moves (one walk of each source), so progress can be reported
+ * against a known total; see FileCopyProgressBlock for the step model.
  *
  * Inputs:
  *   srcs          — source file/directory URLs
@@ -235,10 +260,16 @@ typedef FilesConflictResolution (^FilesConflictBlock)(NSURL *src, NSURL *dst);
  * inside the folder are not entered. Items that cannot be read are
  * skipped. Blocks for as long as the walk takes; call off the main thread.
  *
+ * A path that is itself a regular file is measured as one file, so the
+ * copy engine can count the files in a source item without knowing first
+ * whether it is a folder.
+ *
  * Inputs:
- *   path   — folder (or package) to measure
+ *   path   — folder, package or file to measure
+ *   files  — receives the number of regular files counted; may be NULL.
+ *            Left untouched when the walk fails.
  *   cancel — polled during the walk; non-zero stops it. May be NULL.
  *
- * Output: total bytes, or -1 if cancelled or the folder cannot be opened.
+ * Output: total bytes, or -1 if cancelled or the item cannot be opened.
  */
-int64_t files_folder_size(const char *path, const atomic_int *cancel);
+int64_t files_folder_size(const char *path, int64_t *files, const atomic_int *cancel);

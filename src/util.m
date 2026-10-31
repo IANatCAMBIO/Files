@@ -419,6 +419,25 @@ files_set_finder_comment(NSURL *url, NSString *comment)
 }
 
 /*
+ * human_bytes — the shared formatter for human-readable byte counts
+ * ("12.3 MB"), used by files_format_bytes when the Sizes preference asks
+ * for them and by files_format_rate always.
+ *
+ * Output: the shared formatter.
+ */
+static NSByteCountFormatter *
+human_bytes(void)
+{
+    static NSByteCountFormatter *fmt;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        fmt = [[NSByteCountFormatter alloc] init];
+        fmt.countStyle = NSByteCountFormatterCountStyleFile;
+    });
+    return fmt;
+}
+
+/*
  * files_format_bytes — formats a byte count according to the current
  * files_pref_human_readable_sizes setting. When on (the default), uses
  * NSByteCountFormatter (Finder-style: 1.2 MB, 345 KB …). When off, returns
@@ -427,31 +446,46 @@ files_set_finder_comment(NSURL *url, NSString *comment)
 NSString *
 files_format_bytes(int64_t bytes)
 {
-    static NSByteCountFormatter *human_fmt;
-    static NSNumberFormatter    *raw_fmt;
+    static NSNumberFormatter *raw_fmt;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        human_fmt = [[NSByteCountFormatter alloc] init];
-        human_fmt.countStyle = NSByteCountFormatterCountStyleFile;
         raw_fmt = [[NSNumberFormatter alloc] init];
         raw_fmt.numberStyle = NSNumberFormatterDecimalStyle;
     });
     if ([NSUserDefaults.standardUserDefaults boolForKey:files_pref_human_readable_sizes])
-        return [human_fmt stringFromByteCount:bytes];
+        return [human_bytes() stringFromByteCount:bytes];
     NSString *n = [raw_fmt stringFromNumber:@(bytes)];
     return bytes == 1 ? [n stringByAppendingString:@" byte"]
                       : [n stringByAppendingString:@" bytes"];
 }
 
 /*
- * files_format_rate — byte count plus "/s".
+ * files_format_duration — seconds below the 90-second cut-off, minutes and
+ * seconds above it.
+ * Inputs/output are documented in util.h.
+ */
+NSString *
+files_format_duration(double seconds)
+{
+    if (seconds < 0.0) seconds = 0.0;
+    if (seconds <= 90.0) return [NSString stringWithFormat:@"%.1f seconds", seconds];
+
+    int64_t whole = (int64_t)(seconds + 0.5);
+    int64_t mins  = whole / 60;
+    int64_t secs  = whole % 60;
+    return [NSString stringWithFormat:@"%lld minute%s %lld second%s",
+            mins, mins == 1 ? "" : "s", secs, secs == 1 ? "" : "s"];
+}
+
+/*
+ * files_format_rate — human-readable byte count plus "/s".
  * Inputs/output are documented in util.h.
  */
 NSString *
 files_format_rate(double bytes_per_sec)
 {
     int64_t bps = bytes_per_sec > 0 ? (int64_t)bytes_per_sec : 0;
-    return [files_format_bytes(bps) stringByAppendingString:@"/s"];
+    return [[human_bytes() stringFromByteCount:bps] stringByAppendingString:@"/s"];
 }
 
 /*

@@ -164,8 +164,8 @@ src/
 ├── info_panel.h/.m         — Get Info panel (permissions, lock, hashes)
 ├── file_ops.h/.m           — pasteboard, copy/move engine (copyfile +
 │                             rename, staged commits), trash, rename, mkdir
-├── copy_progress.h/.m      — copy progress panel and conflict prompts
-├── speed_graph.h/.m        — bounded transfer-speed graph
+├── copy_progress.h/.m      — copy progress panel (step status line, text
+│                             progress bars, transfer log) and conflict prompts
 ├── file_hash.h/.m          — single-pass, cancellable SHA-256 / MD5
 ├── mounts_panel.h/.m       — All Mounts panel (mount table read off the
 │                             main thread; per-volume unmount)

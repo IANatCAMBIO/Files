@@ -177,6 +177,28 @@ main(void)
         err = transfer(@[plain], b, NO, YES, FilesConflictKeepBoth, log);
         check(err == nil, @"validated copy on the same volume");
         check(log_has(log, @"SHA-256 match"), @"APFS clone is hashed");
+        /* The five steps of one validated file, numbered, plus the job's
+         * opening and closing lines and the file's success line. */
+        check(log.count == 8, [NSString stringWithFormat:@"validated copy logs five steps (%lu lines)",
+                               (unsigned long)log.count]);
+        check(log_has(log, @"[1/5] Hashing source") && log_has(log, @"[2/5] Copying")
+              && log_has(log, @"[3/5] Hashing the staged copy")
+              && log_has(log, @"[4/5] Comparing the hashes")
+              && log_has(log, @"[5/5] Hash check passed — renaming the staged file"),
+              @"the five steps are logged in the order they run");
+        check(log_has(log, @"✓ Copy of \"plain.txt\" successful"), @"the file reports success");
+
+        /* Without validation a file is two steps: copy, then rename. */
+        NSURL *quick = [a URLByAppendingPathComponent:@"quick.txt"];
+        write_file(quick, @"quick data");
+        log = [NSMutableArray array];
+        err = transfer(@[quick], b, NO, NO, FilesConflictKeepBoth, log);
+        check(err == nil, @"unvalidated copy on the same volume");
+        check(log.count == 5, [NSString stringWithFormat:@"unvalidated copy logs two steps (%lu lines)",
+                               (unsigned long)log.count]);
+        check(log_has(log, @"[1/2] Copying") && log_has(log, @"[2/2] Renaming the staged copy"),
+              @"the two steps are logged in the order they run");
+        check(!log_has(log, @"SHA-256"), @"nothing is hashed without validation");
 
         /* Keep Both and duplicate in place. */
         err = transfer(@[plain], b, NO, NO, FilesConflictKeepBoth, nil);
@@ -210,8 +232,14 @@ main(void)
         check(err == nil && ![fm fileExistsAtPath:mv.path]
               && [read_file([b URLByAppendingPathComponent:@"move.txt"]) isEqualToString:@"move me"],
               @"same-volume move");
-        check(log.count == 1, [NSString stringWithFormat:@"same-volume move is one rename (%lu log lines)",
+        /* One rename, so the whole job is a single step: the job's own two
+         * lines, that step and the file's success line, and nothing else. */
+        check(log.count == 4, [NSString stringWithFormat:@"same-volume move is one step (%lu log lines)",
                                (unsigned long)log.count]);
+        check([log.firstObject hasPrefix:@"Starting move job:"], @"the log opens with the job");
+        check(log_has(log, @"no data copied"), @"same-volume move copies no data");
+        check([log.lastObject isEqualToString:@"Move job completed successfully in 0.0 seconds"],
+              [NSString stringWithFormat:@"the log closes with the job (%@)", log.lastObject]);
 
         /* Same-volume move onto an existing item with Replace. */
         write_file(mv, @"replacement");
@@ -257,11 +285,14 @@ main(void)
         [fm createSymbolicLinkAtURL:[sized URLByAppendingPathComponent:@"link"]
                  withDestinationURL:[NSURL fileURLWithPath:@"/System/Library/Kernels/kernel"]
                               error:nil];
-        int64_t total = files_folder_size(sized.fileSystemRepresentation, NULL);
+        int64_t counted = 0;
+        int64_t total   = files_folder_size(sized.fileSystemRepresentation, &counted, NULL);
         check(total == 15, [NSString stringWithFormat:@"folder size adds nested files, skips links (%lld)",
                             (long long)total]);
+        check(counted == 2, [NSString stringWithFormat:@"folder size counts the files it added (%lld)",
+                             (long long)counted]);
         check(files_folder_size([root URLByAppendingPathComponent:@"missing"].fileSystemRepresentation,
-                                NULL) == -1, @"folder size of a missing folder is -1");
+                                NULL, NULL) == -1, @"folder size of a missing folder is -1");
 
         /* Clean up: unlock everything first. */
         NSDirectoryEnumerator *e = [fm enumeratorAtURL:root includingPropertiesForKeys:nil

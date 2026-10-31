@@ -9,13 +9,15 @@
 
 /*
  * file_digests — single-pass SHA-256 (+ optional MD5) of a file, F_NOCACHE,
- * cancellable. The read buffer is sized to the file (at most HASH_CHUNK),
- * so hashing many small files does not map and unmap 1 MB each time.
+ * cancellable, reporting its progress. The read buffer is sized to the file
+ * (at most HASH_CHUNK), so hashing many small files does not map and unmap
+ * 1 MB each time, and a file hashed in one read reports progress once.
  * Inputs/output are documented in file_hash.h.
  */
 int
 file_digests(const char *path, uint8_t sha256[FILE_SHA256_LEN],
-             uint8_t md5[FILE_MD5_LEN], const atomic_int *cancel)
+             uint8_t md5[FILE_MD5_LEN], const atomic_int *cancel,
+             file_digest_progress progress)
 {
     if (!path || !sha256) return -1;
 
@@ -24,7 +26,7 @@ file_digests(const char *path, uint8_t sha256[FILE_SHA256_LEN],
     fcntl(fd, F_NOCACHE, 1);
 
     /* One byte more than the file, so a file read in one go ends at once. */
-    struct stat st;
+    struct stat st = { 0 };
     size_t buf_len = HASH_CHUNK;
     if (fstat(fd, &st) == 0 && st.st_size < HASH_CHUNK) buf_len = (size_t)st.st_size + 1;
     uint8_t *buf = malloc(buf_len);
@@ -41,7 +43,9 @@ file_digests(const char *path, uint8_t sha256[FILE_SHA256_LEN],
     CC_MD5_CTX md5_ctx;
     if (md5) CC_MD5_Init(&md5_ctx);
 
-    int ret = 0;
+    int     ret  = 0;
+    int64_t done = 0;
+    int64_t size = (st.st_size > 0) ? st.st_size : 0;
     for (;;) {
         if (cancel && atomic_load(cancel)) { ret = -2; break; }
         ssize_t n = read(fd, buf, buf_len);
@@ -53,6 +57,8 @@ file_digests(const char *path, uint8_t sha256[FILE_SHA256_LEN],
         }
         CC_SHA256_Update(&sha_ctx, buf, (CC_LONG)n);
         if (md5) CC_MD5_Update(&md5_ctx, buf, (CC_LONG)n);
+        done += n;
+        if (progress) progress(done, size);
     }
 
     if (ret == 0) {

@@ -200,19 +200,37 @@ sibling_temp_url(NSURL *dst, NSString *tag)
 }
 
 /*
- * copy_ctx_t — state shared with copy_status_cb for one top-level item.
+ * copy_ctx_t — state shared with copy_status_cb for one top-level item,
+ * plus the whole job's step accounting (see FileCopyProgressBlock in
+ * file_ops.h for what a step is).
  */
 typedef struct {
     FileCopyProgressBlock  progress;      /* may be nil */
     FileCopyLogBlock       log;           /* may be nil */
     atomic_int            *cancel;        /* may be NULL */
+    BOOL                   is_cut;        /* the job is a move */
     BOOL                   hash_validate; /* SHA-256 verify each file as it lands */
-    int64_t                total_done;    /* bytes across the whole operation */
-    NSString              *file_name;     /* file currently being copied */
+
+    int64_t                files_total;   /* regular files the job will touch */
+    int64_t                steps_total;   /* steps the job will take */
+    int64_t                steps_done;    /* steps finished */
+
+    int                    file_steps;    /* steps the current file costs (1, 2 or 5) */
+    int                    file_step;     /* steps of it finished */
+    double                 step_frac;     /* 0..1 through the step in progress */
+
+    NSString              *file_name;     /* file currently being worked on */
     int64_t                file_total;    /* its size */
-    int64_t                file_done;     /* bytes of it copied so far */
-    BOOL                   downloading;   /* file_* describe an iCloud download */
     BOOL                   is_regular;    /* it is a regular file (has data to hash) */
+    uint8_t                src_digest[FILE_SHA256_LEN];  /* its source's SHA-256 */
+
+    CFAbsoluteTime         started;       /* when the job began */
+    int64_t                bytes_done;    /* bytes of the files already finished */
+    int64_t                file_bytes;    /* bytes of the file in progress */
+
+    BOOL                   downloading;   /* an iCloud download is in progress */
+    double                 dl_frac;       /* 0..1 through that download */
+
     BOOL                   hash_failed;   /* a copy did not match its source */
     int                    err;           /* errno from the first COPYFILE_ERR */
 } copy_ctx_t;
@@ -242,7 +260,11 @@ log_line(copy_ctx_t *c, NSString *format, ...)
 /*
  * remove_logged — deletes one of the engine's own items (a partial copy, a
  * staging item, a replaced item set aside) with remove_tree, so locked
- * contents go too, and logs the outcome. Does nothing if nothing is there.
+ * contents go too. Does nothing if nothing is there.
+ *
+ * Only a failure is logged: a cleanup that worked is bookkeeping the
+ * transfer log leaves out, while one that did not leaves a hidden item
+ * behind that the user may want to know about.
  *
  * Inputs:
  *   url  — item to delete
@@ -255,10 +277,8 @@ remove_logged(NSURL *url, NSString *what, copy_ctx_t *c)
     if (!item_exists(url)) return;
     char fail[PATH_MAX];
     int err = remove_tree(url.fileSystemRepresentation, fail, sizeof fail);
-    if (err == 0) {
-        log_line(c, @"Deleted %@ \"%@\"", what, url.path);
-    } else {
-        log_line(c, @"Could not delete %@ \"%@\" (%s at \"%s\")",
+    if (err != 0) {
+        log_line(c, @"✗ Could not delete %@ \"%@\" (%s at \"%s\")",
                  what, url.path, strerror(err), fail);
     }
 }
@@ -285,24 +305,96 @@ byte_count(int64_t n)
             n == 1 ? "" : "s"];
 }
 
+/* A rate measured over less than this is noise — a cloned gigabyte can
+ * land in a millisecond — so none is reported until the job has run for
+ * this long. */
+static const double rate_min_elapsed = 0.1;
+
 /*
- * report_progress — advances the current file to `copied` bytes and emits a
- * progress callback.
+ * report — hands the progress block the two fractions its bars show: how
+ * far through the current file's steps the job is, and how far through all
+ * of the job's steps, plus the rate the job has averaged. While an iCloud
+ * placeholder is downloading, the file's fraction is that download's
+ * instead, since the download is the work the user is waiting on and is
+ * not one of the file's steps.
+ *
+ * Inputs:
+ *   c — copy context
+ */
+static void
+report(copy_ctx_t *c)
+{
+    if (!c->progress) return;
+    double file_frac = c->downloading ? c->dl_frac
+        : (c->file_steps > 0 ? (c->file_step + c->step_frac) / c->file_steps : 0.0);
+    double job_frac = c->steps_total > 0
+        ? (c->steps_done + c->step_frac) / (double)c->steps_total : 0.0;
+
+    double  elapsed = CFAbsoluteTimeGetCurrent() - c->started;
+    int64_t moved   = c->bytes_done + c->file_bytes;
+    double  rate    = (moved > 0 && elapsed >= rate_min_elapsed) ? moved / elapsed : 0.0;
+
+    c->progress(c->files_total, MIN(file_frac, 1.0), MIN(job_frac, 1.0), rate);
+}
+
+/*
+ * step_start — begins one of the current file's steps. Logs the line the
+ * panel puts in the transfer log and shows as its status, numbered
+ * "[2/4]" when the file takes more than one step, and reports the step as
+ * just begun.
  *
  * Inputs:
  *   c      — copy context
- *   copied — bytes of the current file copied so far (monotonic)
+ *   format — printf-style description of the step, then its arguments
  */
 static void
-report_progress(copy_ctx_t *c, int64_t copied)
+step_start(copy_ctx_t *c, NSString *format, ...) NS_FORMAT_FUNCTION(2, 3);
+
+static void
+step_start(copy_ctx_t *c, NSString *format, ...)
 {
-    if (copied > c->file_done) {
-        c->total_done += copied - c->file_done;
-        c->file_done   = copied;
+    c->step_frac = 0.0;
+    if (c->log) {
+        va_list args;
+        va_start(args, format);
+        NSString *line = [[NSString alloc] initWithFormat:format arguments:args];
+        va_end(args);
+        c->log(c->file_steps > 1
+               ? [NSString stringWithFormat:@"[%d/%d] %@", c->file_step + 1,
+                  c->file_steps, line]
+               : line);
     }
-    if (c->progress) {
-        c->progress(c->file_name, c->file_done, c->file_total, c->total_done, c->downloading);
-    }
+    report(c);
+}
+
+/*
+ * step_progress — moves the step in progress to frac of the way through
+ * and reports it, so a bar advances within a long read or write.
+ *
+ * Inputs:
+ *   c    — copy context
+ *   frac — 0..1; values outside that range are clamped
+ */
+static void
+step_progress(copy_ctx_t *c, double frac)
+{
+    c->step_frac = frac < 0.0 ? 0.0 : (frac > 1.0 ? 1.0 : frac);
+    report(c);
+}
+
+/*
+ * step_done — finishes the step in progress and reports it.
+ *
+ * Inputs:
+ *   c — copy context
+ */
+static void
+step_done(copy_ctx_t *c)
+{
+    c->steps_done++;
+    c->file_step++;
+    c->step_frac = 0.0;
+    report(c);
 }
 
 /* How often download_placeholders polls the downloads it waits for. */
@@ -363,8 +455,10 @@ is_placeholder(NSURL *url)
  * which reports nothing for as long as the download takes; downloading
  * first lets the transfer report it. All downloads are started at once;
  * their bytes come from the progress iCloud publishes for each file (as
- * Finder shows it) and are reported with c->downloading set. A file whose
- * download cannot be started is left to the transfer itself. Once they
+ * Finder shows it) and drive the current file's bar (c->downloading, so
+ * the step count is left alone — a download is not one of the file's
+ * steps). A file whose download cannot be started is left to the transfer
+ * itself. Once they
  * finish, each downloaded file's size must equal the size it had as a
  * placeholder, so a truncated download fails the transfer.
  *
@@ -423,8 +517,7 @@ download_placeholders(NSURL *src, copy_ctx_t *c)
 
     CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
     c->downloading = YES;
-    c->file_total  = to_download;
-    c->file_done   = 0;
+    c->dl_frac     = 0.0;
     NSError *result = nil;
     while (pending.count) {
         if (c->cancel && atomic_load(c->cancel)) {
@@ -443,8 +536,8 @@ download_placeholders(NSURL *src, copy_ctx_t *c)
             done -= size - got;
         }
         [lock unlock];
-        c->file_name = pending.firstObject.lastPathComponent ?: c->file_name;
-        report_progress(c, done);
+        c->dl_frac = to_download > 0 ? (double)done / (double)to_download : 1.0;
+        report(c);
         if (pending.count) usleep(DOWNLOAD_POLL_USEC);
     }
     c->downloading = NO;
@@ -466,97 +559,59 @@ download_placeholders(NSURL *src, copy_ctx_t *c)
         }
     }
     if (!result && to_download > 0) {
-        log_line(c, @"✓ Downloaded %@ from iCloud in %.1f sec; sizes match what iCloud reported",
-                 byte_count(to_download), CFAbsoluteTimeGetCurrent() - start);
+        log_line(c, @"✓ Downloaded %@ from iCloud in %@; sizes match what iCloud reported",
+                 byte_count(to_download),
+                 files_format_duration(CFAbsoluteTimeGetCurrent() - start));
     }
     return result;
 }
 
 /*
- * logged_sha256 — SHA-256 of one file, logged as two entries: that it is
- * being computed, then the digest.
+ * step_sha256 — SHA-256 of one file as the step now in progress, moving
+ * that step's bar as the file is read. The step's line has already been
+ * logged (step_start), so only a failure is logged here.
  *
  * Inputs:
  *   path   — file to read
- *   role   — "source" or "destination", for the log
+ *   role   — "source" or "copy", for the failure message
  *   digest — receives the digest
  *   c      — copy context (log, cancel flag)
  *
  * Output: YES if the file was read in full.
  */
 static BOOL
-logged_sha256(const char *path, NSString *role, uint8_t digest[FILE_SHA256_LEN],
-              copy_ctx_t *c)
+step_sha256(const char *path, NSString *role, uint8_t digest[FILE_SHA256_LEN],
+            copy_ctx_t *c)
 {
-    log_line(c, @"Computing SHA-256 of %@ \"%s\"…", role, path);
-    int rc = file_digests(path, digest, NULL, c->cancel);
-    if (rc != 0) {
-        if (rc != -2) log_line(c, @"✗ Could not read %@ \"%s\" to hash it", role, path);
-        return NO;  /* -2: cancelled, which the panel reports itself */
+    int rc = file_digests(path, digest, NULL, c->cancel, ^(int64_t done, int64_t total) {
+        if (total > 0) step_progress(c, (double)done / (double)total);
+    });
+    if (rc == 0) return YES;
+    if (rc != -2) {  /* -2: cancelled, which the panel reports itself */
+        log_line(c, @"✗ Could not read the %@ of \"%@\" to hash it", role, c->file_name);
     }
-    if (c->log) {
-        log_line(c, @"%@ SHA-256 of \"%s\": %@", role.capitalizedString, path,
-                 digest_hex(digest, FILE_SHA256_LEN));
-    }
-    return YES;
+    return NO;
 }
 
 /*
- * same_contents — SHA-256 compares a source file with its copy, logging
- * both digests and the verdict. When the two are on different devices
- * they are hashed at the same time, since neither read slows the other.
+ * copy_status_cb — copyfile(3) status callback. It drives every step of
+ * every file in the tree being copied: it logs each step as it begins,
+ * reports progress within it, honours the cancel flag and aborts on the
+ * first error (copyfile's default is to skip unreadable items and still
+ * return success).
  *
- * Inputs:
- *   src  — source file path
- *   copy — path of its copy (in the staging item)
- *   c    — copy context (log, cancel flag)
- *
- * Output: YES if both hash successfully and the digests match.
- */
-static BOOL
-same_contents(const char *src, const char *copy, copy_ctx_t *c)
-{
-    uint8_t ds[FILE_SHA256_LEN], dc[FILE_SHA256_LEN];
-    struct stat src_st, copy_st;
-    BOOL apart = lstat(src, &src_st) == 0 && lstat(copy, &copy_st) == 0
-                 && src_st.st_dev != copy_st.st_dev;
-
-    __block BOOL src_ok;
-    uint8_t *ds_p = ds;
-    dispatch_group_t group = dispatch_group_create();
-    if (apart) {
-        dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            src_ok = logged_sha256(src, @"source", ds_p, c);
-        });
-    } else {
-        src_ok = logged_sha256(src, @"source", ds, c);
-    }
-    BOOL copy_ok = (apart || src_ok) && logged_sha256(copy, @"destination", dc, c);
-    dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
-    if (!src_ok || !copy_ok) return NO;
-
-    BOOL same = memcmp(ds, dc, sizeof ds) == 0;
-    log_line(c, same ? @"✓ Hash check passed (SHA-256 match): \"%s\" and \"%s\""
-                     : @"✗ Hash check FAILED (SHA-256 MISMATCH): \"%s\" and \"%s\"", src, copy);
-    return same;
-}
-
-/*
- * copy_status_cb — copyfile(3) status callback. Reports per-file and
- * per-chunk progress, logs each file's start and finish (the bytes written
- * as measured on the copy, and whether it was an APFS clone), honours the
- * cancel flag, and aborts on the first error (copyfile's default is to skip
- * unreadable items and still return success).
- *
- * With hash validation on, each regular file is SHA-256 compared with its
- * copy as soon as that copy is complete, and the copy stops at the first
- * mismatch. APFS clones are hashed like any other copy.
+ * A regular file takes five steps with hash validation on — its source is
+ * hashed before copyfile writes anything, its staged copy straight after,
+ * the two digests are compared, and the staged copy is then renamed into
+ * place or deleted — and two without: copy it into a staging file, then
+ * rename it into place. The copy stops at the first mismatch. APFS clones
+ * are hashed like any other copy, and a file's last line gives the SHA-256
+ * both sides agreed on.
  *
  * Inputs:
  *   what, stage — copyfile event (COPYFILE_RECURSE_FILE / COPYFILE_COPY_DATA,
  *                 COPYFILE_START / COPYFILE_PROGRESS / COPYFILE_FINISH / COPYFILE_ERR)
- *   state       — copyfile state (queried for COPYFILE_STATE_COPIED and
- *                 COPYFILE_STATE_WAS_CLONED)
+ *   state       — copyfile state (queried for COPYFILE_STATE_COPIED)
  *   src, dst    — paths of the item being processed
  *   ctx         — copy_ctx_t pointer
  *
@@ -588,36 +643,78 @@ copy_status_cb(int what, int stage, copyfile_state_t state,
         BOOL have_st  = lstat(src, &st) == 0;
         c->file_name  = @(src).lastPathComponent;
         c->file_total = have_st ? st.st_size : 0;
+        c->file_bytes = 0;
         c->is_regular = have_st && S_ISREG(st.st_mode);
-        c->file_done  = 0;
-        if (c->log) {
-            log_line(c, @"→ \"%s\" (%@) to \"%s\"", src, byte_count(c->file_total), dst);
+        c->file_steps = c->is_regular ? (c->hash_validate ? 5 : 2) : 1;
+        c->file_step  = 0;
+
+        if (c->hash_validate && c->is_regular) {
+            step_start(c, @"Hashing source \"%@\"", c->file_name);
+            if (!step_sha256(src, @"source", c->src_digest, c)) {
+                if (c->err == 0) c->err = EIO;
+                return COPYFILE_QUIT;
+            }
+            step_done(c);
         }
-        report_progress(c, 0);
+        if (c->file_steps > 1) {
+            step_start(c, @"Copying \"%@\" to a staging file", c->file_name);
+        } else {
+            step_start(c, @"Copying \"%@\"", c->file_name);
+        }
     } else if (what == COPYFILE_COPY_DATA && stage == COPYFILE_PROGRESS) {
         off_t copied = 0;
         copyfile_state_get(state, COPYFILE_STATE_COPIED, &copied);
-        report_progress(c, copied);
+        c->file_bytes = copied;
+        if (c->file_total > 0) step_progress(c, (double)copied / (double)c->file_total);
     } else if (what == COPYFILE_RECURSE_FILE && stage == COPYFILE_FINISH) {
-        bool cloned = false;
-        copyfile_state_get(state, COPYFILE_STATE_WAS_CLONED, &cloned);
-        /* Clones produce no COPY_DATA events and move no data, so they add
-         * nothing to the byte count (like a rename); a real copy is whole. */
-        if (!cloned) report_progress(c, c->file_total);
-        if (c->log) {
-            struct stat st;
-            int64_t written = (lstat(dst, &st) == 0) ? st.st_size : 0;
-            log_line(c, @"✓ %@ of %@ copied to \"%s\"%@", byte_count(written),
-                     byte_count(c->file_total), dst,
-                     cloned ? @" (APFS clone: shares the original's blocks, no data read)"
-                            : @"");
-        }
+        /* A clone writes nothing, so count the file's size rather than
+         * what copyfile reported moving: the user's bytes arrived either
+         * way, and that is the rate they care about. */
+        c->bytes_done += c->file_total;
+        c->file_bytes  = 0;
+        step_done(c);  /* the copy step; a clone finishes it without any data */
+
+        NSString *verified = @"";
         if (c->hash_validate && c->is_regular) {
-            if (!same_contents(src, dst, c)) {
+            uint8_t copy_digest[FILE_SHA256_LEN];
+            step_start(c, @"Hashing the staged copy of \"%@\"", c->file_name);
+            if (!step_sha256(dst, @"copy", copy_digest, c)) {
+                if (c->err == 0) c->err = EIO;
+                return COPYFILE_QUIT;
+            }
+            step_done(c);
+
+            step_start(c, @"Comparing the hashes of \"%@\"", c->file_name);
+            BOOL matched = memcmp(c->src_digest, copy_digest, FILE_SHA256_LEN) == 0;
+            step_done(c);
+
+            /* The last step is what the comparison decided. On a mismatch
+             * copy_tree deletes the staged item on its way out, so the
+             * step is logged but never finished: the job stops here. */
+            if (!matched) {
+                step_start(c, @"Hash check failed — deleting the staged file");
+                log_line(c, @"✗ Hash check FAILED for \"%@\": source %@, copy %@",
+                         c->file_name, digest_hex(c->src_digest, FILE_SHA256_LEN),
+                         digest_hex(copy_digest, FILE_SHA256_LEN));
                 c->hash_failed = YES;
                 return COPYFILE_QUIT;
             }
+            step_start(c, @"Hash check passed — renaming the staged file");
+            step_done(c);
+            verified = [NSString stringWithFormat:@" (SHA-256 match: %@)",
+                        digest_hex(copy_digest, FILE_SHA256_LEN)];
+        } else if (c->is_regular) {
+            /* Without hashing, the file's second step is the rename that
+             * puts it under its real name. The rename itself — like the
+             * one the last step above stands for — is the enclosing item's
+             * single commit_item rename, microseconds away and, for a
+             * tree, only after its last file, so the step is accounted
+             * here, where this file's own work ends. */
+            step_start(c, @"Renaming the staged copy of \"%@\" into place", c->file_name);
+            step_done(c);
         }
+        log_line(c, @"✓ %@ of \"%@\" successful%@", c->is_cut ? @"Move" : @"Copy",
+                 c->file_name, verified);
     }
     return COPYFILE_CONTINUE;
 }
@@ -668,29 +765,24 @@ copy_tree(NSURL *src, NSURL *dst, copy_ctx_t *c)
 }
 
 /*
- * match_hidden_flag — gives url the hidden flag (UF_HIDDEN) state want,
- * logging any change. Items pass through hidden dot-names while staged or
- * set aside, and iCloud Drive (and other File Provider folders) marks a
- * dot-named item hidden once it notices it — a flag that survives the
- * rename back to a normal name.
+ * match_hidden_flag — gives url the hidden flag (UF_HIDDEN) state want.
+ * Items pass through hidden dot-names while staged or set aside, and iCloud
+ * Drive (and other File Provider folders) marks a dot-named item hidden
+ * once it notices it — a flag that survives the rename back to a normal
+ * name, so it has to be cleared again here.
  *
  * Inputs:
  *   url  — item to fix (not followed if a symbolic link)
  *   want — YES if it should be hidden
- *   c    — copy context (log)
  */
 static void
-match_hidden_flag(NSURL *url, BOOL want, copy_ctx_t *c)
+match_hidden_flag(NSURL *url, BOOL want)
 {
     struct stat st;
     if (lstat(url.fileSystemRepresentation, &st) != 0) return;
     if (((st.st_flags & UF_HIDDEN) != 0) == want) return;
     u_int flags = want ? (st.st_flags | UF_HIDDEN) : (st.st_flags & ~UF_HIDDEN);
-    if (lchflags(url.fileSystemRepresentation, flags) == 0) {
-        log_line(c, want ? @"Set the hidden flag on \"%@\" to match the original"
-                         : @"Cleared the hidden flag on \"%@\" (set by the folder's sync "
-                           @"service while the item had a hidden staging name)", url.path);
-    }
+    lchflags(url.fileSystemRepresentation, flags);
 }
 
 /*
@@ -723,8 +815,9 @@ misplaced_error(NSString *name, NSURL *hidden, int code)
  * copyfile copies the lock flags, and a locked item cannot be renamed, so
  * a locked staged item is unlocked for the rename and locked again in place.
  *
- * Each rename and deletion is logged. The item put in place, and an
- * existing item put back after a failure, get the hidden flag state they
+ * Renames and deletions that worked are bookkeeping, so they are not
+ * logged; a rollback and a failed cleanup are. The item put in place, and
+ * an existing item put back after a failure, get the hidden flag state they
  * should have (match_hidden_flag), whatever their dot-named detour left.
  *
  * Inputs:
@@ -758,10 +851,8 @@ commit_item(NSURL *staged, NSURL *dst, BOOL replace, BOOL hidden, copy_ctx_t *c)
         if (rename(dst_p, old.fileSystemRepresentation) != 0) {
             return posix_error(errno, dst);
         }
-        log_line(c, @"Renamed the existing \"%@\" aside to \"%@\"", dst.path, old.path);
     }
 
-    log_line(c, @"Renaming \"%@\" to \"%@\"", staged.path, dst.path);
     if (renamex_np(staged_p, dst_p, RENAME_EXCL) != 0) {
         int saved_errno = errno;
         if (old) {
@@ -770,12 +861,12 @@ commit_item(NSURL *staged, NSURL *dst, BOOL replace, BOOL hidden, copy_ctx_t *c)
                 log_line(c, @"✗ Could not rename \"%@\" back to \"%@\"", old.path, dst.path);
                 return misplaced_error(dst.lastPathComponent, old, back_errno);
             }
-            log_line(c, @"Renamed \"%@\" back to \"%@\"", old.path, dst.path);
-            match_hidden_flag(dst, old_hidden, c);
+            log_line(c, @"The existing \"%@\" was put back unchanged", dst.path);
+            match_hidden_flag(dst, old_hidden);
         }
         return posix_error(saved_errno, dst);
     }
-    match_hidden_flag(dst, hidden, c);
+    match_hidden_flag(dst, hidden);
     if (lock && (lstat(dst_p, &st) != 0 || lchflags(dst_p, st.st_flags | lock) != 0)) {
         log_line(c, @"✗ Could not lock \"%@\" again as its original is (%s)",
                  dst.path, strerror(errno));
@@ -796,7 +887,9 @@ commit_item(NSURL *staged, NSURL *dst, BOOL replace, BOOL hidden, copy_ctx_t *c)
  * copied under a hidden sibling name of dst (hash-verified as it goes, if
  * requested) and committed with commit_item only once it is complete, so
  * cancel, I/O errors and validation failures leave dst untouched; a move
- * across volumes then deletes the source. Before any of this, iCloud
+ * across volumes then deletes the source. Staging costs one rename(2) in
+ * the destination folder, so it is done whether or not hashes are checked.
+ * Before any of this, iCloud
  * placeholders in src are downloaded (download_placeholders), unless the
  * move stays in iCloud Drive or the transfer is silent.
  *
@@ -830,38 +923,38 @@ transfer_item(NSURL *src, NSURL *dst, BOOL replace, BOOL is_cut, copy_ctx_t *c)
     if (is_cut) {
         BOOL direct = !replace || !item_exists(dst);
         NSURL *to   = direct ? dst : staged;
+        /* The step is logged only once the rename has worked: until then
+         * this could still turn out to be a copy across volumes, which
+         * costs a step per file instead of this single one. */
         if (renamex_np(src.fileSystemRepresentation, to.fileSystemRepresentation,
                        RENAME_EXCL) == 0) {
             c->file_name  = src.lastPathComponent;
-            c->file_total = 0;
-            c->file_done  = 0;
-            report_progress(c, 0);
-            if (c->log) {
-                NSString *moved = (have_st && S_ISREG(st.st_mode))
-                    ? [byte_count(st.st_size) stringByAppendingString:@" moved"] : @"moved";
-                log_line(c, @"Renamed \"%@\" to \"%@\" (%@ on the same volume, no data "
-                            @"copied)", src.path, to.path, moved);
-            }
-            if (direct) return nil;
+            c->file_steps = 1;
+            c->file_step  = 0;
+            step_start(c, @"Moving \"%@\"", c->file_name);
 
-            NSError *err = commit_item(staged, dst, replace, hidden, c);
-            if (err) {
-                if (rename(staged.fileSystemRepresentation, src.fileSystemRepresentation) != 0) {
-                    return misplaced_error(src.lastPathComponent, staged, errno);
+            if (!direct) {
+                NSError *err = commit_item(staged, dst, replace, hidden, c);
+                if (err) {
+                    if (rename(staged.fileSystemRepresentation,
+                               src.fileSystemRepresentation) != 0) {
+                        return misplaced_error(src.lastPathComponent, staged, errno);
+                    }
+                    log_line(c, @"\"%@\" was put back unchanged", src.path);
+                    match_hidden_flag(src, hidden);
+                    return err;
                 }
-                log_line(c, @"Renamed \"%@\" back to \"%@\"", staged.path, src.path);
-                match_hidden_flag(src, hidden, c);
-                return err;
             }
+            step_done(c);
+            log_line(c, @"✓ Move of \"%@\" successful (renamed on the same volume, "
+                        @"no data copied)", c->file_name);
             return nil;
         }
         if (errno != EXDEV) return posix_error(errno, src);
-        log_line(c, @"\"%@\" is on another volume than \"%@\": copying it, then "
-                    @"removing the original", src.path, dst.path);
+        log_line(c, @"\"%@\" is on another volume than its destination: copying it, "
+                    @"then removing the original", src.lastPathComponent);
     }
 
-    log_line(c, @"Staging \"%@\" as \"%@\" until %@.", src.path, staged.path,
-             c->hash_validate ? @"hash checks complete" : @"the copy completes");
     NSError *err = copy_tree(src, staged, c);
     if (err) return err;
 
@@ -877,9 +970,68 @@ transfer_item(NSURL *src, NSURL *dst, BOOL replace, BOOL is_cut, copy_ctx_t *c)
                 @"\"%@\" was copied but the original could not be removed: %@",
                 src.lastPathComponent, err.localizedDescription]);
         }
-        log_line(c, @"Deleted the original \"%@\"", src.path);
     }
     return nil;
+}
+
+/*
+ * plan_steps — works out, before anything moves, how many steps each source
+ * item will take, so progress can be reported against a known total (see
+ * FileCopyProgressBlock in file_ops.h). Costs one fts walk per item
+ * (files_folder_size), which is why a silent transfer — no progress block
+ * and no log — is not planned at all.
+ *
+ * A move that stays on one volume is a single rename(2) however many files
+ * it covers, so it counts as one file and one step. Anything else costs its
+ * regular files — at least one, so an empty folder or a symbolic link still
+ * has a step of its own — times the steps each file takes. An item whose
+ * walk fails is counted as one file; the main loop snaps the count straight
+ * at each item boundary, so a tree that has changed since cannot leave the
+ * bars adrift.
+ *
+ * Inputs:
+ *   srcs — source item URLs
+ *   dest — destination directory URL
+ *   c    — copy context; its files_total and steps_total are filled in
+ *
+ * Output: malloc'd array of srcs.count step counts, or NULL when there is
+ *         nothing to report progress to. The caller frees it.
+ */
+static int64_t *
+plan_steps(NSArray<NSURL *> *srcs, NSURL *dest, copy_ctx_t *c)
+{
+    if (!c->progress && !c->log) return NULL;
+
+    int64_t *steps = calloc(srcs.count, sizeof *steps);
+    if (!steps) return NULL;
+
+    struct stat dest_st;
+    BOOL have_dest = lstat(dest.fileSystemRepresentation, &dest_st) == 0;
+    int  per_file  = c->hash_validate ? 5 : 2;
+
+    for (NSUInteger i = 0; i < srcs.count; i++) {
+        NSURL *src = srcs[i];
+        struct stat src_st;
+        BOOL rename_only = c->is_cut && have_dest
+            && lstat(src.fileSystemRepresentation, &src_st) == 0
+            && src_st.st_dev == dest_st.st_dev;
+
+        int64_t files = 1;
+        if (!rename_only) {
+            int64_t counted = 0;
+            if (files_folder_size(src.fileSystemRepresentation, &counted, c->cancel) >= 0
+                && counted > 1) {
+                files = counted;
+            }
+        }
+        steps[i]        = rename_only ? 1 : files * per_file;
+        c->files_total += files;
+        c->steps_total += steps[i];
+    }
+    if (c->files_total < 1) c->files_total = 1;
+    if (c->steps_total < 1) c->steps_total = 1;
+    report(c);  /* the panel needs the file count to lay its bars out */
+    return steps;
 }
 
 /*
@@ -974,12 +1126,34 @@ hash_validate:(BOOL)hash_validate
    completion:(void (^)(NSError *))completion
 {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        CFAbsoluteTime started = CFAbsoluteTimeGetCurrent();
         copy_ctx_t ctx = { .progress = progress, .log = log, .cancel = cancel_flag,
-                           .hash_validate = hash_validate };
+                           .is_cut = is_cut, .hash_validate = hash_validate,
+                           .started = started };
         NSString *dest_path = real_path(dest);
         NSError *first_err  = nil;
+        int64_t  errors     = 0;
+        NSString *noun      = is_cut ? @"move" : @"copy";
 
-        for (NSURL *src in srcs) {
+        log_line(&ctx, @"Starting %@ job: %@ to \"%@\"%@", noun,
+                 srcs.count == 1
+                     ? [NSString stringWithFormat:@"\"%@\"", srcs.firstObject.lastPathComponent]
+                     : [NSString stringWithFormat:@"%lu items", (unsigned long)srcs.count],
+                 dest.lastPathComponent,
+                 hash_validate ? @" (SHA-256 validation)" : @"");
+
+        int64_t *item_steps = plan_steps(srcs, dest, &ctx);
+
+        /* base is advanced in the loop's increment, so an item skipped with
+         * `continue` still leaves the step count where the plan put it, and
+         * steps_done is reset to it at the top of every item. */
+        int64_t base = 0;
+        for (NSUInteger i = 0; i < srcs.count;
+             base += (item_steps ? item_steps[i] : 0), i++) {
+            NSURL *src = srcs[i];
+            ctx.steps_done = base;
+            ctx.step_frac  = 0.0;
+
             if (cancel_flag && atomic_load(cancel_flag)) {
                 first_err = [NSError errorWithDomain:NSCocoaErrorDomain
                                                code:NSUserCancelledError userInfo:nil];
@@ -994,6 +1168,8 @@ hash_validate:(BOOL)hash_validate
                 [dest_path hasPrefix:[src_path stringByAppendingString:@"/"]]) {
                 first_err = described_error([NSString stringWithFormat:
                     @"\"%@\" can't be copied into itself.", src.lastPathComponent]);
+                errors++;
+                log_line(&ctx, @"✗ %@", first_err.localizedDescription);
                 break;
             }
 
@@ -1003,7 +1179,7 @@ hash_validate:(BOOL)hash_validate
                 if (is_cut) continue;              /* moving onto itself: no-op */
                 dst = unique_dest_url(src.lastPathComponent, dest);
                 log_line(&ctx, @"Duplicating \"%@\" in its own folder as \"%@\"",
-                         src.path, dst.path);
+                         src.lastPathComponent, dst.lastPathComponent);
             } else if (item_exists(dst)) {
                 FilesConflictResolution res = conflict ? conflict(src, dst)
                                                        : FilesConflictKeepBoth;
@@ -1015,20 +1191,43 @@ hash_validate:(BOOL)hash_validate
                 if (res == FilesConflictKeepBoth) {
                     dst = unique_dest_url(src.lastPathComponent, dest);
                     log_line(&ctx, @"\"%@\" already exists: keeping both, saving as \"%@\"",
-                             [dest URLByAppendingPathComponent:src.lastPathComponent].path,
-                             dst.path);
+                             src.lastPathComponent, dst.lastPathComponent);
                 } else {
                     replace = YES;
                     log_line(&ctx, @"\"%@\" already exists: replacing it once the new "
-                                   @"one is complete", dst.path);
+                                   @"one is complete", dst.lastPathComponent);
                 }
             }
 
             NSError *err = transfer_item(src, dst, replace, is_cut, &ctx);
+            BOOL cancelled = err.code == NSUserCancelledError &&
+                             [err.domain isEqualToString:NSCocoaErrorDomain];
             if (err && !first_err) first_err = err;
-            if (err.code == NSUserCancelledError &&
-                [err.domain isEqualToString:NSCocoaErrorDomain]) break;
+            if (cancelled) break;
+            if (err) {
+                errors++;
+                log_line(&ctx, @"✗ %@", err.localizedDescription);
+            }
         }
+
+        BOOL cancelled = first_err.code == NSUserCancelledError &&
+                         [first_err.domain isEqualToString:NSCocoaErrorDomain];
+        if (!cancelled) {
+            if (errors == 0) {  /* both bars end full */
+                ctx.steps_done  = ctx.steps_total;
+                ctx.file_steps  = 1;
+                ctx.file_step   = 1;
+                ctx.step_frac   = 0.0;
+                ctx.downloading = NO;
+                report(&ctx);
+            }
+            log_line(&ctx, @"%@ job completed %@ in %@", noun.capitalizedString,
+                     errors == 0 ? @"successfully"
+                                 : [NSString stringWithFormat:@"with %lld error%s",
+                                    (long long)errors, errors == 1 ? "" : "s"],
+                     files_format_duration(CFAbsoluteTimeGetCurrent() - started));
+        }
+        free(item_steps);
 
         dispatch_async(dispatch_get_main_queue(), ^{
             if (completion) completion(first_err);
@@ -1273,13 +1472,14 @@ empty_trash_with_finder:(void (^)(NSString *error))completion
  * Inputs/output are documented in file_ops.h.
  */
 int64_t
-files_folder_size(const char *path, const atomic_int *cancel)
+files_folder_size(const char *path, int64_t *files, const atomic_int *cancel)
 {
     char *const roots[] = { (char *)path, NULL };
     FTS *fts = fts_open(roots, FTS_PHYSICAL | FTS_NOCHDIR | FTS_XDEV, NULL);
     if (!fts) return -1;
 
     int64_t total = 0;
+    int64_t count = 0;
     FTSENT *e;
     while ((e = fts_read(fts)) != NULL) {
         if (cancel && atomic_load(cancel)) {
@@ -1288,12 +1488,16 @@ files_folder_size(const char *path, const atomic_int *cancel)
         }
         if (e->fts_level == FTS_ROOTLEVEL &&
             (e->fts_info == FTS_NS || e->fts_info == FTS_ERR || e->fts_info == FTS_DNR)) {
-            fts_close(fts);     /* the folder itself is missing or unreadable */
+            fts_close(fts);     /* the item itself is missing or unreadable */
             return -1;
         }
-        if (e->fts_info == FTS_F) total += e->fts_statp->st_size;
+        if (e->fts_info == FTS_F) {
+            total += e->fts_statp->st_size;
+            count++;
+        }
     }
     fts_close(fts);
+    if (files) *files = count;
     return total;
 }
 

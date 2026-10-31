@@ -269,12 +269,27 @@ BOOL files_set_finder_comment(NSURL *url, NSString *comment);
 NSString *files_format_bytes(int64_t bytes);
 
 /*
+ * files_format_duration — formats an elapsed time as the transfer log
+ * states it: seconds to one decimal up to 90 seconds, whole minutes and
+ * seconds above that, where a tenth of a second no longer tells the user
+ * anything. Thread-safe.
+ *
+ * Inputs:
+ *   seconds — elapsed time; negative values are treated as 0
+ *
+ * Output: string such as "0.4 seconds", "12.5 seconds" or
+ *         "2 minutes 5 seconds".
+ */
+NSString *files_format_duration(double seconds);
+
+/*
  * files_format_rate — formats a transfer rate as files_format_bytes + "/s".
  *
  * Inputs:
  *   bytes_per_sec — rate; negative values are treated as 0
  *
- * Output: string such as "85.2 MB/s".
+ * Output: string such as "85.2 MB/s". Always human-readable, whatever
+ * the Sizes preference says: a rate in raw bytes is unreadable.
  */
 NSString *files_format_rate(double bytes_per_sec);
 

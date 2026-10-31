@@ -651,7 +651,7 @@ start_hash_job:(NSURL *)url
         uint8_t sha_buf[FILE_SHA256_LEN];
         uint8_t md5_buf[FILE_MD5_LEN];
         int rc = file_digests(url.fileSystemRepresentation, sha_buf, md5_buf,
-                              [job cancel_flag]);
+                              [job cancel_flag], nil);
         if (rc == -2) return;
         NSString *sha = (rc == 0) ? digest_hex(sha_buf, FILE_SHA256_LEN) : nil;
         NSString *md5 = (rc == 0) ? digest_hex(md5_buf, FILE_MD5_LEN) : nil;

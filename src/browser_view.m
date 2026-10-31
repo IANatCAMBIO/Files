@@ -1875,7 +1875,7 @@ count_folder_sizes
 
         dispatch_async(self.size_queue, ^{
             if (atomic_load([token cancel_flag])) return;
-            int64_t total = files_folder_size(path.fileSystemRepresentation, [token cancel_flag]);
+            int64_t total = files_folder_size(path.fileSystemRepresentation, NULL, [token cancel_flag]);
             dispatch_async(dispatch_get_main_queue(), ^{
                 FilesBrowserView *s = ws;
                 if (!s || s.size_token != token) return;   /* reset since */

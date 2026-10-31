@@ -62,19 +62,40 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   upstream's remote, else origin), and the info sidebar shows the same three as
   Branch, Pushed and Remote rows
 - Copy, cut and paste, and drag and drop (moves by default; hold ⌥ to
-  copy), with a progress panel (speed graph, transfer log, cancel), Keep
-  Both / Replace prompts, and optional SHA-256 verification (View ▸
-  Validate Copies with SHA-256, also in Preferences ▸ Move/Copy). View ▸
-  Simple Copies (off by default; also in Preferences ▸ Move/Copy) skips
-  the panel: transfers run silently, keeping both on name clashes,
+  copy), with a progress panel (status line, progress bars, transfer log,
+  cancel), Keep Both / Replace prompts, and optional SHA-256 verification
+  (View ▸ Validate Copies with SHA-256, also in Preferences ▸ Move/Copy).
+  View ▸ Simple Copies (off by default; also in Preferences ▸ Move/Copy)
+  skips the panel: transfers run silently, keeping both on name clashes,
   and only errors are shown. Copies use APFS clones when possible and
   keep extended attributes, tags, ACLs, the Locked flag and dates; nothing
   at the destination is replaced until the new copy is complete. With
-  validation on, each file is checked as soon as it is copied and the copy
-  stops at the first mismatch; APFS clones share the original's data, so
-  they are not re-read. Files kept only in iCloud are downloaded first,
-  with their progress shown in the panel ("Downloading … from iCloud");
-  moves within iCloud Drive need no download
+  validation on, each file's source is hashed before it is copied and its
+  staged copy straight after, and the copy stops at the first mismatch;
+  APFS clones are hashed like any other copy. Files kept only in iCloud
+  are downloaded first, with their progress shown in the panel
+  ("Downloading … from iCloud"); moves within iCloud Drive need no download
+- The progress panel counts a job in **steps**, not bytes, because byte
+  totals say little about how much of a transfer is left: hashing a file
+  costs about as much as copying it, and a same-volume move or an APFS
+  clone moves no data at all. Every file costs five steps with validation
+  on — hash the source, copy it into a staging file, hash the staged copy,
+  compare the two, then rename the staged file into place or delete it —
+  and two without: copy it into a staging file, then rename it into place;
+  a move that stays on one volume is a single rename however many files it
+  covers. The job's steps are
+  counted before anything moves, so there is a progress bar for the file
+  being transferred and, when the job covers more than one file, a second
+  one for the job as a whole. The bar that stands for the job reads
+  "52% @ 5.7 MB/s": the rate is every byte of every file copied over the
+  time since the job started, so hashing, which moves no bytes but does
+  take time, pulls a validated copy's average well under the volume's own
+  speed, and a same-volume move shows no rate at all because it copies
+  nothing. The status line above them is the newest
+  line of the transfer log, so the two always agree: the log opens with
+  the job, names each step as it begins, reports each file's success with
+  the SHA-256 both sides agreed on, and closes with the job's result,
+  error count and elapsed time
 - Move to Trash, Empty Trash, New Folder and New File (File menu or the
   toolbar's + button), Paste Into (right-click a folder while files are on
   the clipboard), inline rename (right-click ▸ Rename, and
