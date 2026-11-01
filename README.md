@@ -162,7 +162,9 @@ A minimalist macOS file manager written in Objective-C + AppKit.
 - About Files shows the version (from the `VERSION` file), build date,
   the app's motto, and links to camb.io and the license
 - Address bar in the toolbar (accepts `~` and relative paths), with the
-  bookmark star beside it, between Reload and the hidden-files eye. The
+  bookmark star beside it, between Reload and the hidden-files eye. It
+  stretches to every point the other toolbar items can spare and gives
+  them back as the window narrows. The
   toolbar has no Back and Forward buttons: the address bar takes the room
   they would want, and Go ▸ Back (⌘[) and Go ▸ Forward (⌘]) navigate
   without them. Up, Open in Terminal, show/hide hidden files

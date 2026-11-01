@@ -29,10 +29,19 @@ static const CGFloat default_win_h   = 478.0;
 static const CGFloat bookmarks_bar_h = 28.0;
 static const CGFloat status_h        = 20.0;
 /* The address bar's toolbar item: the path field and its bookmark star.
- * Fixed width, so that at the window's 700 pt minimum every other item
- * still fits beside it without the toolbar overflowing. */
-static const CGFloat address_item_w  = 280.0;
-static const CGFloat address_item_h  = 24.0;
+ * It takes every point the toolbar can spare (fit_address_item), down to
+ * this floor, which the other items still clear at the window's 700 pt
+ * minimum. */
+static const CGFloat address_item_min_w = 240.0;
+static const CGFloat address_item_h     = 24.0;
+
+/* NSToolbar's own metrics, measured from the laid-out item views: the
+ * inset at each end of the bar, the padding an item's viewer leaves
+ * around the view it holds, and the width a flexible space keeps once it
+ * has nothing left to absorb. */
+static const CGFloat toolbar_edge_inset = 4.0;
+static const CGFloat toolbar_item_pad   = 8.0;
+static const CGFloat flexible_space_min = 8.0;
 static const CGFloat sidebar_w       = 180.0;  /* initial info sidebar width */
 static const CGFloat sidebar_min_w   = 140.0;
 static const CGFloat browser_min_w   = 400.0;
@@ -56,6 +65,10 @@ static void *first_responder_ctx = &first_responder_ctx;
 /* Layout */
 @property (nonatomic, strong) NSTextField           *address_bar;  /* in the toolbar, left of Show Hidden Files */
 @property (nonatomic, strong) NSButton              *bookmark_star; /* right of it: ★ / ☆ (update_bookmark_star) */
+@property (nonatomic, strong) NSLayoutConstraint    *address_width; /* set by fit_address_item */
+/* What each toolbar item measured when the bar was last laid out whole,
+ * by identifier; fit_address_item's arithmetic. */
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *item_widths;
 @property (nonatomic, weak)   NSSearchField         *search_field;  /* toolbar search field */
 @property (nonatomic, strong) FilesBookmarksBar     *bookmarks_bar;
 @property (nonatomic, strong) NSView                *browser_area; /* everything below the bar */
@@ -127,6 +140,7 @@ init_with_url:(NSURL *)url
     self = [super initWithWindow:win];
     if (!self) return nil;
 
+    self.item_widths = [NSMutableDictionary dictionary];
     [self build_toolbar];
     if (!has_saved_frame) {
         /* The toolbar grows the frame; set the frame itself once it is there. */
@@ -150,6 +164,10 @@ init_with_url:(NSURL *)url
                                            selector:@selector(window_will_close:)
                                                name:NSWindowWillCloseNotification
                                              object:self.window];
+    [NSNotificationCenter.defaultCenter addObserver:self
+                                           selector:@selector(fit_address_item)
+                                               name:NSWindowDidResizeNotification
+                                             object:self.window];
     /* Defaults can change on any thread; the search field is only touched
      * on the main queue. */
     __weak FilesMainWindow *ws = self;
@@ -169,9 +187,11 @@ init_with_url:(NSURL *)url
     };
     [self.primary_browser navigate_to:url];
 
-    /* Deferred so it runs after the window's initial first-responder pass. */
+    /* Deferred so they run after the window is on screen: the initial
+     * first-responder pass, and the toolbar's first layout. */
     dispatch_async(dispatch_get_main_queue(), ^{
         [self.window makeFirstResponder:self.address_bar];
+        [self fit_address_item];
     });
     return self;
 }
@@ -916,6 +936,80 @@ any_unmountable_volume(void)
 }
 
 /*
+ * fit_address_item — gives the address bar every point of the toolbar the
+ * other items can spare, down to address_item_min_w.
+ *
+ * NSToolbar stretches nothing of its own accord: a custom view is laid
+ * out at the size its constraints ask for, and a flexible space, not the
+ * address bar, takes up the slack. So the width is worked out here and
+ * set on the item view's own constraint.
+ *
+ * Each item is laid out inside its own viewer view, and the viewers tile
+ * the bar edge to edge, which is what makes the arithmetic possible: what
+ * is left for the address bar is the bar's width less every other item.
+ * A flexible space counts at its floor and the search field at its full
+ * width, rather than at whatever either happens to be now — otherwise
+ * growing the address bar would squeeze the search field shut and it
+ * would never open again. The rest are measured, and remembered by
+ * identifier: the moment the address bar is too wide for the window the
+ * toolbar moves items into its overflow menu, and the measurements from
+ * the last whole layout are then the only ones to work from.
+ */
+- (void)
+fit_address_item
+{
+    NSView    *box    = self.address_bar.superview;
+    NSView    *viewer = box.superview;
+    NSView    *bar    = viewer.superview;
+    NSToolbar *tb     = self.window.toolbar;
+    if (!bar || !tb) return;
+    CGFloat bar_w = NSWidth(bar.bounds);
+    if (bar_w <= 0.0) return;
+
+    /* Every viewer, left to right; the backdrop behind them spans the
+     * whole bar, which is what tells it apart from an item. */
+    NSMutableArray<NSView *> *viewers = [NSMutableArray array];
+    for (NSView *v in bar.subviews) {
+        if (NSWidth(v.frame) < bar_w) [viewers addObject:v];
+    }
+    [viewers sortUsingComparator:^NSComparisonResult(NSView *a, NSView *b) {
+        return NSMinX(a.frame) < NSMinX(b.frame) ? NSOrderedAscending : NSOrderedDescending;
+    }];
+
+    /* Measure, but only from a layout holding every visible item in the
+     * order the toolbar reports them. */
+    NSArray<NSToolbarItem *> *visible = tb.visibleItems;
+    NSUInteger mine = [viewers indexOfObject:viewer];
+    if (viewers.count == visible.count && mine != NSNotFound &&
+        [visible[mine].itemIdentifier isEqualToString:tb_address]) {
+        for (NSUInteger i = 0; i < visible.count; i++) {
+            if (i != mine)
+                self.item_widths[visible[i].itemIdentifier] = @(NSWidth(viewers[i].frame));
+        }
+    }
+
+    CGFloat taken = 0.0;
+    for (NSToolbarItem *item in tb.items) {
+        NSToolbarItemIdentifier ident = item.itemIdentifier;
+        if ([ident isEqualToString:tb_address]) continue;
+        if ([ident isEqualToString:NSToolbarFlexibleSpaceItemIdentifier]) {
+            taken += flexible_space_min;
+            continue;
+        }
+        if ([ident isEqualToString:tb_search]) {
+            taken += search_w + toolbar_item_pad;
+            continue;
+        }
+        NSNumber *measured = self.item_widths[ident];
+        if (!measured) return;   /* never yet seen laid out; the next pass will */
+        taken += measured.doubleValue;
+    }
+
+    CGFloat spare = bar_w - 2.0 * toolbar_edge_inset - taken - toolbar_item_pad;
+    self.address_width.constant = MAX(address_item_min_w, spare);
+}
+
+/*
  * toolbar_identifiers — the toolbar's items, left to right. All Mounts is
  * only worth a button when there is something mounted to unmount, so it
  * and the space before it come and go with removable volumes
@@ -938,7 +1032,7 @@ toolbar_identifiers(BOOL with_all_mounts)
         [@[tb_up, tb_reload,
            NSToolbarSpaceItemIdentifier,
            tb_address,
-           NSToolbarSpaceItemIdentifier,
+           NSToolbarFlexibleSpaceItemIdentifier,
            tb_hidden_files, tb_dual_pane, tb_sidebar,
            NSToolbarSpaceItemIdentifier,
            tb_open_terminal,
@@ -979,6 +1073,7 @@ update_all_mounts_item
         [tb removeItemAtIndex:(NSInteger)at];
         [tb removeItemAtIndex:(NSInteger)at - 1];
     }
+    [self fit_address_item];
 }
 
 /*
@@ -1083,9 +1178,10 @@ willBeInsertedIntoToolbar:(BOOL)flag
         /* The path field and its bookmark star in one custom view. A
          * toolbar item sizes a custom view from its constraints, so the
          * box carries the item's whole size and the two controls are laid
-         * out inside it. */
+         * out inside it; the width is the floor until fit_address_item
+         * stretches it to fill the bar. */
         NSView *box = [[NSView alloc]
-            initWithFrame:NSMakeRect(0, 0, address_item_w, address_item_h)];
+            initWithFrame:NSMakeRect(0, 0, address_item_min_w, address_item_h)];
 
         self.address_bar = [[NSTextField alloc] initWithFrame:NSZeroRect];
         self.address_bar.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1111,8 +1207,9 @@ willBeInsertedIntoToolbar:(BOOL)flag
         [box addSubview:star];
         self.bookmark_star = star;
 
+        self.address_width = [box.widthAnchor constraintEqualToConstant:address_item_min_w];
         [NSLayoutConstraint activateConstraints:@[
-            [box.widthAnchor  constraintEqualToConstant:address_item_w],
+            self.address_width,
             [box.heightAnchor constraintEqualToConstant:address_item_h],
             [self.address_bar.leadingAnchor  constraintEqualToAnchor:box.leadingAnchor],
             [self.address_bar.trailingAnchor constraintEqualToAnchor:star.leadingAnchor
