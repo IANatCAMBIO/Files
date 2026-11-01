@@ -27,7 +27,7 @@ static const CGFloat default_win_h   = 478.0;
 
 static const CGFloat bookmarks_bar_h = 28.0;
 static const CGFloat status_h        = 20.0;
-static const CGFloat address_h       = 30.0;   /* address bar strip under the toolbar */
+static const CGFloat address_h       = 30.0;   /* address bar strip under the bookmarks bar */
 static const CGFloat sidebar_w       = 180.0;  /* initial info sidebar width */
 static const CGFloat sidebar_min_w   = 140.0;
 static const CGFloat browser_min_w   = 400.0;
@@ -49,7 +49,10 @@ static void *first_responder_ctx = &first_responder_ctx;
 @interface FilesMainWindow () <NSToolbarDelegate, NSToolbarItemValidation>
 
 /* Layout */
-@property (nonatomic, strong) NSTextField           *address_bar;  /* full-width, under the toolbar */
+@property (nonatomic, strong) NSTextField           *address_bar;  /* full-width, under the bookmarks bar */
+/* The strip holding the address bar and its star; it moves up to the
+ * toolbar when the bookmarks bar above it is hidden. */
+@property (nonatomic, strong) NSView                *address_container;
 @property (nonatomic, strong) NSButton              *bookmark_star; /* right of it: ★ / ☆ (update_bookmark_star) */
 @property (nonatomic, weak)   NSSearchField         *search_field;  /* toolbar search field */
 @property (nonatomic, strong) FilesBookmarksBar     *bookmarks_bar;
@@ -214,7 +217,7 @@ build_toolbar
 }
 
 /*
- * build_layout — the full-width address bar on top, the bookmarks bar
+ * build_layout — the bookmarks bar on top, the full-width address bar
  * under it; below them the status bar and an NSSplitViewController whose
  * left item holds the browser pane(s) and whose right item is the
  * collapsible info sidebar (collapsed at launch). The split view controller
@@ -227,13 +230,22 @@ build_layout
     CGFloat w = content.bounds.size.width;
     CGFloat h = content.bounds.size.height;
 
-    /* Address bar: the window's full width, under the toolbar, with the
-     * bookmark star at its right and a separator along the bottom edge:
-     * the divider above the list when the bookmarks bar is hidden. */
+    /* Bookmarks bar directly under the toolbar, where Tasks and Notes put
+     * their Favorites bar. It draws its own separator along its bottom
+     * edge (bookmarks_bar.m drawRect:). */
+    self.bookmarks_bar = [[FilesBookmarksBar alloc]
+        init_with_frame:NSMakeRect(0, h - bookmarks_bar_h, w, bookmarks_bar_h)];
+    self.bookmarks_bar.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+    [content addSubview:self.bookmarks_bar];
+
+    /* Address bar: the window's full width, under the bookmarks bar, with
+     * the bookmark star at its right and a separator along the bottom
+     * edge: the divider above the list. */
     NSView *address_container = [[NSView alloc]
-        initWithFrame:NSMakeRect(0, h - address_h, w, address_h)];
+        initWithFrame:NSMakeRect(0, h - bookmarks_bar_h - address_h, w, address_h)];
     address_container.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
     [content addSubview:address_container];
+    self.address_container = address_container;
 
     self.address_bar = [[NSTextField alloc] initWithFrame:NSZeroRect];
     self.address_bar.translatesAutoresizingMaskIntoConstraints = NO;
@@ -281,14 +293,8 @@ build_layout
     address_sep.autoresizingMask = NSViewWidthSizable | NSViewMaxYMargin;
     [address_container addSubview:address_sep];
 
-    CGFloat below_address = h - address_h;
-    self.bookmarks_bar = [[FilesBookmarksBar alloc]
-        init_with_frame:NSMakeRect(0, below_address - bookmarks_bar_h, w, bookmarks_bar_h)];
-    self.bookmarks_bar.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
-    [content addSubview:self.bookmarks_bar];
-
     NSView *area = [[NSView alloc]
-        initWithFrame:NSMakeRect(0, 0, w, below_address - bookmarks_bar_h)];
+        initWithFrame:NSMakeRect(0, 0, w, h - bookmarks_bar_h - address_h)];
     area.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     [content addSubview:area];
     self.browser_area = area;
@@ -425,8 +431,8 @@ build_layout
 /*
  * apply_bookmarks_bar_pref — shows or hides the bookmarks bar to match
  * files_pref_show_bookmarks (View ▸ Show Bookmarks Bar); when hidden, the
- * browser area takes its height. Cheap when nothing changed, so it runs on
- * every defaults change.
+ * address bar rises to the toolbar and the browser area takes the bar's
+ * height. Cheap when nothing changed, so it runs on every defaults change.
  */
 - (void)
 apply_bookmarks_bar_pref
@@ -434,10 +440,12 @@ apply_bookmarks_bar_pref
     BOOL show = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_show_bookmarks];
     if (self.bookmarks_bar.hidden == !show) return;
     self.bookmarks_bar.hidden = !show;
-    NSRect bounds = self.window.contentView.bounds;
+    NSRect  bounds = self.window.contentView.bounds;
+    CGFloat bar_h  = show ? bookmarks_bar_h : 0.0;
+    self.address_container.frame = NSMakeRect(0, NSHeight(bounds) - bar_h - address_h,
+                                              NSWidth(bounds), address_h);
     self.browser_area.frame = NSMakeRect(0, 0, NSWidth(bounds),
-                                         NSHeight(bounds) - address_h
-                                         - (show ? bookmarks_bar_h : 0.0));
+                                         NSHeight(bounds) - address_h - bar_h);
 }
 
 /* ── Panes ───────────────────────────────────────────────────────────────── */

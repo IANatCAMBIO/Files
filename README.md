@@ -32,7 +32,8 @@ A minimalist macOS file manager written in Objective-C + AppKit.
 - View ▸ Show Full Path in Title (on by default; also in Preferences)
   titles the window with the active pane's full path instead of just the
   folder name
-- Bookmarks bar (Home, Desktop, Downloads, Documents, Applications, Trash);
+- Bookmarks bar directly under the toolbar, where Tasks and Notes put their
+  Favorites bar (Home, Desktop, Downloads, Documents, Applications, Trash);
   ⌘D adds the current folder, and right-click ▸ Add to Bookmarks on a
   folder in the list adds that folder (before Trash, which is always
   last). The star right of the address bar shows ★ when the current
