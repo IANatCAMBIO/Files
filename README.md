@@ -36,10 +36,10 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   Favorites bar (Home, Desktop, Downloads, Documents, Applications, Trash);
   ⌘D adds the current folder, and right-click ▸ Add to Bookmarks on a
   folder in the list adds that folder (before Trash, which is always
-  last). The star right of the address bar shows ★ when the current
-  folder is a bookmark and ☆ when it is not; click it to toggle. Drag a
-  bookmark along the bar to reorder it, and right-click it to remove it.
-  When the window is too narrow for every bookmark, scroll over the bar
+  last). The star right of the address bar, in the toolbar, shows ★ when
+  the current folder is a bookmark and ☆ when it is not; click it to
+  toggle. Drag a bookmark along the bar to reorder it, and right-click it
+  to remove it. When the window is too narrow for every bookmark, scroll over the bar
   (mouse wheel or trackpad) to move along it. View ▸ Show Bookmarks Bar or the same
   checkbox in Preferences ▸ View (on by default) hides or shows it in
   every window
@@ -161,12 +161,16 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   Keep Files running for faster startup (see Keeping Files running)
 - About Files shows the version (from the `VERSION` file), build date,
   the app's motto, and links to camb.io and the license
-- Address bar (accepts `~` and relative paths), back/forward/up, Open in
-  Terminal, show/hide hidden files (View ▸ Show Hidden Files, ⇧⌘., or the
-  toolbar's eye button — macOS flags `/Volumes`, `/usr`, `/private` and
-  the other Unix directories hidden, so `/` lists only four items until
-  this is on). An ⏏ toolbar button opens All Mounts, and appears only
-  while something unmountable is mounted
+- Address bar in the toolbar (accepts `~` and relative paths), with the
+  bookmark star beside it, between Reload and the hidden-files eye. The
+  toolbar has no Back and Forward buttons: the address bar takes the room
+  they would want, and Go ▸ Back (⌘[) and Go ▸ Forward (⌘]) navigate
+  without them. Up, Open in Terminal, show/hide hidden files
+  (View ▸ Show Hidden Files, ⇧⌘., or the toolbar's eye button — macOS
+  flags `/Volumes`, `/usr`, `/private` and the other Unix directories
+  hidden, so `/` lists only four items until this is on). An ⏏ toolbar
+  button opens All Mounts, and appears only while something unmountable is
+  mounted
 
 ## Prerequisites
 

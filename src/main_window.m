@@ -13,6 +13,7 @@
 static NSString * const tb_back_forward  = @"files.back-forward";
 static NSString * const tb_up            = @"files.up";
 static NSString * const tb_reload        = @"files.reload";
+static NSString * const tb_address       = @"files.address";
 static NSString * const tb_hidden_files  = @"files.hidden-files";
 static NSString * const tb_search        = @"files.search";
 static NSString * const tb_open_terminal = @"files.open-terminal";
@@ -27,7 +28,11 @@ static const CGFloat default_win_h   = 478.0;
 
 static const CGFloat bookmarks_bar_h = 28.0;
 static const CGFloat status_h        = 20.0;
-static const CGFloat address_h       = 30.0;   /* address bar strip under the bookmarks bar */
+/* The address bar's toolbar item: the path field and its bookmark star.
+ * Fixed width, so that at the window's 700 pt minimum every other item
+ * still fits beside it without the toolbar overflowing. */
+static const CGFloat address_item_w  = 280.0;
+static const CGFloat address_item_h  = 24.0;
 static const CGFloat sidebar_w       = 180.0;  /* initial info sidebar width */
 static const CGFloat sidebar_min_w   = 140.0;
 static const CGFloat browser_min_w   = 400.0;
@@ -49,10 +54,7 @@ static void *first_responder_ctx = &first_responder_ctx;
 @interface FilesMainWindow () <NSToolbarDelegate, NSToolbarItemValidation>
 
 /* Layout */
-@property (nonatomic, strong) NSTextField           *address_bar;  /* full-width, under the bookmarks bar */
-/* The strip holding the address bar and its star; it moves up to the
- * toolbar when the bookmarks bar above it is hidden. */
-@property (nonatomic, strong) NSView                *address_container;
+@property (nonatomic, strong) NSTextField           *address_bar;  /* in the toolbar, left of Show Hidden Files */
 @property (nonatomic, strong) NSButton              *bookmark_star; /* right of it: ★ / ☆ (update_bookmark_star) */
 @property (nonatomic, weak)   NSSearchField         *search_field;  /* toolbar search field */
 @property (nonatomic, strong) FilesBookmarksBar     *bookmarks_bar;
@@ -217,11 +219,12 @@ build_toolbar
 }
 
 /*
- * build_layout — the bookmarks bar on top, the full-width address bar
- * under it; below them the status bar and an NSSplitViewController whose
- * left item holds the browser pane(s) and whose right item is the
- * collapsible info sidebar (collapsed at launch). The split view controller
- * manages collapsing, minimum widths and the divider.
+ * build_layout — the bookmarks bar on top (the address bar is a toolbar
+ * item, see toolbar:itemForItemIdentifier:); below it the status bar and
+ * an NSSplitViewController whose left item holds the browser pane(s) and
+ * whose right item is the collapsible info sidebar (collapsed at launch).
+ * The split view controller manages collapsing, minimum widths and the
+ * divider.
  */
 - (void)
 build_layout
@@ -232,69 +235,14 @@ build_layout
 
     /* Bookmarks bar directly under the toolbar, where Tasks and Notes put
      * their Favorites bar. It draws its own separator along its bottom
-     * edge (bookmarks_bar.m drawRect:). */
+     * edge (bookmarks_bar.m drawRect:), the divider above the list. */
     self.bookmarks_bar = [[FilesBookmarksBar alloc]
         init_with_frame:NSMakeRect(0, h - bookmarks_bar_h, w, bookmarks_bar_h)];
     self.bookmarks_bar.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
     [content addSubview:self.bookmarks_bar];
 
-    /* Address bar: the window's full width, under the bookmarks bar, with
-     * the bookmark star at its right and a separator along the bottom
-     * edge: the divider above the list. */
-    NSView *address_container = [[NSView alloc]
-        initWithFrame:NSMakeRect(0, h - bookmarks_bar_h - address_h, w, address_h)];
-    address_container.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
-    [content addSubview:address_container];
-    self.address_container = address_container;
-
-    self.address_bar = [[NSTextField alloc] initWithFrame:NSZeroRect];
-    self.address_bar.translatesAutoresizingMaskIntoConstraints = NO;
-    self.address_bar.placeholderString = @"Path";
-    self.address_bar.bezelStyle        = NSTextFieldRoundedBezel;
-    self.address_bar.font              = [NSFont monospacedSystemFontOfSize:12.0
-                                                                     weight:NSFontWeightRegular];
-    self.address_bar.target            = self;
-    self.address_bar.action            = @selector(address_bar_action:);
-    self.address_bar.focusRingType     = NSFocusRingTypeNone;
-    /* One line, the end of the path kept in view when it is too long. */
-    self.address_bar.usesSingleLineMode = YES;
-    self.address_bar.cell.wraps         = NO;
-    self.address_bar.cell.scrollable    = YES;
-    self.address_bar.lineBreakMode      = NSLineBreakByTruncatingHead;
-    [address_container addSubview:self.address_bar];
-
-    NSButton *star = [NSButton buttonWithTitle:@"☆" target:self
-                                        action:@selector(toggle_bookmark_action:)];
-    star.translatesAutoresizingMaskIntoConstraints = NO;
-    star.bordered = NO;   /* a bare glyph, no button background */
-    star.font     = [NSFont systemFontOfSize:14.0];
-    [address_container addSubview:star];
-    self.bookmark_star = star;
-
-    [NSLayoutConstraint activateConstraints:@[
-        [self.address_bar.leadingAnchor  constraintEqualToAnchor:address_container.leadingAnchor
-                                                        constant:8.0],
-        [self.address_bar.trailingAnchor constraintEqualToAnchor:star.leadingAnchor
-                                                        constant:-4.0],
-        /* Centred in the strip above the separator. The 1 pt separator
-         * takes the bottom of the container, and the rounded bezel's
-         * alignment rect sits about half a point below its drawn edge:
-         * measured together they left the field 1 pt low. */
-        [self.address_bar.centerYAnchor  constraintEqualToAnchor:address_container.centerYAnchor
-                                                        constant:-1.0],
-        [star.trailingAnchor constraintEqualToAnchor:address_container.trailingAnchor
-                                            constant:-8.0],
-        [star.centerYAnchor  constraintEqualToAnchor:self.address_bar.centerYAnchor],
-        [star.widthAnchor    constraintEqualToConstant:26.0],
-    ]];
-
-    NSBox *address_sep = [[NSBox alloc] initWithFrame:NSMakeRect(0, 0, w, 1)];
-    address_sep.boxType          = NSBoxSeparator;
-    address_sep.autoresizingMask = NSViewWidthSizable | NSViewMaxYMargin;
-    [address_container addSubview:address_sep];
-
     NSView *area = [[NSView alloc]
-        initWithFrame:NSMakeRect(0, 0, w, h - bookmarks_bar_h - address_h)];
+        initWithFrame:NSMakeRect(0, 0, w, h - bookmarks_bar_h)];
     area.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     [content addSubview:area];
     self.browser_area = area;
@@ -431,8 +379,8 @@ build_layout
 /*
  * apply_bookmarks_bar_pref — shows or hides the bookmarks bar to match
  * files_pref_show_bookmarks (View ▸ Show Bookmarks Bar); when hidden, the
- * address bar rises to the toolbar and the browser area takes the bar's
- * height. Cheap when nothing changed, so it runs on every defaults change.
+ * browser area takes its height. Cheap when nothing changed, so it runs on
+ * every defaults change.
  */
 - (void)
 apply_bookmarks_bar_pref
@@ -440,12 +388,9 @@ apply_bookmarks_bar_pref
     BOOL show = [NSUserDefaults.standardUserDefaults boolForKey:files_pref_show_bookmarks];
     if (self.bookmarks_bar.hidden == !show) return;
     self.bookmarks_bar.hidden = !show;
-    NSRect  bounds = self.window.contentView.bounds;
-    CGFloat bar_h  = show ? bookmarks_bar_h : 0.0;
-    self.address_container.frame = NSMakeRect(0, NSHeight(bounds) - bar_h - address_h,
-                                              NSWidth(bounds), address_h);
+    NSRect bounds = self.window.contentView.bounds;
     self.browser_area.frame = NSMakeRect(0, 0, NSWidth(bounds),
-                                         NSHeight(bounds) - address_h - bar_h);
+                                         NSHeight(bounds) - (show ? bookmarks_bar_h : 0.0));
 }
 
 /* ── Panes ───────────────────────────────────────────────────────────────── */
@@ -976,6 +921,11 @@ any_unmountable_volume(void)
  * and the space before it come and go with removable volumes
  * (update_all_mounts_item).
  *
+ * Back and Forward are deliberately absent: the address bar sits in the
+ * toolbar, and at the window's minimum width something had to give. The
+ * item is still allowed (toolbarAllowedItemIdentifiers:), and Go ▸ Back
+ * (⌘[) and Go ▸ Forward (⌘]) navigate without it.
+ *
  * Inputs:
  *   with_all_mounts — YES to include the All Mounts button
  *
@@ -985,7 +935,9 @@ static NSArray<NSToolbarItemIdentifier> *
 toolbar_identifiers(BOOL with_all_mounts)
 {
     NSMutableArray<NSToolbarItemIdentifier> *ids =
-        [@[tb_back_forward, tb_up, tb_reload,
+        [@[tb_up, tb_reload,
+           NSToolbarSpaceItemIdentifier,
+           tb_address,
            NSToolbarSpaceItemIdentifier,
            tb_hidden_files, tb_dual_pane, tb_sidebar,
            NSToolbarSpaceItemIdentifier,
@@ -1030,17 +982,18 @@ update_all_mounts_item
 }
 
 /*
- * toolbarAllowedItemIdentifiers: — every item the toolbar may show.
+ * toolbarAllowedItemIdentifiers: — every item the toolbar may show: the
+ * default items plus Back/Forward, which is not one of them.
  *
  * Inputs:
  *   toolbar — the toolbar (unused)
  *
- * Output: toolbar_identifiers().
+ * Output: toolbar_identifiers() plus tb_back_forward.
  */
 - (NSArray<NSToolbarItemIdentifier> *)
 toolbarAllowedItemIdentifiers:(NSToolbar *)toolbar
 {
-    return toolbar_identifiers(YES);
+    return [toolbar_identifiers(YES) arrayByAddingObject:tb_back_forward];
 }
 
 /*
@@ -1125,6 +1078,58 @@ willBeInsertedIntoToolbar:(BOOL)flag
             group.subitems[i].target  = self;
         }
         return group;
+    }
+    if ([identifier isEqualToString:tb_address]) {
+        /* The path field and its bookmark star in one custom view. A
+         * toolbar item sizes a custom view from its constraints, so the
+         * box carries the item's whole size and the two controls are laid
+         * out inside it. */
+        NSView *box = [[NSView alloc]
+            initWithFrame:NSMakeRect(0, 0, address_item_w, address_item_h)];
+
+        self.address_bar = [[NSTextField alloc] initWithFrame:NSZeroRect];
+        self.address_bar.translatesAutoresizingMaskIntoConstraints = NO;
+        self.address_bar.placeholderString = @"Path";
+        self.address_bar.bezelStyle        = NSTextFieldRoundedBezel;
+        self.address_bar.font              = [NSFont monospacedSystemFontOfSize:11.0
+                                                                         weight:NSFontWeightRegular];
+        self.address_bar.target            = self;
+        self.address_bar.action            = @selector(address_bar_action:);
+        self.address_bar.focusRingType     = NSFocusRingTypeNone;
+        /* One line, the end of the path kept in view when it is too long. */
+        self.address_bar.usesSingleLineMode = YES;
+        self.address_bar.cell.wraps         = NO;
+        self.address_bar.cell.scrollable    = YES;
+        self.address_bar.lineBreakMode      = NSLineBreakByTruncatingHead;
+        [box addSubview:self.address_bar];
+
+        NSButton *star = [NSButton buttonWithTitle:@"☆" target:self
+                                            action:@selector(toggle_bookmark_action:)];
+        star.translatesAutoresizingMaskIntoConstraints = NO;
+        star.bordered = NO;   /* a bare glyph, no button background */
+        star.font     = [NSFont systemFontOfSize:14.0];
+        [box addSubview:star];
+        self.bookmark_star = star;
+
+        [NSLayoutConstraint activateConstraints:@[
+            [box.widthAnchor  constraintEqualToConstant:address_item_w],
+            [box.heightAnchor constraintEqualToConstant:address_item_h],
+            [self.address_bar.leadingAnchor  constraintEqualToAnchor:box.leadingAnchor],
+            [self.address_bar.trailingAnchor constraintEqualToAnchor:star.leadingAnchor
+                                                            constant:-2.0],
+            [self.address_bar.centerYAnchor  constraintEqualToAnchor:box.centerYAnchor],
+            [star.trailingAnchor constraintEqualToAnchor:box.trailingAnchor],
+            [star.centerYAnchor  constraintEqualToAnchor:self.address_bar.centerYAnchor],
+            [star.widthAnchor    constraintEqualToConstant:24.0],
+        ]];
+
+        NSToolbarItem *item = [[NSToolbarItem alloc] initWithItemIdentifier:identifier];
+        item.view    = box;
+        item.label   = @"Path";
+        item.toolTip = @"Path";
+        /* The last thing worth dropping when the toolbar runs out of room. */
+        item.visibilityPriority = NSToolbarItemVisibilityPriorityHigh;
+        return item;
     }
     if ([identifier isEqualToString:tb_up])
         return button_item(identifier, @"Up", @"arrow.up", @selector(go_up_action:), self);
