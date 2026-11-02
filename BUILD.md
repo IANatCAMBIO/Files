@@ -53,7 +53,7 @@ macOS) to render the app icon; see [App icon](#app-icon).
 |-----------------|-----------------|----------------------------------------|
 | Build (default) | `make`          | Compiles and assembles `Files.app`     |
 | Run             | `make run`      | Builds then opens the app with `open`  |
-| Install         | `make install`  | Replaces `~/Applications/Files.app` with the new build; a running copy is sent SIGTERM, killed after 5 s, and reopened |
+| Install         | `make install`  | Replaces `~/Applications/Files.app` with the new build; a running copy is sent SIGTERM, killed after 5 s, and reopened. A reopen LaunchServices refuses (it can still hold the bundle that was just replaced) is retried, and then reported rather than failing the install, which has already happened |
 | Test            | `make test`     | Release checks: `test-build`, `test-unit`, `test-features`, `test-ui` |
 | Test (build)    | `make test-build` | From-scratch build with zero warnings; valid `Info.plist`, executable and signature |
 | Test (unit)     | `make test-unit` | Builds and runs the copy-engine, archive and sort tests (`tests/`) |
@@ -108,7 +108,10 @@ name (`NSBundle pathForResource:ofType:`).
 The app icon is `resources/app_icon.png`, a 1024×1024 PNG with a transparent
 background. `make` renders it at every size an iconset holds with `sips`,
 packs them into `build/app_icon.icns` with `iconutil` (both ship with macOS)
-and copies the `.icns` into `Resources/`. Info.plist names it in
+and copies the `.icns` into `Resources/`. Each size is retried and checked,
+because sips now and then cannot rename its temporary file into the iconset
+("Error 13"), which otherwise left a size out of the icon or stopped the
+bundle from assembling with an error pointing somewhere else. Info.plist names it in
 `CFBundleIconFile`, and the app loads the same file for the Dock tile and the
 About panel (`files_app_icon()`). To change the icon, replace the PNG and run
 `make`.

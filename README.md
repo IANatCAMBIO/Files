@@ -43,6 +43,10 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   (mouse wheel or trackpad) to move along it. View ▸ Show Bookmarks Bar or the same
   checkbox in Preferences ▸ View (on by default) hides or shows it in
   every window
+- Type-select: with the list focused, typing a letter jumps the selection
+  to the next item whose name starts with it, as in Finder; keep typing to
+  narrow it (the typed letters are forgotten after about a second). Only
+  names are matched, never a row's kind, permissions or comment
 - Quick Look: Space previews the selection (Space or Esc closes it; the
   arrow keys move through the list and the preview follows)
 - Collapsible info sidebar with a Quick Look thumbnail and file details
@@ -338,6 +342,7 @@ folder.
 | Desktop        | ⌘⇧D               |
 | Downloads      | ⌘⇧L               |
 | Documents      | ⌘⇧O               |
+| Jump to an item | type its first letters |
 
 ## License
 

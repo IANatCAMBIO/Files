@@ -2506,6 +2506,34 @@ viewForTableColumn:(NSTableColumn *)col
 }
 
 /*
+ * tableView:typeSelectStringForTableColumn:row: — what a typed letter
+ * matches a row against: the item's name, exactly as the Name column
+ * shows it. A view-based table holds its text in cell views rather than
+ * in values of its own, so AppKit has nothing to fall back on and typing
+ * a letter in the list does nothing at all without this. Only the Name
+ * column answers, so a letter never jumps to a row by its kind, its
+ * permissions or its comment.
+ *
+ * Inputs:
+ *   tv  — the file list (unused)
+ *   col — the column being matched; nil means the table did not name one
+ *   row — row index
+ *
+ * Output: the item's name, or nil for any other column and for a row that
+ *         a newer listing has taken away.
+ */
+- (NSString *)
+tableView:(NSTableView *)tv
+typeSelectStringForTableColumn:(NSTableColumn *)col
+      row:(NSInteger)row
+{
+    if (col && ![col.identifier isEqualToString:col_name]) return nil;
+    if (row < 0 || (NSUInteger)row >= self.filtered_items.count) return nil;
+    cell_context_t ctx = [self cell_context];
+    return cell_text(col_name, self.filtered_items[(NSUInteger)row], &ctx);
+}
+
+/*
  * tableView:didClickTableColumn: — handles column header clicks for sorting.
  * Clicking the active sort column flips ascending/descending; clicking another
  * column sorts by it ascending. A click on Permissions or Comment does

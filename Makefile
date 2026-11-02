@@ -84,11 +84,25 @@ ICON_SRC = resources/app_icon.png
 ICON     = build/app_icon.icns
 ICONSET  = build/app_icon.iconset
 
+# sips now and then cannot rename its temporary file into the iconset
+# directory ("Error 13: an unknown error occurred"), which left the iconset
+# short of a size or two; iconutil then either failed or packed an icns
+# missing them, and the error surfaced further on as a bundle that would
+# not assemble. Each render is retried and its output checked, and a size
+# that still will not render stops the build where it went wrong.
 $(ICON): $(ICON_SRC) | build
 	@rm -rf $(ICONSET) && mkdir -p $(ICONSET)
-	@for s in 16 32 128 256 512; do \
-	    sips -z $$s $$s $< --out $(ICONSET)/icon_$${s}x$${s}.png >/dev/null; \
-	    sips -z $$((s * 2)) $$((s * 2)) $< --out $(ICONSET)/icon_$${s}x$${s}@2x.png >/dev/null; \
+	@render() { \
+	    for try in 1 2 3; do \
+	        sips -z $$1 $$1 $< --out "$$2" >/dev/null 2>&1 && [ -s "$$2" ] && return 0; \
+	        sleep 1; \
+	    done; \
+	    echo "$@: could not render $$2 at $$1 px" >&2; \
+	    return 1; \
+	}; \
+	for s in 16 32 128 256 512; do \
+	    render $$s $(ICONSET)/icon_$${s}x$${s}.png || exit 1; \
+	    render $$((s * 2)) $(ICONSET)/icon_$${s}x$${s}@2x.png || exit 1; \
 	done
 	@iconutil -c icns -o $@ $(ICONSET)
 
@@ -149,7 +163,16 @@ install: all
 	rm -rf "$(INSTALL_DIR)/$(BUNDLE)" && \
 	cp -R $(BUNDLE) "$(INSTALL_DIR)/$(BUNDLE)" && \
 	echo "Installed to $(INSTALL_DIR)/$(BUNDLE)" && \
-	if [ $$running = 1 ]; then open "$(INSTALL_DIR)/$(BUNDLE)" && echo "Reopened Files"; fi
+	if [ $$running = 1 ]; then \
+	    for try in 1 2 3; do \
+	        open "$(INSTALL_DIR)/$(BUNDLE)" >/dev/null 2>&1; \
+	        for i in 1 2 3 4 5 6; do \
+	            pgrep -qxf "$(INSTALLED_BIN)" && break 2; sleep 0.5; \
+	        done; \
+	    done; \
+	    if pgrep -qxf "$(INSTALLED_BIN)"; then echo "Reopened Files"; \
+	    else echo "Files is installed but did not reopen; open it yourself"; fi; \
+	fi
 
 # Engine tests: tests/*_test.m linked against the app's objects (all but
 # main.o), run against a scratch folder and a small disk image.
