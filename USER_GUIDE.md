@@ -35,8 +35,12 @@ The full reference for Files. See [README.md](README.md) to install it and
 - View ▸ Always Show Folders First (on by default; also in Preferences)
   keeps every folder above the files, as Finder does. Turn it off and
   folders take their place among the files in whatever order is in force.
-- Auto-fit columns (View ▸ Auto-Fit Columns, on by default) and optional
-  double-height rows with larger icons (View ▸ Large Rows).
+- Auto-fit columns (View ▸ Auto-Fit Columns, on by default) sizes every
+  column but Name to the widest thing in it, and gives Name all the width
+  that is left: the other columns hold values of a predictable width, so
+  Name is the one that takes the window, growing and shrinking with it.
+  Turn it off to size the columns by dragging their headers instead.
+- Optional double-height rows with larger icons (View ▸ Large Rows).
 - Single- or dual-pane browsing (View ▸ Dual Pane, ⇧⌘2; Tab switches
   panes; right-click a folder ▸ Open in Split Pane).
 - The status bar shows the item count and, on the right, the free and

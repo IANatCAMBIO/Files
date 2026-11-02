@@ -1020,9 +1020,12 @@ shows_column:(NSString *)col_id
 /*
  * columns_to_fit — the columns a listing or search about to be prepared
  * should measure for auto-fit (column_text_widths), off the main thread.
+ * Name is left out: it is sized from what the other columns leave over
+ * (apply_auto_fit), so measuring every file name would be work for
+ * nothing — and it is the longest text in the list.
  *
- * Output: identifiers of the shown columns if the rows will be auto-fitted
- * when shown (auto_fit_pending with Auto-Fit on), else nil.
+ * Output: identifiers of the shown columns bar Name if the rows will be
+ * auto-fitted when shown (auto_fit_pending with Auto-Fit on), else nil.
  */
 - (NSArray<NSString *> *)
 columns_to_fit
@@ -1030,7 +1033,9 @@ columns_to_fit
     if (!self.auto_fit || !self.auto_fit_pending) return nil;
     NSMutableArray<NSString *> *ids = [NSMutableArray array];
     for (NSTableColumn *col in self.table.tableColumns) {
-        if (!col.hidden) [ids addObject:col.identifier];
+        if (!col.hidden && ![col.identifier isEqualToString:col_name]) {
+            [ids addObject:col.identifier];
+        }
     }
     return ids;
 }
@@ -2222,14 +2227,25 @@ cell_context
 }
 
 /*
- * apply_auto_fit — sizes every column to its widest content (header and the
- * first AUTO_FIT_ROW_LIMIT rows, in the column's real font), respecting each
- * column's minWidth, then gives the Name column whatever width is left over
- * (or takes back the overflow, down to its minWidth) so the columns exactly
- * fill the visible width. A horizontal scrollbar therefore only appears when
- * the view is narrower than the minimum the columns need. Runs once per
- * navigation or search and when the Auto-Fit toggle is turned on — not on
- * every watcher refresh.
+ * apply_auto_fit — sizes every column but Name to its widest content
+ * (header and the first AUTO_FIT_ROW_LIMIT rows, in the column's real
+ * font), respecting each column's minWidth, then gives Name all the width
+ * that is left, down to its own minWidth, so the columns exactly fill the
+ * visible width. A horizontal scrollbar therefore only appears when the
+ * view is narrower than the minimum the columns need.
+ *
+ * Name is the column that takes the window because it is the only one
+ * whose content has no typical width: sizing it to its content like the
+ * rest, and then taking the overflow back out of it, left it at its
+ * minimum in any folder holding one long file name, with the width it gave
+ * up showing as empty space to the right of the last column (the table has
+ * already absorbed part of that overflow into Name by the time the total
+ * is known, so the overflow came off it twice).
+ *
+ * Runs once per navigation or search and when the Auto-Fit toggle is
+ * turned on — not on every watcher refresh. A window resize needs no run
+ * of its own: NSTableViewFirstColumnOnlyAutoresizingStyle hands the
+ * difference to Name, which is the first column.
  */
 - (void)
 apply_auto_fit
@@ -2248,17 +2264,22 @@ apply_auto_fit
 - (void)
 apply_auto_fit_measured:(NSDictionary<NSString *, NSNumber *> *)measured
 {
-    /* Extra fixed pixels: icon+gap for Name col; cell left+right padding
-     * elsewhere. Each also loses the intercell spacing, which the table
-     * takes out of a column's width before laying out its cell view. */
+    /* Extra fixed pixels: the cell's left and right padding, and the
+     * intercell spacing, which the table takes out of a column's width
+     * before laying out its cell view. The table also lays each column out
+     * one spacing wider than its width, so the row of columns is that much
+     * wider than their widths add up to — hence the spacing coming off
+     * Name's share once per shown column. */
     CGFloat spacing    = self.table.intercellSpacing.width;
-    CGFloat name_extra = [self icon_size] + 4 + 2 + 2 + spacing; /* icon + gap + pads */
-    CGFloat cell_extra = 2 + 2 + spacing;                        /* l-pad + r-pad */
-    static const CGFloat header_pad = 10;                        /* header padding + margin */
+    CGFloat cell_extra = 2 + 2 + spacing;  /* l-pad + r-pad */
+    static const CGFloat header_pad = 10;  /* header padding + margin */
 
+    NSTableColumn *name_col = [self.table tableColumnWithIdentifier:col_name];
     NSMutableArray<NSString *> *unmeasured = [NSMutableArray array];
     for (NSTableColumn *col in self.table.tableColumns) {
-        if (!col.hidden && !measured[col.identifier]) [unmeasured addObject:col.identifier];
+        if (!col.hidden && col != name_col && !measured[col.identifier]) {
+            [unmeasured addObject:col.identifier];
+        }
     }
     if (unmeasured.count > 0) {
         cell_context_t ctx = [self cell_context];
@@ -2267,16 +2288,17 @@ apply_auto_fit_measured:(NSDictionary<NSString *, NSNumber *> *)measured
         measured = all;
     }
 
-    CGFloat total = 0;
+    CGFloat    others = 0;
+    NSUInteger shown  = 0;
     for (NSTableColumn *col in self.table.tableColumns) {
         if (col.hidden) continue;
-        NSString *col_id = col.identifier;
+        shown++;
+        if (col == name_col) continue;
         CGFloat header_w = [col.title sizeWithAttributes:
             @{ NSFontAttributeName: col.headerCell.font }].width + header_pad;
-        CGFloat extra = [col_id isEqualToString:col_name] ? name_extra : cell_extra;
-        CGFloat max_w = MAX(header_w, measured[col_id].doubleValue + extra);
+        CGFloat max_w = MAX(header_w, measured[col.identifier].doubleValue + cell_extra);
         col.width = MAX(col.minWidth, max_w);
-        total    += col.width;
+        others   += col.width;
     }
 
     /* Fit to the visible width. With legacy (always-visible) scrollers the
@@ -2292,8 +2314,7 @@ apply_auto_fit_measured:(NSDictionary<NSString *, NSNumber *> *)measured
                                                borderType:self.scroll.borderType
                                               controlSize:NSControlSizeRegular
                                             scrollerStyle:self.scroll.scrollerStyle].width;
-    NSTableColumn *name_col = [self.table tableColumnWithIdentifier:col_name];
-    name_col.width = MAX(name_col.minWidth, name_col.width + (avail - total));
+    name_col.width = MAX(name_col.minWidth, avail - others - spacing * shown);
 }
 
 /* ── Trash and status ────────────────────────────────────────────────── */
