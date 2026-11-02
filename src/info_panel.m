@@ -3,6 +3,7 @@
 #import "file_hash.h"
 #import "git_info.h"
 #import "util.h"
+#import "default_apps_panel.h"
 #include <sys/stat.h>
 #include <sys/xattr.h>
 #include <pwd.h>
@@ -58,26 +59,30 @@ make_value(void)
     return tf;
 }
 
-/* ── copy-link button helper ─────────────────────────────────────────── */
+/* ── link button helper ──────────────────────────────────────────────── */
 
 /*
- * make_copy_btn — creates a borderless link-styled "copy" button.
+ * make_link_btn — creates a borderless link-styled word to sit beside a
+ * value: the "copy" beside a hash or a path, the "change" beside Opens
+ * with. One helper so every link in the panel reads the same.
  *
  * Inputs:
+ *   title  — the word, e.g. @"copy"
  *   target — action target
  *   action — selector to call on click
- *   tag    — button tag the action uses to tell the buttons apart
+ *   tag    — button tag the action uses to tell the buttons apart; 0 when
+ *            the action serves one button only
  *
  * Output: configured NSButton.
  */
 static NSButton *
-make_copy_btn(id target, SEL action, NSInteger tag)
+make_link_btn(NSString *title, id target, SEL action, NSInteger tag)
 {
     NSButton *btn  = [[NSButton alloc] init];
     btn.buttonType = NSButtonTypeMomentaryPushIn;
     btn.bordered   = NO;
     NSMutableAttributedString *t =
-        [[NSMutableAttributedString alloc] initWithString:@"copy"];
+        [[NSMutableAttributedString alloc] initWithString:title];
     [t setAttributes:@{
         NSForegroundColorAttributeName: NSColor.linkColor,
         NSFontAttributeName: [NSFont systemFontOfSize:9.0],
@@ -270,6 +275,8 @@ make_ownership_popup(NSArray<NSString *> *names, id target, SEL action)
 @property (nonatomic, copy)   NSString    *comment_original; /* value when editing began */
 @property (nonatomic, strong) NSTextField *kind_value;
 @property (nonatomic, strong) NSTextField *opens_with_value;
+@property (nonatomic, strong) NSButton    *opens_with_change;  /* the "change" link */
+@property (nonatomic, strong) UTType      *opens_with_type;    /* the item's type, for it */
 @property (nonatomic, strong) NSTextField *size_value;
 @property (nonatomic, strong) NSTextField *where_value;
 @property (nonatomic, strong) NSTextField *created_value;
@@ -439,8 +446,18 @@ init
     [self.comment_field setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
                                                  forOrientation:NSLayoutConstraintOrientationHorizontal];
 
+    /* "change" opens Set Default Apps on this item's type; hidden for the
+     * items that have no default application to change (folders and
+     * application bundles open themselves). */
+    self.opens_with_change = make_link_btn(@"change", self,
+                                           @selector(change_default_app_action:), 0);
+    NSStackView *opens_with_row =
+        [NSStackView stackViewWithViews:@[self.opens_with_value, self.opens_with_change]];
+    opens_with_row.spacing   = 6.0;
+    opens_with_row.alignment = NSLayoutAttributeFirstBaseline;
+
     row(@"Kind:",       self.kind_value);
-    row(@"Opens with:", self.opens_with_value);
+    row(@"Opens with:", opens_with_row);
     row(@"Size:",       self.size_value);
     row(@"Where:",      self.where_value);
     row(@"Created:",    self.created_value);
@@ -501,7 +518,7 @@ init
         hf.selectable    = YES;
         hf.lineBreakMode = NSLineBreakByTruncatingTail;
         NSStackView *line = [NSStackView stackViewWithViews:@[
-            hf, make_copy_btn(self, @selector(copy_hash_action:), tag)]];
+            hf, make_link_btn(@"copy", self, @selector(copy_hash_action:), tag)]];
         line.spacing = 4.0;
         row(tag == copy_tag_sha256 ? @"SHA-256:" : @"MD5:", line);
         tag = copy_tag_md5;
@@ -683,7 +700,7 @@ populate_fields:(NSURL *)url
         NSURLNameKey, NSURLFileSizeKey, NSURLFileAllocatedSizeKey,
         NSURLIsDirectoryKey,
         NSURLCreationDateKey, NSURLContentModificationDateKey,
-        NSURLIsUserImmutableKey
+        NSURLIsUserImmutableKey, NSURLContentTypeKey
     ];
     /* url often comes from the browser listing with values cached at list
      * time; read a fresh URL so the panel shows the item's current state
@@ -705,6 +722,14 @@ populate_fields:(NSURL *)url
     self.current_is_dir = is_dir;
     self.kind_value.stringValue       = files_kind_text(fresh);
     self.opens_with_value.stringValue = files_opens_with_text(fresh);
+
+    /* "change" is offered only where there is a default application to
+     * change: files_opens_with_text says "—" for the items that open
+     * themselves (folders, application bundles), and a type is needed to
+     * open the list on. */
+    self.opens_with_type = res[NSURLContentTypeKey];
+    self.opens_with_change.hidden = self.opens_with_type == nil ||
+        [self.opens_with_value.stringValue isEqualToString:@"—"];
 
     /* Size */
     NSNumber *sz       = res[NSURLFileSizeKey];
@@ -930,6 +955,23 @@ ownership_popup_changed:(id)sender
         if (cur_pw) [self.owner_popup selectItemWithTitle:@(cur_pw->pw_name)];
         if (cur_gr) [self.group_popup selectItemWithTitle:@(cur_gr->gr_name)];
     }
+}
+
+/*
+ * change_default_app_action: — the "change" link beside Opens with: opens
+ * Set Default Apps on this item's type, with its row selected, so the
+ * application that opens every file of the type can be chosen there.
+ * What it changes is a system-wide setting, not a property of this item,
+ * which is why it hands over to that window rather than editing here.
+ *
+ * Inputs:
+ *   sender — the link button (unused)
+ */
+- (void)
+change_default_app_action:(id)sender
+{
+    if (!self.opens_with_type) return;
+    [files_default_apps_panel.shared show_panel_for_type:self.opens_with_type];
 }
 
 /*

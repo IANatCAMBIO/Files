@@ -56,7 +56,7 @@ macOS) to render the app icon; see [App icon](#app-icon).
 | Install         | `make install`  | Replaces `~/Applications/Files.app` with the new build; a running copy is sent SIGTERM, killed after 5 s, and reopened. A reopen LaunchServices refuses (it can still hold the bundle that was just replaced) is retried, and then reported rather than failing the install, which has already happened |
 | Test            | `make test`     | Release checks: `test-build`, `test-unit`, `test-features`, `test-ui` |
 | Test (build)    | `make test-build` | From-scratch build with zero warnings; valid `Info.plist`, executable and signature |
-| Test (unit)     | `make test-unit` | Builds and runs the copy-engine, archive and sort tests (`tests/`) |
+| Test (unit)     | `make test-unit` | Builds and runs the copy-engine, archive, sort and default-apps tests (`tests/`) |
 | Test (features) | `make test-features` | Feature tests (`tests/features/`); none written yet |
 | Test (UI)       | `make test-ui`  | Interface check (`tests/ui/ui_check.m`); none written yet |
 | Clean           | `make clean`    | Removes `build/` and `Files.app`       |
@@ -76,6 +76,14 @@ folder in `$TMPDIR`: round trips (symbolic links, names starting with `-`,
 brackets and accents), passwords (missing, wrong, right), name clashes,
 refusals, damaged archives, an entry named `../x`, and that no hidden
 staging item is left behind.
+
+`default_apps_test` checks the file-type list behind Files ▸ Set Default
+Apps…: that the scan of this Mac's applications and of macOS's own type
+declarations finds the common types, that every type listed can be named
+by an extension and is one a real file resolves to (as a plain file or as
+a package), that none is listed twice, and that an extension a declared
+type covers is never also listed under a dynamic type. It reads
+Info.plists and the LaunchServices database and changes no default.
 
 `sort_test` checks the default sort order (Preferences ▸ View ▸ Default
 sort): which columns sort at all, which of those a default order may name,
@@ -164,7 +172,8 @@ src/
 ├── git_info.h/.m           — git working trees: tracked names, branch and
 │                             push state, the git folder badge
 ├── info_sidebar.h/.m       — collapsible Quick Look / details sidebar
-├── info_panel.h/.m         — Get Info panel (permissions, lock, hashes)
+├── info_panel.h/.m         — Get Info panel (permissions, lock, hashes,
+│                             the "change" link to Set Default Apps)
 ├── file_ops.h/.m           — pasteboard, copy/move engine (copyfile +
 │                             rename, staged commits), trash, rename, mkdir
 ├── copy_progress.h/.m      — copy progress panel (step status line, text
@@ -179,6 +188,9 @@ src/
 ├── default_viewer.h/.m     — takes over from Finder as default file viewer
 │                             (NSFileViewer, Finder settings) and restores
 │                             the recorded originals
+├── default_apps_panel.h/.m — Set Default Apps window: the file types this
+│                             Mac knows (scanned off the main thread) and
+│                             the chooser that repoints one at another app
 ├── prefs_window.h/.m       — Preferences window; the View-menu preference
 │                             list both it and the menu are built from
 └── util.h/.m               — shared helpers: preference keys, other apps'
@@ -189,7 +201,8 @@ src/
 tests/
 ├── file_ops_test.m         — copy-engine tests (`make test`)
 ├── archive_test.m          — archive tests (`make test`)
-└── sort_test.m             — default sort order tests (`make test`)
+├── sort_test.m             — default sort order tests (`make test`)
+└── default_apps_test.m     — file-type list tests (`make test`)
 ```
 
 ## Code signing

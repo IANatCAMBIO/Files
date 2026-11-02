@@ -116,29 +116,6 @@ mount_description(NSString *mount_point, NSString *fs_type)
     return @"";
 }
 
-/*
- * make_col — allocates and configures one NSTableColumn.
- *
- * Inputs:
- *   ident     — column identifier string
- *   title     — header title
- *   width     — initial width in points
- *   resizable — YES if user may resize; NO for fixed columns
- *
- * Output: configured NSTableColumn.
- */
-static NSTableColumn *
-make_col(NSString *ident, NSString *title, CGFloat width, BOOL resizable)
-{
-    NSTableColumn *col = [[NSTableColumn alloc] initWithIdentifier:ident];
-    col.title          = title;
-    col.width          = width;
-    col.minWidth       = 40.0;
-    col.resizingMask   = resizable ? NSTableColumnUserResizingMask
-                                    : NSTableColumnNoResizing;
-    return col;
-}
-
 /* ── FilesMountsPanel ─────────────────────────────────────────────────────── */
 
 @interface FilesMountsPanel () <NSTableViewDataSource, NSTableViewDelegate>
@@ -239,14 +216,14 @@ build_table
     self.table.columnAutoresizingStyle        = NSTableViewLastColumnOnlyAutoresizingStyle;
     self.table.allowsEmptySelection           = YES;
 
-    [self.table addTableColumn:make_col(col_device,      @"Device",      160, YES)];
-    [self.table addTableColumn:make_col(col_mount,       @"Mount Point", 140, YES)];
-    [self.table addTableColumn:make_col(col_type,        @"Type",         60, YES)];
-    [self.table addTableColumn:make_col(col_options,     @"Options",     160, YES)];
-    [self.table addTableColumn:make_col(col_total,       @"Total",        80, YES)];
-    [self.table addTableColumn:make_col(col_free,        @"Free",         80, YES)];
-    [self.table addTableColumn:make_col(col_unmountable, @"Unmountable",  72, YES)];
-    [self.table addTableColumn:make_col(col_description, @"Description", 300, YES)];
+    [self.table addTableColumn:files_table_column(col_device,      @"Device",      160, YES)];
+    [self.table addTableColumn:files_table_column(col_mount,       @"Mount Point", 140, YES)];
+    [self.table addTableColumn:files_table_column(col_type,        @"Type",         60, YES)];
+    [self.table addTableColumn:files_table_column(col_options,     @"Options",     160, YES)];
+    [self.table addTableColumn:files_table_column(col_total,       @"Total",        80, YES)];
+    [self.table addTableColumn:files_table_column(col_free,        @"Free",         80, YES)];
+    [self.table addTableColumn:files_table_column(col_unmountable, @"Unmountable",  72, YES)];
+    [self.table addTableColumn:files_table_column(col_description, @"Description", 300, YES)];
 
     /* Sort descriptors — clicking a header sorts that column ascending/descending. */
     [self.table tableColumnWithIdentifier:col_device].sortDescriptorPrototype =

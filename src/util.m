@@ -364,7 +364,16 @@ files_opens_with_text(NSURL *url)
     BOOL folder = [res[NSURLIsDirectoryKey] boolValue] && ![res[NSURLIsPackageKey] boolValue];
     if (folder || [res[NSURLContentTypeKey] conformsToType:UTTypeApplicationBundle]) return @"—";
 
-    NSURL *app = [NSWorkspace.sharedWorkspace URLForApplicationToOpenURL:url];
+    return files_app_display_name([NSWorkspace.sharedWorkspace URLForApplicationToOpenURL:url]);
+}
+
+/*
+ * files_app_display_name — an application bundle's localized name without
+ * ".app". Inputs/output are documented in util.h.
+ */
+NSString *
+files_app_display_name(NSURL *app)
+{
     if (!app) return @"None";
     NSString *name = nil;
     [app getResourceValue:&name forKey:NSURLLocalizedNameKey error:nil];
@@ -508,6 +517,22 @@ files_format_date(NSDate *date, NSDateFormatterStyle date_style)
     if (!date) return @"—";
     NSDateFormatter *fmt = (date_style == NSDateFormatterShortStyle) ? short_fmt : medium_fmt;
     return [fmt stringFromDate:date];
+}
+
+/*
+ * files_table_column — one column of a list window's table.
+ * Inputs/output are documented in util.h.
+ */
+NSTableColumn *
+files_table_column(NSString *ident, NSString *title, CGFloat width, BOOL resizable)
+{
+    NSTableColumn *col = [[NSTableColumn alloc] initWithIdentifier:ident];
+    col.title          = title;
+    col.width          = width;
+    col.minWidth       = 40.0;
+    col.resizingMask   = resizable ? NSTableColumnUserResizingMask
+                                   : NSTableColumnNoResizing;
+    return col;
 }
 
 /*

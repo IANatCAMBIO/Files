@@ -106,6 +106,10 @@ Compared with Finder:
   `.tar.gz`, `.dmg` or `.iso` and the contents open in a new window; create
   archives (zip, tar.gz, tar, optionally password-protected) from the
   right-click menu
+- **Set Default Apps** (Files ▸ Set Default Apps…) — every file type this
+  Mac knows in one searchable, sortable list, with its icon and the app
+  that opens it; double-click a row to repoint it, or follow the **change**
+  link beside Opens with: in Get Info to land on a file's own type
 - **A bookmarks bar** under the toolbar: ⌘D to add, drag to reorder
 - **Mounts menu and one-click unmount**, including iCloud Drive and other
   File Provider accounts; if a volume is busy, Files names the files and

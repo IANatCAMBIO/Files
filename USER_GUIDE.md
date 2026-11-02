@@ -13,6 +13,7 @@ The full reference for Files. See [README.md](README.md) to install it and
 - [Search](#search)
 - [Folder sizes](#folder-sizes)
 - [Mounts and volumes](#mounts-and-volumes)
+- [Default apps](#default-apps)
 - [Preferences](#preferences)
 - [Replacing Finder](#replacing-finder)
 - [Keeping Files running](#keeping-files-running)
@@ -96,6 +97,15 @@ Bookmarks section listing every bookmark in bar order.
 - Get Info panel (⌘I): kind, the app that opens the file, size, dates,
   owner/group, editable permissions, Locked flag, rename, and SHA-256 /
   MD5 checksums (Preferences ▸ Show Hashes in Get Info, off by default).
+- **change** — the link after the Opens with: value opens
+  [Set Default Apps](#default-apps) with this file's type found and
+  selected, ready to point it at another application. It is not shown for
+  the items that open themselves (folders and application bundles), which
+  have no default application to change. A file macOS recognises no type
+  for is `public.data`, which has no extension of its own; its row is
+  added to the list when the link is followed, with `—` for its
+  extensions. Remember that what the link leads to is a system-wide
+  setting for every file of that type, not a setting for this one file.
 
 ## Git working trees
 
@@ -223,6 +233,72 @@ confirms), and any window showing it moves to /Volumes. If files on it are
 open, a sheet lists them (and the apps using them) and the volume unmounts
 automatically once they are closed.
 
+## Default apps
+
+Files ▸ Set Default Apps… lists every file type this Mac knows about, with
+its icon, the extensions it covers, its kind, the application macOS opens
+it with, and the type's identifier. Click a column header to sort by it;
+the search field under the list narrows it by extension, kind, application
+name or identifier (typing `.md`, `markdown`, `Preview` or `public.jpeg`
+all find their rows). Anything too wide for its column is in the cell's
+tooltip.
+
+The window also opens here from Get Info: the **change** link after a
+file's Opens with: value opens it with that file's type already selected.
+
+**Double-click a row** — or select it and press Return, or click Change… —
+to choose the application that opens that type. The chooser offers the
+applications that say they can open it, with the current default selected,
+and Other App… picks any application on the Mac, for a type nothing claims
+or an editor that never registered for it.
+
+### One row per type, not per extension
+
+macOS records the default application against a **content type** (a
+uniform type identifier such as `public.jpeg`), not against an extension,
+and one type usually covers several extensions: `public.jpeg` is `.jpeg`,
+`.jpg` and `.jpe`, and `net.daringfireball.markdown` is `.markdown`,
+`.markd`, `.mdown` and `.md`. So the list holds one row per type, showing
+every extension it covers, and changing a row changes what opens all of
+them. That is what "all files of that extension" can actually mean here;
+a list of one row per extension would promise `.jpg` and `.jpeg` could
+differ, and they cannot.
+
+The rows are worked out by reading what the applications installed on this
+Mac and macOS itself declare they open, then resolving each extension back
+to the type a file carrying it really gets — as a plain file and as a
+package, since `.rtfd` and `.workflow` only ever exist as packages. A type
+nothing resolves to is left out, so two applications both declaring a type
+for `.ada` give one row, not two rows of which only one would do anything.
+
+An extension no declaration names at all still gets a row, under the
+dynamic type macOS makes for it (an identifier starting `dyn.`, with `—`
+for its kind, since such a type has no name of its own). `.bashrc`,
+`.mermaid` and `.asm` are usually among them, and a default application
+set on one works like any other.
+
+### What macOS does and does not allow
+
+Changing a default is a system-wide setting — the same one Finder's
+"Open with ▸ Change All…" sets. It outlives Files and applies to every app
+that opens a document, and it is not undone by uninstalling Files.
+
+- **macOS asks first.** Confirming a change puts up a system dialog of its
+  own, presented by CoreServicesUIAgent (so it carries a system icon, not
+  Files'). Declining it leaves the default alone and Files says nothing —
+  saying no is an answer, not an error.
+- **macOS sometimes refuses.** It will not register an application it does
+  not index — one inside a cache folder, a disk image, or a folder outside
+  the usual application locations — and it keeps a few of its own types for
+  itself. LaunchServices reports no error when it does this, so Files
+  checks afterwards what the type now opens with and says plainly that the
+  change did not take, rather than leaving a list that quietly did not
+  change. Moving the application to `/Applications` is usually the fix.
+
+The list is re-read every time the window opens and after every change, so
+it shows the defaults as they are now even if Finder or another app
+changed one.
+
 ## Preferences
 
 Files ▸ Preferences…, ⌘,
@@ -232,6 +308,10 @@ Files ▸ Preferences…, ⌘,
 | View | Default sort order and direction, and the View-menu preferences (folders first, used disk space, full path in title, bookmarks bar, folder sizes, hashes in Get Info) |
 | Move/Copy | Simple Copies; Validate Copies with SHA-256 |
 | Integration | Default file browser (Set Files as default / Set Finder as default — each opens a change log, and the ⓘ beside the heading lists what follows the default); Keep Files running for faster startup |
+
+Default applications per file type are not in Preferences: they are a
+system-wide setting with a window of their own (see
+[Default apps](#default-apps)).
 
 About Files shows the version (from the `VERSION` file), build date, the
 app's motto, and links to camb.io and the license.
@@ -329,6 +409,7 @@ folder.
 | Paste          | ⌘V                 |
 | New Window     | ⌘N                 |
 | Preferences    | ⌘,                 |
+| Open the chooser for the selected file type | Return (Set Default Apps window) |
 | Find (search)  | ⌘F                 |
 | New File       | ⌥⌘N                |
 | Move to Trash  | ⌘⌫                 |

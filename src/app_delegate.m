@@ -7,6 +7,7 @@
 #import "mounts_panel.h"
 #import "default_viewer.h"
 #import "prefs_window.h"
+#import "default_apps_panel.h"
 #import "bookmarks_bar.h"
 #import "util.h"
 #import <ServiceManagement/ServiceManagement.h>
@@ -531,6 +532,21 @@ show_preferences:(id)sender
     [FilesPrefsWindow.shared show_window];
 }
 
+/*
+ * show_default_apps: — Files ▸ Set Default Apps…: shows the window listing
+ * every file type this Mac knows and the application that opens it. It
+ * sits beside Preferences… because what it changes is a system-wide
+ * setting, not something Files keeps or does to the selected item.
+ *
+ * Inputs:
+ *   sender — menu item (unused)
+ */
+- (void)
+show_default_apps:(id)sender
+{
+    [files_default_apps_panel.shared show_panel];
+}
+
 /* ── Menu bar ────────────────────────────────────────────────────────────── */
 
 /*
@@ -761,6 +777,10 @@ build_menu_bar
     NSMenuItem *prefs = make_item(@"Preferences…", @selector(show_preferences:), @",", 0);
     prefs.target = self;  /* title kept by validateMenuItem: */
     [app_menu addItem:prefs];
+    NSMenuItem *default_apps = make_item(@"Set Default Apps…",
+                                         @selector(show_default_apps:), @"", 0);
+    default_apps.target = self;
+    [app_menu addItem:default_apps];
     [app_menu addItem:NSMenuItem.separatorItem];
     [app_menu addItem:make_item(@"Quit Files", @selector(terminate:), @"q", 0)];
     app_mi.submenu = app_menu;

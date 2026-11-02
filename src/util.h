@@ -125,6 +125,19 @@ NSString *files_kind_text(NSURL *url);
 NSString *files_opens_with_text(NSURL *url);
 
 /*
+ * files_app_display_name — an application's name as Files writes it: the
+ * bundle's localized name with the ".app" extension dropped, so a
+ * "Preview.app" on disk reads "Preview" wherever an app is named (Info's
+ * Opens With, the Default Apps list and its chooser).
+ *
+ * Inputs:
+ *   app — file URL of an application bundle; nil yields "None"
+ *
+ * Output: the name, never nil.
+ */
+NSString *files_app_display_name(NSURL *app);
+
+/*
  * files_icon_for_url — the icon Files shows for an item at a given size:
  * the Workspace icon, with the git badge centered on it for the top folder
  * of a git working tree. Cached, it is cheap enough per table cell: one
@@ -305,6 +318,26 @@ NSString *files_format_rate(double bytes_per_sec);
  * Output: formatted string.
  */
 NSString *files_format_date(NSDate *date, NSDateFormatterStyle date_style);
+
+/*
+ * files_table_column — one column of a list window's table (All Mounts,
+ * Default Apps), at the width it opens with. Those tables use
+ * NSTableViewLastColumnOnlyAutoresizingStyle, so the last column takes
+ * whatever the window's width leaves and the rest keep theirs until the
+ * user drags a divider; a column's sort descriptor prototype is the
+ * caller's to set. The browser's own columns are not built here: they
+ * carry sort order, hiding and auto-fit of their own.
+ *
+ * Inputs:
+ *   ident     — column identifier, which the data source keys cells by
+ *   title     — header title
+ *   width     — initial width in points
+ *   resizable — YES if the user may drag its divider
+ *
+ * Output: configured NSTableColumn.
+ */
+NSTableColumn *files_table_column(NSString *ident, NSString *title, CGFloat width,
+                                  BOOL resizable);
 
 /*
  * files_app_icon — Files' icon as drawn: app_icon.icns from the app bundle
