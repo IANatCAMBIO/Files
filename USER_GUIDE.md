@@ -79,6 +79,29 @@ The full reference for Files. See [README.md](README.md) to install it and
 - Symbolic links are followed (a link to a folder opens that folder).
 - App bundles open like folders; right-click ▸ Run Application launches one.
 
+### How a folder is read
+
+Everything a row shows — name, size, dates, permissions, kind, whether
+the item is a folder, a package, an application, a symbolic link, hidden,
+or carries an icon of its own — is read once, with the listing, on a
+background queue. Rows never touch the volume as they are drawn, which is
+why an unresponsive network share or File Provider mount cannot freeze
+the window.
+
+The read itself is one `getattrlistbulk` call per few hundred items,
+which returns the names and all those attributes together, rather than
+Foundation's resource values, which cost a read per item. Measured on a
+folder of 10,000 items: 34 ms against 425 ms for the attributes, and 44
+ms against 469 ms including the icons. An ordinary folder of a few
+hundred items goes from around 14 ms to under 2 ms. The kind strings the
+Kind column shows ("Folder", "Application", "Rich Text Document") still
+come from Launch Services, but once for each kind of item in the folder
+instead of once per item.
+
+A volume whose file system does not offer batched attributes — some
+network and FUSE mounts — is read item by item instead, which is slower
+but gives exactly the same rows.
+
 ## Bookmarks bar
 
 Directly under the toolbar, where Tasks and Notes put their Favorites bar
@@ -110,6 +133,35 @@ Bookmarks section listing every bookmark in bar order.
   added to the list when the link is followed, with `—` for its
   extensions. Remember that what the link leads to is a system-wide
   setting for every file of that type, not a setting for this one file.
+
+### Giving an item its own icon
+
+The icon at the top of the Get Info panel is a drop target, as it is in
+Finder: drag an image file, an `.icns` file, or an image out of another
+application (Preview, a browser, Photos) onto it and it becomes that
+item's icon. The well draws an accent ring while it is ready for the drop,
+and refuses a drag it cannot use — anything that is not an image, a locked
+item, and an item you have no permission to write. An `.icns` is read from
+disk rather than off the pasteboard, so the icon keeps every size it holds
+and still looks right at 16 points.
+
+A **revert** link appears under the icon while the item has an icon of its
+own; it removes it, and the item's type icon shows again.
+
+macOS stores the icon on the item itself: in the resource fork of a file,
+and in a hidden `Icon\r` file inside a folder, with the `kHasCustomIcon`
+flag set in `com.apple.FinderInfo` either way. So the icon travels with a
+copy, Finder and the Dock show the same one, and both extended attributes
+appear in the panel's Extended Attributes list. Writing it changes the
+item's modification date, and the panel re-reads the item afterwards to
+show that.
+
+File-list rows show it too, as Finder does. The list still gives every
+file of a type the same cached icon — one image for a folder of ten
+thousand JPEGs — and reads an item's own icon only where it carries one.
+Which files those are arrives free with the listing (see [How a folder is
+read](#how-a-folder-is-read)), and nothing is read when rows are drawn,
+so a slow volume still cannot freeze the window.
 
 ## Git working trees
 

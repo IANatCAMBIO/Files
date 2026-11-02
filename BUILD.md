@@ -172,6 +172,9 @@ src/
 ├── browser_view.h/.m       — file list (NSTableView): listing, filtering and
 │                             sorting off the main thread, FSEvents watcher,
 │                             Git column, Spotlight search, history
+├── dir_listing.h/.m        — a folder's contents and every attribute the
+│                             list shows, read in batched getattrlistbulk
+│                             calls (files_item records)
 ├── bookmarks_bar.h/.m      — bookmarks strip above the browser, shared by
 │                             every window; app-wide Trash watcher
 ├── git_info.h/.m           — git working trees: tracked names, branch and

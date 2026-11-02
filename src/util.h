@@ -1,4 +1,5 @@
 #import <Cocoa/Cocoa.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <stdatomic.h>
 
 /*
@@ -141,11 +142,12 @@ NSString *files_app_display_name(NSURL *app);
  * files_icon_for_url — the icon Files shows for an item at a given size:
  * the Workspace icon, with the git badge centered on it for the top folder
  * of a git working tree. Cached, it is cheap enough per table cell: one
- * icon per file type (custom icons on individual files are not shown) and
- * one per folder or package path. Uncached, it reads the item's own
- * current icon, custom icons included, for the one item Get Info or the
- * sidebar shows. Any thread: per-path icons read the volume, which can
- * stall on a slow one, so file lists read them on a background queue.
+ * icon per file type, and one per path for a folder, a package or a file
+ * carrying an icon of its own (files_has_custom_icon, one extended
+ * attribute read, decides which). Uncached, it reads the item's own
+ * current icon for the one item Get Info or the sidebar shows, and leaves
+ * the cache alone. Any thread: it reads the volume, which can stall on a
+ * slow one, so file lists call it on a background queue.
  *
  * Inputs:
  *   url    — file URL of the item (listing resource values used if prefetched)
@@ -155,6 +157,77 @@ NSString *files_app_display_name(NSURL *app);
  * Output: NSImage of size×size (never nil); do not modify it.
  */
 NSImage *files_icon_for_url(NSURL *url, CGFloat size, BOOL cached);
+
+/*
+ * files_icon_cached — the same cached icon as files_icon_for_url, for a
+ * caller that already knows what files_icon_for_url would have to read.
+ * A file list learns an item's type and whether it carries an icon of its
+ * own with the listing itself, so it says so rather than make the icon
+ * code look again.
+ *
+ * Inputs:
+ *   path — the item's path; the cache key for an item with its own icon
+ *   type — the type whose icon this item shares, or nil for the item's
+ *          own (a folder, a package, a file carrying one)
+ *   size — edge length in points
+ *
+ * Output: NSImage of size x size (never nil); do not modify it. Any
+ *         thread, though reading an item's own icon touches the volume.
+ */
+NSImage *files_icon_cached(NSString *path, UTType *type, CGFloat size);
+
+/*
+ * files_icon_cached — the same cached icon as files_icon_for_url, for a
+ * caller that already knows what files_icon_for_url would have to read:
+ * the file lists learn an item's type and whether it has an icon of its
+ * own with the listing, so they say so rather than make it look again.
+ *
+ * Inputs:
+ *   path — the item's path; the cache key for an item with its own icon
+ *   type — the type to share an icon for, or nil for the item's own icon
+ *          (a folder, a package, a file carrying one)
+ *   size — edge length in points
+ *
+ * Output: NSImage of size x size (never nil); do not modify it. Any
+ *         thread, though an item's own icon reads the volume.
+ */
+NSImage *files_icon_cached(NSString *path, UTType *type, CGFloat size);
+
+/*
+ * files_has_custom_icon — whether an item carries an icon of its own
+ * rather than its type's: the kHasCustomIcon bit of its Finder flags,
+ * which is set alongside the icon itself (a resource fork on a file, an
+ * "Icon\r" file inside a folder). Read of a symbolic link itself rather
+ * than its target, as Get Info reads the rest of an item's attributes.
+ * One getattrlist: ~2 us an item.
+ *
+ * Inputs:
+ *   url — file URL of the item
+ *
+ * Output: YES if the item has an icon of its own; NO if it has none, is
+ *         not a file URL, or cannot be read.
+ */
+BOOL files_has_custom_icon(NSURL *url);
+
+/*
+ * files_set_custom_icon — gives an item an icon of its own, or takes that
+ * icon away (icon nil), through NSWorkspace setIcon:forFile:, which stores
+ * the image in the item's resource fork (an "Icon\r" file for a folder)
+ * and sets the flag files_has_custom_icon reads. On success the icon cache
+ * files_icon_for_url keeps is emptied, so lists and the bookmarks bar draw
+ * what is now on disk. Writes to the volume and moves the item's
+ * modification date; call off the main thread.
+ *
+ * Inputs:
+ *   url  — file URL of the item to change
+ *   icon — the image to store, with every representation it carries (an
+ *          .icns read into an NSImage brings all of its sizes); nil
+ *          restores the item's type icon
+ *   err  — receives the reason for a failure if non-NULL
+ *
+ * Output: YES on success, NO with *err set otherwise.
+ */
+BOOL files_set_custom_icon(NSURL *url, NSImage *icon, NSError **err);
 
 /* Timeout for quick helper tools (git, defaults, lsof), in seconds. */
 #define FILES_TOOL_TIMEOUT 15.0

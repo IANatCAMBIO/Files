@@ -10,6 +10,7 @@
 #import <CoreServices/CoreServices.h>
 #import <Quartz/Quartz.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#import "dir_listing.h"
 #import <sys/stat.h>
 #include <limits.h>
 #include <stdlib.h>
@@ -87,31 +88,6 @@ static const CGFloat header_line_h = 1.0;
 #define LOADING_DELAY_SEC 0.2
 
 /*
- * listing_keys — resource keys prefetched for every listed item, so table
- * cells, sorting and filtering never touch the file system again.
- *
- * Output: array of NSURLResourceKey.
- */
-static NSArray<NSURLResourceKey> *
-listing_keys(void)
-{
-    return @[
-        NSURLNameKey,
-        NSURLFileSizeKey,
-        NSURLIsDirectoryKey,
-        NSURLIsPackageKey,
-        NSURLIsApplicationKey,
-        NSURLIsSymbolicLinkKey,
-        NSURLTypeIdentifierKey,
-        NSURLLocalizedTypeDescriptionKey,
-        NSURLContentModificationDateKey,
-        NSURLCreationDateKey,
-        NSURLFileSecurityKey,
-        NSURLIsHiddenKey,
-    ];
-}
-
-/*
  * column_title — header title (without sort arrow) for a column identifier.
  *
  * Inputs:
@@ -126,25 +102,6 @@ column_title(NSString *col_id)
         if ([column_specs[i].id isEqualToString:col_id]) return column_specs[i].title;
     }
     return @"";
-}
-
-/*
- * sort_resource_key — the prefetched resource key a column sorts by.
- *
- * Inputs:
- *   col_id — column identifier
- *
- * Output: NSURLResourceKey (name for unknown columns; the Git column sorts
- *         by name within tracked / untracked, see listing_rows).
- */
-static NSURLResourceKey
-sort_resource_key(NSString *col_id)
-{
-    if ([col_id isEqualToString:col_size])     return NSURLFileSizeKey;
-    if ([col_id isEqualToString:col_kind])     return NSURLLocalizedTypeDescriptionKey;
-    if ([col_id isEqualToString:col_modified]) return NSURLContentModificationDateKey;
-    if ([col_id isEqualToString:col_created])  return NSURLCreationDateKey;
-    return NSURLNameKey;
 }
 
 /*
@@ -216,25 +173,6 @@ files_sort_order_titles(NSString *col_id)
 }
 
 /*
- * file_mode — POSIX mode (type + permission bits) from the prefetched
- * NSURLFileSecurityKey; equals lstat(2)'s st_mode without a system call.
- *
- * Inputs:
- *   url — file URL from a listing
- *
- * Output: mode, or 0 if unavailable.
- */
-static mode_t
-file_mode(NSURL *url)
-{
-    NSFileSecurity *sec = nil;
-    [url getResourceValue:&sec forKey:NSURLFileSecurityKey error:nil];
-    mode_t mode = 0;
-    if (!sec || !CFFileSecurityGetMode((__bridge CFFileSecurityRef)sec, &mode)) return 0;
-    return mode;
-}
-
-/*
  * perms_string_for_mode — formats a POSIX mode_t as the 10-char ls -l
  * string, with strmode(3).
  *
@@ -274,7 +212,8 @@ git_index_stamp(NSString *index)
 }
 
 /*
- * list_folder — the items of a folder with listing_keys() prefetched. For
+ * list_folder — the items of a folder, each with the attributes the list
+ * shows, read in batched getattrlistbulk calls (files_list_items). For
  * the Trash this is the union of every Trash folder (files_trash_urls), as
  * Finder shows it; a Trash folder that cannot be read only fails the
  * listing when the main one cannot.
@@ -283,20 +222,16 @@ git_index_stamp(NSString *index)
  *   dir — folder to list
  *   err — receives the failure when nil is returned; may be NULL
  *
- * Output: item URLs, or nil if the folder cannot be read.
+ * Output: item records, or nil if the folder cannot be read.
  */
-static NSArray<NSURL *> *
+static NSArray<files_item *> *
 list_folder(NSURL *dir, NSError **err)
 {
     NSArray<NSURL *> *trashes = files_trash_urls();
     NSArray<NSURL *> *folders = files_same_path(dir, trashes.firstObject) ? trashes : @[dir];
-    NSMutableArray<NSURL *> *items = nil;
+    NSMutableArray<files_item *> *items = nil;
     for (NSURL *folder in folders) {
-        NSArray<NSURL *> *found =
-            [NSFileManager.defaultManager contentsOfDirectoryAtURL:folder
-                                        includingPropertiesForKeys:listing_keys()
-                                                           options:0
-                                                             error:items ? NULL : err];
+        NSArray<files_item *> *found = files_list_items(folder, items ? NULL : err);
         if (!found) {
             if (!items) return nil;
             continue;
@@ -322,15 +257,80 @@ files_paths_named(NSArray<NSURL *> *items, NSSet<NSString *> *names)
 }
 
 /*
- * listing_rows — the rows to show for a set of items: hidden items dropped
- * (unless show_hidden), then sorted by the sort column using prefetched
- * values (Finder-style natural order for names and kinds), with folders
- * kept ahead of files when folders_first is set. The Git column sorts
- * tracked items first (ascending), then by name. Pure and thread-safe, so
- * listings are prepared off the main thread.
+ * compare_column — the order two items sort in for a column alone, before
+ * ties are broken and the direction applied: kinds in Finder's natural
+ * order, everything else by value. A folder has no size of its own, so
+ * the Size column falls back to the folder-size count where one has
+ * arrived, and sorts before the items that have a size where it has not.
  *
  * Inputs:
- *   items         — listed URLs with listing_keys() prefetched
+ *   a, b     — the items
+ *   sort_key — column identifier being sorted by
+ *   sizes    — folder sizes by path (Show Folder Sizes); may be nil
+ *
+ * Output: NSOrderedAscending, NSOrderedSame or NSOrderedDescending.
+ */
+static NSComparisonResult
+compare_column(files_item *a, files_item *b, NSString *sort_key,
+               NSDictionary<NSString *, NSNumber *> *sizes)
+{
+    if ([sort_key isEqualToString:col_size]) {
+        NSNumber *av = a.size >= 0 ? @(a.size) : sizes[a.path];
+        NSNumber *bv = b.size >= 0 ? @(b.size) : sizes[b.path];
+        if (!av || !bv) {
+            return (av == bv) ? NSOrderedSame : (av ? NSOrderedDescending : NSOrderedAscending);
+        }
+        return [av compare:bv];
+    }
+    if ([sort_key isEqualToString:col_kind]) {
+        NSString *av = a.kind, *bv = b.kind;
+        if (!av || !bv) {
+            return (av == bv) ? NSOrderedSame : (av ? NSOrderedDescending : NSOrderedAscending);
+        }
+        return [av localizedStandardCompare:bv];
+    }
+    if ([sort_key isEqualToString:col_modified]) {
+        return [a.modified compare:b.modified];
+    }
+    if ([sort_key isEqualToString:col_created]) {
+        return [a.created compare:b.created];
+    }
+    return NSOrderedSame;   /* the Name column: the tie-break below is the sort */
+}
+
+/*
+ * compare_items — the order two items sort in: the column, then their
+ * names where the column cannot tell them apart. Without that tie-break
+ * the fifty text files of a folder sorted by Kind come out in whatever
+ * order the sort happened to leave them, and in a different one after
+ * every reload; Finder settles them by name, as this does.
+ *
+ * Inputs:
+ *   a, b     — the items
+ *   sort_key — column identifier being sorted by
+ *   sizes    — folder sizes by path (Show Folder Sizes); may be nil
+ *
+ * Output: NSOrderedAscending, NSOrderedSame (only for two identical
+ *         names) or NSOrderedDescending.
+ */
+static NSComparisonResult
+compare_items(files_item *a, files_item *b, NSString *sort_key,
+              NSDictionary<NSString *, NSNumber *> *sizes)
+{
+    NSComparisonResult cmp = compare_column(a, b, sort_key, sizes);
+    return cmp != NSOrderedSame ? cmp : [a.name localizedStandardCompare:b.name];
+}
+
+/*
+ * listing_rows — the rows to show for a set of items: hidden items dropped
+ * (unless show_hidden), then sorted by the sort column from the values the
+ * listing already read (Finder-style natural order for names and kinds),
+ * with folders kept ahead of files when folders_first is set. The Git
+ * column sorts tracked items first (ascending), then by name. Pure and
+ * thread-safe, so listings are prepared off the main thread.
+ *
+ * Inputs:
+ *   items         — listed item records
  *   sort_key      — column identifier to sort by
  *   ascending     — sort direction
  *   folders_first — YES to put every folder before every file, as Finder
@@ -338,88 +338,78 @@ files_paths_named(NSArray<NSURL *> *items, NSSet<NSString *> *names)
  *   tracked       — git-tracked names (used only when sorting by Git); may be nil
  *   sizes         — folder sizes by path (Show Folder Sizes), used when
  *                   sorting by Size; may be nil
- *   show_hidden   — YES to keep items whose NSURLIsHiddenKey is set
+ *   show_hidden   — YES to keep hidden items
  *
  * Output: new sorted, filtered array.
  */
-static NSArray<NSURL *> *
-listing_rows(NSArray<NSURL *> *items, NSString *sort_key, BOOL ascending,
+static NSArray<files_item *> *
+listing_rows(NSArray<files_item *> *items, NSString *sort_key, BOOL ascending,
              BOOL folders_first, NSSet<NSString *> *tracked,
              NSDictionary<NSString *, NSNumber *> *sizes, BOOL show_hidden)
 {
-    NSMutableArray<NSURL *> *rows = [NSMutableArray arrayWithCapacity:items.count];
-    for (NSURL *url in items) {
-        if (!show_hidden) {
-            NSNumber *hidden = nil;
-            [url getResourceValue:&hidden forKey:NSURLIsHiddenKey error:nil];
-            if (hidden.boolValue) continue;
-        }
-        [rows addObject:url];
+    NSMutableArray<files_item *> *rows = [NSMutableArray arrayWithCapacity:items.count];
+    for (files_item *item in items) {
+        if (!show_hidden && item.is_hidden) continue;
+        [rows addObject:item];
     }
 
-    NSURLResourceKey key = sort_resource_key(sort_key);
     if (![sort_key isEqualToString:col_git]) tracked = nil;
-    [rows sortUsingComparator:^NSComparisonResult(NSURL *a, NSURL *b) {
-        if (folders_first) {
-            NSNumber *a_dir = nil, *b_dir = nil;
-            [a getResourceValue:&a_dir forKey:NSURLIsDirectoryKey error:nil];
-            [b getResourceValue:&b_dir forKey:NSURLIsDirectoryKey error:nil];
-            if (a_dir.boolValue != b_dir.boolValue) {
-                return a_dir.boolValue ? NSOrderedAscending : NSOrderedDescending;
-            }
+    [rows sortUsingComparator:^NSComparisonResult(files_item *a, files_item *b) {
+        if (folders_first && a.is_dir != b.is_dir) {
+            return a.is_dir ? NSOrderedAscending : NSOrderedDescending;
         }
         if (tracked) {
-            BOOL a_git = [tracked containsObject:a.lastPathComponent];
-            BOOL b_git = [tracked containsObject:b.lastPathComponent];
+            BOOL a_git = [tracked containsObject:a.name];
+            BOOL b_git = [tracked containsObject:b.name];
             if (a_git != b_git) {
                 return (a_git == ascending) ? NSOrderedAscending : NSOrderedDescending;
             }
         }
-
-        id av = nil, bv = nil;
-        [a getResourceValue:&av forKey:key error:nil];
-        [b getResourceValue:&bv forKey:key error:nil];
-        if (sizes && key == NSURLFileSizeKey) {  /* folders have no file size */
-            if (!av) av = sizes[a.path];
-            if (!bv) bv = sizes[b.path];
-        }
-
-        NSComparisonResult cmp;
-        if (!av || !bv) {
-            cmp = (av == bv) ? NSOrderedSame : (av ? NSOrderedDescending : NSOrderedAscending);
-        } else if ([av isKindOfClass:NSString.class]) {
-            cmp = [(NSString *)av localizedStandardCompare:bv];
-        } else {
-            cmp = [av compare:bv];
-        }
+        NSComparisonResult cmp = compare_items(a, b, sort_key, sizes);
         return ascending ? cmp : (NSComparisonResult)(-cmp);
     }];
     return rows;
 }
 
 /*
- * item_icons — reads the icons files_icon_for_url keys by path (folders,
- * packages and items with no type) for items: those read the volume, so
- * they are read here, with the listing, rather than when rows are drawn.
- * Plain files share their type's icon, which costs no file-system access.
- * Background queue.
+ * shared_icon_type — the type whose icon an item shares, or nil where the
+ * item has an icon of its own to be read: a folder or package (which can
+ * carry one, and can be a git working tree), a file carrying one, or an
+ * item Launch Services knows no type for.
  *
  * Inputs:
- *   items — listed URLs with listing_keys() prefetched
+ *   item — the item
+ *
+ * Output: the type to share an icon for, or nil.
+ */
+static UTType *
+shared_icon_type(files_item *item)
+{
+    return (item.is_dir || item.has_custom_icon || !item.type) ? nil : item.type;
+}
+
+/*
+ * item_icons — every listed item's icon, read here, with the listing,
+ * rather than when rows are drawn: reading a folder's or a package's icon
+ * touches the volume, and asking per cell would do it on the main thread.
+ * The listing already knows each item's type and whether it carries an
+ * icon of its own, so no item is looked at again here: files of one type
+ * share a single cached image, and a folder of 10,000 of them costs one
+ * icon. Background queue.
+ *
+ * Inputs:
+ *   items — listed item records
  *   size  — icon edge length in points
  *
- * Output: icons by path; empty if items has no such item.
+ * Output: icons by path, one per item.
  */
 static NSDictionary<NSString *, NSImage *> *
-item_icons(NSArray<NSURL *> *items, CGFloat size)
+item_icons(NSArray<files_item *> *items, CGFloat size)
 {
-    NSMutableDictionary<NSString *, NSImage *> *icons = [NSMutableDictionary dictionary];
-    for (NSURL *url in items) {
-        NSNumber *is_dir = nil;
-        NSString *uti    = nil;
-        [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
-        [url getResourceValue:&uti forKey:NSURLTypeIdentifierKey error:nil];
-        if (is_dir.boolValue || uti.length == 0) icons[url.path] = files_icon_for_url(url, size, YES);
+    NSMutableDictionary<NSString *, NSImage *> *icons =
+        [NSMutableDictionary dictionaryWithCapacity:items.count];
+    for (files_item *item in items) {
+        icons[item.path] = files_icon_cached(item.path, shared_icon_type(item), size);
     }
     return icons;
 }
@@ -430,17 +420,17 @@ item_icons(NSArray<NSURL *> *items, CGFloat size)
  * drawing rows never touches the volume. Background queue.
  *
  * Inputs:
- *   items — listed URLs
+ *   items — listed item records
  *
  * Output: comments by path; items without one are absent.
  */
 static NSDictionary<NSString *, NSString *> *
-item_comments(NSArray<NSURL *> *items)
+item_comments(NSArray<files_item *> *items)
 {
     NSMutableDictionary<NSString *, NSString *> *comments = [NSMutableDictionary dictionary];
-    for (NSURL *url in items) {
-        NSString *comment = files_get_finder_comment(url);
-        if (comment.length > 0) comments[url.path] = comment;
+    for (files_item *item in items) {
+        NSString *comment = files_get_finder_comment(item.url);
+        if (comment.length > 0) comments[item.path] = comment;
     }
     return comments;
 }
@@ -473,61 +463,49 @@ typedef struct {
 } cell_context_t;
 
 /*
- * cell_text — the display string for a cell, from prefetched resource
- * values and ctx only (no file-system access). Thread-safe.
+ * cell_text — the display string for a cell, from the item's record and
+ * ctx only (no file-system access). Thread-safe.
  *
  * Inputs:
  *   col_id — column identifier (col_name, col_size, …)
- *   url    — row's item, with listing_keys() prefetched
+ *   item   — row's item, as the listing read it
  *   ctx    — the view's state
  *
  * Output: NSString to display; never nil.
  */
 static NSString *
-cell_text(NSString *col_id, NSURL *url, const cell_context_t *ctx)
+cell_text(NSString *col_id, files_item *item, const cell_context_t *ctx)
 {
     if ([col_id isEqualToString:col_name]) {
-        NSString *name = nil;
-        [url getResourceValue:&name forKey:NSURLNameKey error:nil];
-        return name ?: url.lastPathComponent;
+        return item.name;
 
     } else if ([col_id isEqualToString:col_size]) {
-        NSNumber *is_dir = nil, *sz = nil;
-        [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
-        if (is_dir.boolValue) {
+        if (item.is_dir) {
             /* Show Folder Sizes: the total once counted, "…" until then. */
             if (!ctx->show_folder_sizes) return @"—";
-            NSNumber *total = ctx->folder_sizes[url.path];
+            NSNumber *total = ctx->folder_sizes[item.path];
             return total ? files_format_bytes(total.longLongValue) : @"…";
         }
-        [url getResourceValue:&sz forKey:NSURLFileSizeKey error:nil];
-        return sz ? files_format_bytes(sz.longLongValue) : @"—";
+        return item.size >= 0 ? files_format_bytes(item.size) : @"—";
 
     } else if ([col_id isEqualToString:col_kind]) {
         /* "Folder" for folders, "Application" for apps and so on. */
-        NSString *kind = nil;
-        [url getResourceValue:&kind forKey:NSURLLocalizedTypeDescriptionKey error:nil];
-        return kind ?: @"—";
+        return item.kind ?: @"—";
 
     } else if ([col_id isEqualToString:col_perms]) {
-        mode_t mode = file_mode(url);
-        return mode ? perms_string_for_mode(mode) : @"—";
+        return item.mode ? perms_string_for_mode(item.mode) : @"—";
 
     } else if ([col_id isEqualToString:col_modified]) {
-        NSDate *date = nil;
-        [url getResourceValue:&date forKey:NSURLContentModificationDateKey error:nil];
-        return files_format_date(date, NSDateFormatterShortStyle);
+        return files_format_date(item.modified, NSDateFormatterShortStyle);
 
     } else if ([col_id isEqualToString:col_created]) {
-        NSDate *date = nil;
-        [url getResourceValue:&date forKey:NSURLCreationDateKey error:nil];
-        return files_format_date(date, NSDateFormatterShortStyle);
+        return files_format_date(item.created, NSDateFormatterShortStyle);
 
     } else if ([col_id isEqualToString:col_comment]) {
-        return ctx->comments[url.path] ?: @"";
+        return ctx->comments[item.path] ?: @"";
 
     } else if ([col_id isEqualToString:col_git]) {
-        return [ctx->git_tracked containsObject:url.lastPathComponent] ? @"tracked" : @"";
+        return [ctx->git_tracked containsObject:item.name] ? @"tracked" : @"";
     }
     return @"";
 }
@@ -542,14 +520,14 @@ cell_text(NSString *col_id, NSURL *url, const cell_context_t *ctx)
  * listing is measured on its background queue.
  *
  * Inputs:
- *   rows    — items in display order, with listing_keys() prefetched
+ *   rows    — item records in display order
  *   col_ids — columns to measure
  *   ctx     — the view's state
  *
  * Output: text width by column identifier, for every column in col_ids.
  */
 static NSDictionary<NSString *, NSNumber *> *
-column_text_widths(NSArray<NSURL *> *rows, NSArray<NSString *> *col_ids,
+column_text_widths(NSArray<files_item *> *rows, NSArray<NSString *> *col_ids,
                    const cell_context_t *ctx)
 {
     NSUInteger count = MIN(rows.count, (NSUInteger)AUTO_FIT_ROW_LIMIT);
@@ -622,8 +600,8 @@ mouseDown:(NSEvent *)event
 @property (nonatomic, strong) NSMutableArray<NSURL *> *forward_stack;
 @property (nonatomic, strong) NSURL                   *current_dir;
 /* Everything listed (or found), unfiltered, and the rows shown from it. */
-@property (nonatomic, copy)   NSArray<NSURL *>        *all_items;
-@property (nonatomic, copy)   NSArray<NSURL *>        *filtered_items;
+@property (nonatomic, copy)   NSArray<files_item *>   *all_items;
+@property (nonatomic, copy)   NSArray<files_item *>   *filtered_items;
 
 /* Folder watcher: stream plus the resolved path events are compared with. */
 @property (nonatomic, assign) FSEventStreamRef         fs_stream;
@@ -655,9 +633,10 @@ mouseDown:(NSEvent *)event
 @property (nonatomic, strong) FilesCancelToken        *size_token;
 @property (nonatomic, strong) dispatch_queue_t         size_queue;
 @property (nonatomic, assign) BOOL                     size_refresh_scheduled;
-/* Icons of the listed items that are read per path (item_icons), by
- * path: read with the listing, on its background queue, so drawing rows
- * never touches a slow volume. */
+/* Every listed item's icon by path (item_icons): read with the listing,
+ * on its background queue, so drawing rows never touches a slow volume.
+ * Files of one type share one image; a folder, a package or a file with
+ * an icon of its own has its own. */
 @property (nonatomic, copy)   NSDictionary<NSString *, NSImage *> *row_icons;
 /* Finder comments of the listed items by path (item_comments), read the
  * same way while the Comment column is shown; nil while it is hidden. */
@@ -1670,10 +1649,11 @@ current_url
 - (NSArray<NSURL *> *)
 selected_urls
 {
-    return [self.filtered_items objectsAtIndexes:
-        [self.table.selectedRowIndexes indexesPassingTest:^BOOL(NSUInteger idx, BOOL *stop) {
-            return idx < self.filtered_items.count;
-        }]];
+    NSMutableArray<NSURL *> *urls = [NSMutableArray array];
+    [self.table.selectedRowIndexes enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
+        if (idx < self.filtered_items.count) [urls addObject:self.filtered_items[idx].url];
+    }];
+    return urls;
 }
 
 /* ── Directory loading ───────────────────────────────────────────────── */
@@ -1749,14 +1729,14 @@ reload_directory
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSError *err = nil;
-        NSArray<NSURL *> *items = list_folder(dir, &err);
+        NSArray<files_item *> *items = list_folder(dir, &err);
         NSURL *work_tree    = files_git_work_tree(dir);
         NSString *git_index = work_tree ? files_git_index_path(work_tree) : nil;
         NSString *stamp     = git_index_stamp(git_index);
         BOOL git_current    = cache_tracked && stamp && [stamp isEqualToString:cache_stamp];
         NSSet<NSString *> *tracked = work_tree ? (cache_tracked ?: [NSSet set]) : nil;
-        NSArray<NSURL *> *rows = listing_rows(items ?: @[], sort_key, ascending,
-                                              folders_first, tracked, sizes, show_hidden);
+        NSArray<files_item *> *rows = listing_rows(items ?: @[], sort_key, ascending,
+                                                   folders_first, tracked, sizes, show_hidden);
         NSString *error = items ? nil
             : (err.localizedFailureReason ?: err.localizedDescription ?: @"It cannot be read.");
         NSDictionary<NSString *, NSImage *> *icons = item_icons(items ?: @[], icon_sz);
@@ -1849,7 +1829,7 @@ selected_paths
  *   reveal — YES to scroll the first selected row into view
  */
 - (void)
-show_rows:(NSArray<NSURL *> *)rows selecting:(NSSet<NSString *> *)paths reveal:(BOOL)reveal
+show_rows:(NSArray<files_item *> *)rows selecting:(NSSet<NSString *> *)paths reveal:(BOOL)reveal
 {
     NSDictionary<NSString *, NSNumber *> *widths = self.pending_widths;
     self.pending_widths = nil;
@@ -1860,7 +1840,7 @@ show_rows:(NSArray<NSURL *> *)rows selecting:(NSSet<NSString *> *)paths reveal:(
     self.filtered_items = rows;
     [self.table reloadData];
     NSIndexSet *sel = [rows indexesOfObjectsPassingTest:
-        ^BOOL(NSURL *item, NSUInteger idx, BOOL *stop) {
+        ^BOOL(files_item *item, NSUInteger idx, BOOL *stop) {
             return [paths containsObject:item.path];
         }];
     [self.table selectRowIndexes:sel byExtendingSelection:NO];
@@ -1906,11 +1886,9 @@ count_folder_sizes
     FilesCancelToken *token = self.size_token;
     __weak FilesBrowserView *ws = self;
 
-    for (NSURL *url in self.filtered_items) {
-        NSNumber *is_dir = nil;
-        [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
-        NSString *path = url.path;
-        if (!is_dir.boolValue || self.folder_sizes[path] ||
+    for (files_item *item in self.filtered_items) {
+        NSString *path = item.path;
+        if (!item.is_dir || self.folder_sizes[path] ||
             [self.sizes_pending containsObject:path]) continue;
         [self.sizes_pending addObject:path];
 
@@ -1990,16 +1968,20 @@ resort_revealing:(BOOL)reveal
  * keyboard focus, and, with pending_rename, the item renamed in place.
  *
  * Inputs:
- *   items — folder contents with listing_keys() prefetched
+ *   items — folder contents as the listing read them
  *   rows  — items filtered and sorted for display, or nil if the order
  *           changed while they were prepared (they are then redone here)
  */
 - (void)
-show_listing:(NSArray<NSURL *> *)items rows:(NSArray<NSURL *> *)rows
+show_listing:(NSArray<files_item *> *)items rows:(NSArray<files_item *> *)rows
 {
     NSSet<NSString *> *want = [self selected_paths];
     BOOL reveal = self.pending_names != nil;
-    if (reveal) want = files_paths_named(items, self.pending_names);
+    if (reveal) {
+        NSMutableArray<NSURL *> *urls = [NSMutableArray arrayWithCapacity:items.count];
+        for (files_item *item in items) [urls addObject:item.url];
+        want = files_paths_named(urls, self.pending_names);
+    }
     self.pending_names = nil;
 
     self.all_items = items;
@@ -2120,7 +2102,7 @@ end_spotlight_search
 /*
  * search_results_updated: — NSMetadataQuery notification handler. Takes the
  * paths of the first SEARCH_RESULT_LIMIT results on the main thread, then
- * on a background queue makes URLs with listing_keys() prefetched and
+ * on a background queue reads the items' attributes and
  * filters and sorts them like a listing, and shows them on the main queue,
  * keeping the selected results selected. A newer update or the end of the
  * search drops the result (search_generation).
@@ -2156,14 +2138,14 @@ search_results_updated:(NSNotification *)note
     __weak FilesBrowserView *ws = self;
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSMutableArray<NSURL *> *items = [NSMutableArray arrayWithCapacity:paths.count];
-        for (NSString *path in paths) {
-            NSURL *url = [NSURL fileURLWithPath:path];
-            [url resourceValuesForKeys:listing_keys() error:nil];  /* caches them */
-            [items addObject:url];
-        }
-        NSArray<NSURL *> *rows = listing_rows(items, sort_key, ascending, folders_first,
-                                              nil, sizes, show_hidden);
+        NSMutableArray<NSURL *> *urls = [NSMutableArray arrayWithCapacity:paths.count];
+        for (NSString *path in paths) [urls addObject:[NSURL fileURLWithPath:path]];
+        /* Search results are scattered over the disk, so they are read one
+         * at a time rather than folder by folder; the attributes, and what
+         * the rows then do with them, are the same either way. */
+        NSArray<files_item *> *items = files_items_at_urls(urls);
+        NSArray<files_item *> *rows  = listing_rows(items, sort_key, ascending, folders_first,
+                                                    nil, sizes, show_hidden);
         NSDictionary<NSString *, NSImage *> *icons = item_icons(items, icon_sz);
         NSDictionary<NSString *, NSString *> *comments = want_comments ? item_comments(items) : nil;
         cell_context_t ctx = { show_sizes, sizes, nil, comments };
@@ -2503,7 +2485,7 @@ viewForTableColumn:(NSTableColumn *)col
               row:(NSInteger)row
 {
     if (row < 0 || (NSUInteger)row >= self.filtered_items.count) return nil;
-    NSURL *url = self.filtered_items[row];
+    files_item *item = self.filtered_items[row];
 
     NSString *ident = col.identifier;
     CGFloat icon_sz = [self icon_size];
@@ -2559,8 +2541,11 @@ viewForTableColumn:(NSTableColumn *)col
     }
 
     cell_context_t ctx = [self cell_context];
-    cell.textField.stringValue = cell_text(ident, url, &ctx);
-    if ([ident isEqualToString:col_name]) cell.imageView.image = self.row_icons[url.path] ?: files_icon_for_url(url, icon_sz, YES);
+    cell.textField.stringValue = cell_text(ident, item, &ctx);
+    if ([ident isEqualToString:col_name]) {
+        cell.imageView.image = self.row_icons[item.path]
+            ?: files_icon_cached(item.path, shared_icon_type(item), icon_sz);
+    }
     return cell;
 }
 
@@ -2654,7 +2639,7 @@ row_double_clicked:(id)sender
 {
     NSInteger row = self.table.clickedRow;
     if (row < 0 || (NSUInteger)row >= self.filtered_items.count) return;
-    [self navigate_to:self.filtered_items[row]];
+    [self navigate_to:self.filtered_items[row].url];
 }
 
 /*
@@ -2801,12 +2786,10 @@ run_application:(id)sender
 - (NSURL *)
 selected_folder
 {
-    NSArray<NSURL *> *sel = [self selected_urls];
-    if (sel.count != 1) return nil;
-    NSNumber *dir = nil, *pkg = nil;
-    [sel.firstObject getResourceValue:&dir forKey:NSURLIsDirectoryKey error:nil];
-    [sel.firstObject getResourceValue:&pkg forKey:NSURLIsPackageKey error:nil];
-    return (dir.boolValue && !pkg.boolValue) ? sel.firstObject : nil;
+    NSIndexSet *rows = self.table.selectedRowIndexes;
+    if (rows.count != 1 || rows.firstIndex >= self.filtered_items.count) return nil;
+    files_item *item = self.filtered_items[rows.firstIndex];
+    return (item.is_dir && !item.is_package) ? item.url : nil;
 }
 
 /*
@@ -3114,8 +3097,14 @@ previewPanel:(QLPreviewPanel *)panel handleEvent:(NSEvent *)event
 - (NSRect)
 previewPanel:(QLPreviewPanel *)panel sourceFrameOnScreenForPreviewItem:(id<QLPreviewItem>)item
 {
-    NSInteger row = (NSInteger)[self.filtered_items indexOfObject:(NSURL *)item];
-    if (row == NSNotFound) return NSZeroRect;
+    NSInteger row = -1;
+    for (NSUInteger i = 0; i < self.filtered_items.count; i++) {
+        if ([self.filtered_items[i].path isEqualToString:((NSURL *)item).path]) {
+            row = (NSInteger)i;
+            break;
+        }
+    }
+    if (row < 0) return NSZeroRect;
     NSRect icon = [self.table frameOfCellAtColumn:[self.table columnWithIdentifier:col_name]
                                               row:row];
     icon.size.width = [self icon_size];
@@ -3414,8 +3403,9 @@ begin_rename:(id)sender
     NSTextField *tf = cell.textField;
     if (!tf) return;
 
-    NSURL *url    = self.filtered_items[row];
-    NSString *name = url.lastPathComponent;
+    files_item *item = self.filtered_items[row];
+    NSURL      *url  = item.url;
+    NSString   *name = item.name;
     self.rename_url   = url;
     self.rename_field = tf;
 
@@ -3427,10 +3417,7 @@ begin_rename:(id)sender
     tf.delegate        = self;
     [self.window makeFirstResponder:tf];
 
-    NSNumber *is_dir = nil, *is_pkg = nil;
-    [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
-    [url getResourceValue:&is_pkg forKey:NSURLIsPackageKey error:nil];
-    NSUInteger len = (is_dir.boolValue && !is_pkg.boolValue)
+    NSUInteger len = (item.is_dir && !item.is_package)
                      ? name.length : name.stringByDeletingPathExtension.length;
     tf.currentEditor.selectedRange = NSMakeRange(0, len ? len : name.length);
 }
@@ -3543,7 +3530,7 @@ tableView:(NSTableView *)tv
 pasteboardWriterForRow:(NSInteger)row
 {
     if (row < 0 || row >= (NSInteger)self.filtered_items.count) return nil;
-    return self.filtered_items[row];
+    return self.filtered_items[row].url;
 }
 
 /* ── Drag destination ─────────────────────────────────────────────────── */
@@ -3560,10 +3547,8 @@ pasteboardWriterForRow:(NSInteger)row
 folder_at_row:(NSInteger)row
 {
     if (row < 0 || row >= (NSInteger)self.filtered_items.count) return nil;
-    NSURL *url = self.filtered_items[row];
-    NSNumber *is_dir = nil;
-    [url getResourceValue:&is_dir forKey:NSURLIsDirectoryKey error:nil];
-    return is_dir.boolValue ? url : nil;
+    files_item *item = self.filtered_items[row];
+    return item.is_dir ? item.url : nil;
 }
 
 /*

@@ -3,7 +3,9 @@
 #import "file_hash.h"
 #import "git_info.h"
 #import "util.h"
+#import "shared_ui.h"
 #import "default_apps_panel.h"
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <sys/stat.h>
 #include <sys/xattr.h>
 #include <pwd.h>
@@ -64,7 +66,8 @@ make_value(void)
 /*
  * make_link_btn — creates a borderless link-styled word to sit beside a
  * value: the "copy" beside a hash or a path, the "change" beside Opens
- * with. One helper so every link in the panel reads the same.
+ * with, the "revert" under a custom icon. One helper so every link in the
+ * panel reads, and points, the same.
  *
  * Inputs:
  *   title  — the word, e.g. @"copy"
@@ -73,12 +76,14 @@ make_value(void)
  *   tag    — button tag the action uses to tell the buttons apart; 0 when
  *            the action serves one button only
  *
- * Output: configured NSButton.
+ * Output: configured shared_link_button — the panel's wording and small
+ *         font on the shared link button, so it points the pointing hand
+ *         like every other link.
  */
 static NSButton *
 make_link_btn(NSString *title, id target, SEL action, NSInteger tag)
 {
-    NSButton *btn  = [[NSButton alloc] init];
+    NSButton *btn  = [[shared_link_button alloc] init];
     btn.buttonType = NSButtonTypeMomentaryPushIn;
     btn.bordered   = NO;
     NSMutableAttributedString *t =
@@ -260,6 +265,238 @@ make_ownership_popup(NSArray<NSString *> *names, id target, SEL action)
     return btn;
 }
 
+/* ── the icon well ───────────────────────────────────────────────────── */
+
+/*
+ * pb_image_url — the first image file a drag carries, chosen by the file's
+ * type rather than its contents, so answering a drag costs no read of it.
+ *
+ * Inputs:
+ *   pb — the dragging pasteboard
+ *
+ * Output: file URL of an image file (.icns among them: it conforms to
+ *         public.image), or nil if the pasteboard carries no image file.
+ */
+static NSURL *
+pb_image_url(NSPasteboard *pb)
+{
+    NSArray<NSURL *> *urls = [pb readObjectsForClasses:@[NSURL.class] options:@{
+        NSPasteboardURLReadingFileURLsOnlyKey: @YES,
+        NSPasteboardURLReadingContentsConformToTypesKey: @[UTTypeImage.identifier],
+    }];
+    return urls.firstObject;
+}
+
+/*
+ * pb_has_image — whether a drag carries something that could become an
+ * icon: an image file, or image data straight from another application
+ * (Preview, a browser, Photos). A drag of files is judged by their type
+ * alone — NSImage canInitWithPasteboard: answers YES for any file URL,
+ * a text file included, because it reads the pasteboard's types and not
+ * what the file holds. No file contents are read either way, so this is
+ * cheap enough to answer a drag with.
+ *
+ * Inputs:
+ *   pb — the dragging pasteboard
+ *
+ * Output: YES if a drop should be offered.
+ */
+static BOOL
+pb_has_image(NSPasteboard *pb)
+{
+    if ([pb canReadObjectForClasses:@[NSURL.class]
+                            options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}]) {
+        return pb_image_url(pb) != nil;
+    }
+    return [NSImage canInitWithPasteboard:pb];
+}
+
+/*
+ * pb_read_image — the image a drop carries. An image file is read from
+ * disk rather than taken off the pasteboard, so an .icns arrives with
+ * every size it holds and the icon looks right from 16 points to 512;
+ * anything else comes from the pasteboard's own image data.
+ *
+ * Inputs:
+ *   pb — the dragging pasteboard
+ *
+ * Output: the image, or nil if nothing on the pasteboard could be read as
+ *         one. Blocks on the read; a drop runs on the main thread, as
+ *         AppKit delivers it.
+ */
+static NSImage *
+pb_read_image(NSPasteboard *pb)
+{
+    NSURL *url = pb_image_url(pb);
+    return url ? [[NSImage alloc] initWithContentsOfURL:url]
+               : [[NSImage alloc] initWithPasteboard:pb];
+}
+
+/*
+ * info_icon_view — the panel's icon, and the well an icon is dropped on:
+ * an image or an .icns file dragged onto it becomes the item's own icon,
+ * the way it does in Finder's Info window. The view decides whether a drag
+ * is one it can take and hands over the image; writing it is the panel's
+ * job (apply_custom_icon:).
+ */
+@interface info_icon_view : NSImageView
+
+/* Asked once a drag arrives: NO refuses it (no item, locked, read-only). */
+@property (nonatomic, copy) BOOL (^can_accept)(void);
+/* Called with the dropped image, on the main thread. */
+@property (nonatomic, copy) void (^icon_dropped)(NSImage *icon);
+
+@end
+
+@implementation info_icon_view {
+    BOOL _drop_lit;   /* a drag this well would take is over it: ring drawn */
+}
+
+/*
+ * initWithFrame: — registers the two shapes a dropped icon arrives in: a
+ * file URL (an image dragged out of a file list) and image data (dragged
+ * out of an application). NSImageView registers nothing of its own while
+ * it is not editable, which this one never is: it accepts a drop but is
+ * not a field to be cut, pasted or dragged out of.
+ *
+ * Inputs:
+ *   frame — initial frame; the panel constrains the view to icon_size
+ *
+ * Output: self, or nil if NSImageView could not be initialised.
+ */
+- (instancetype)
+initWithFrame:(NSRect)frame
+{
+    self = [super initWithFrame:frame];
+    if (!self) {
+        return nil;
+    }
+    [self registerForDraggedTypes:@[NSPasteboardTypeFileURL, NSPasteboardTypeTIFF,
+                                    NSPasteboardTypePNG]];
+    return self;
+}
+
+/*
+ * set_drop_lit: — lights or clears the ring, redrawing only on a change.
+ *
+ * Inputs:
+ *   lit — YES while a drag this well would take is over it
+ */
+- (void)
+set_drop_lit:(BOOL)lit
+{
+    if (lit == _drop_lit) return;
+    _drop_lit = lit;
+    self.needsDisplay = YES;
+}
+
+/*
+ * draggingEntered: — takes a drag that carries an image the panel can
+ * write, and refuses every other. The answer is worked out here, once, and
+ * kept for draggingUpdated:, which AppKit sends on every mouse move: the
+ * pasteboard check and can_accept both read the volume.
+ *
+ * Inputs:
+ *   info — the dragging session
+ *
+ * Output: NSDragOperationCopy for a drag this well takes, else
+ *         NSDragOperationNone.
+ */
+- (NSDragOperation)
+draggingEntered:(id<NSDraggingInfo>)info
+{
+    [self set_drop_lit:pb_has_image(info.draggingPasteboard) &&
+                       (self.can_accept == nil || self.can_accept())];
+    return _drop_lit ? NSDragOperationCopy : NSDragOperationNone;
+}
+
+/*
+ * draggingUpdated: — repeats the answer draggingEntered: settled on.
+ *
+ * Inputs:
+ *   info — the dragging session
+ *
+ * Output: NSDragOperationCopy while the well is lit, else
+ *         NSDragOperationNone.
+ */
+- (NSDragOperation)
+draggingUpdated:(id<NSDraggingInfo>)info
+{
+    return _drop_lit ? NSDragOperationCopy : NSDragOperationNone;
+}
+
+/*
+ * draggingExited: — the drag left the well: put it back.
+ *
+ * Inputs:
+ *   info — the dragging session
+ */
+- (void)
+draggingExited:(id<NSDraggingInfo>)info
+{
+    [self set_drop_lit:NO];
+}
+
+/*
+ * draggingEnded: — the drag is over, dropped here or elsewhere: put the
+ * well back, since a drag that ends outside it sends no draggingExited:.
+ *
+ * Inputs:
+ *   info — the dragging session
+ */
+- (void)
+draggingEnded:(id<NSDraggingInfo>)info
+{
+    [self set_drop_lit:NO];
+}
+
+/*
+ * performDragOperation: — reads the dropped image and hands it to the
+ * panel. A file that has an image's type but holds something else gives no
+ * valid image, and the drop is refused rather than written.
+ *
+ * Inputs:
+ *   info — the dragging session
+ *
+ * Output: YES if an image was read and handed over.
+ */
+- (BOOL)
+performDragOperation:(id<NSDraggingInfo>)info
+{
+    [self set_drop_lit:NO];
+
+    NSImage *icon = pb_read_image(info.draggingPasteboard);
+    if (!icon.isValid) {
+        return NO;
+    }
+    if (self.icon_dropped) self.icon_dropped(icon);
+    return YES;
+}
+
+/*
+ * drawRect: — the icon, and over it the ring that marks the well as ready
+ * for the drag held over it. NSImageView shows nothing of its own for a
+ * drop it is about to take.
+ *
+ * Inputs:
+ *   dirty — rectangle to redraw
+ */
+- (void)
+drawRect:(NSRect)dirty
+{
+    [super drawRect:dirty];
+    if (!_drop_lit) return;
+
+    NSBezierPath *ring =
+        [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(self.bounds, 1.0, 1.0)
+                                        xRadius:6.0 yRadius:6.0];
+    ring.lineWidth = 2.0;
+    [NSColor.controlAccentColor setStroke];
+    [ring stroke];
+}
+
+@end
+
 /* ── FilesInfoPanel ──────────────────────────────────────────────────── */
 
 @interface FilesInfoPanel () <NSTextFieldDelegate, NSWindowDelegate,
@@ -267,7 +504,9 @@ make_ownership_popup(NSArray<NSString *> *names, id target, SEL action)
 
 @property (nonatomic, strong) NSURL       *current_url;
 @property (nonatomic, assign) BOOL         current_is_dir;
-@property (nonatomic, strong) NSImageView *icon_view;
+@property (nonatomic, assign) BOOL         current_has_custom_icon;
+@property (nonatomic, strong) info_icon_view *icon_view;
+@property (nonatomic, strong) NSButton       *icon_revert;  /* the "revert" link */
 @property (nonatomic, strong) NSTextField        *name_field;
 @property (nonatomic, strong) NSVisualEffectView *name_bg;       /* glass pill for name_field */
 @property (nonatomic, strong) NSTextField        *locked_name_label;
@@ -369,12 +608,36 @@ init
     panel.delegate = self;
 
     /* Icon + name at top. A rounded-bezel field centres its text itself. */
-    self.icon_view = [NSImageView imageViewWithImage:[[NSImage alloc] init]];
+    self.icon_view = [[info_icon_view alloc]
+                         initWithFrame:NSMakeRect(0, 0, icon_size, icon_size)];
     self.icon_view.imageScaling = NSImageScaleProportionallyUpOrDown;
+    self.icon_view.toolTip      =
+        @"Drag an image or .icns file here to give this item its own icon.";
+    self.icon_view.translatesAutoresizingMaskIntoConstraints = NO;
     [NSLayoutConstraint activateConstraints:@[
         [self.icon_view.widthAnchor  constraintEqualToConstant:icon_size],
         [self.icon_view.heightAnchor constraintEqualToConstant:icon_size],
     ]];
+    __weak FilesInfoPanel *weak_panel = self;
+    self.icon_view.can_accept = ^BOOL {
+        FilesInfoPanel *s = weak_panel;
+        return s != nil && [s icon_is_changeable];
+    };
+    self.icon_view.icon_dropped = ^(NSImage *icon) {
+        [weak_panel apply_custom_icon:icon];
+    };
+
+    /* "revert" under the icon, there only while the item has an icon of
+     * its own to go back from (update_icon_controls). */
+    self.icon_revert = make_link_btn(@"revert", self, @selector(revert_icon_action:), 0);
+    self.icon_revert.toolTip =
+        @"Remove this item's own icon, so its type's icon shows again.";
+    self.icon_revert.hidden = YES;
+    NSStackView *icon_col = [NSStackView stackViewWithViews:@[self.icon_view,
+                                                              self.icon_revert]];
+    icon_col.orientation = NSUserInterfaceLayoutOrientationVertical;
+    icon_col.spacing     = 2.0;
+    icon_col.alignment   = NSLayoutAttributeCenterX;
     /* Glass-pill name field: borderless field inside a rounded visual-effect
      * view, matching the address bar's appearance. */
     self.name_field                 = [[NSTextField alloc] init];
@@ -414,7 +677,7 @@ init
     [self.locked_name_label setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
                                                      forOrientation:NSLayoutConstraintOrientationHorizontal];
 
-    NSStackView *top = [NSStackView stackViewWithViews:@[self.icon_view, self.name_bg,
+    NSStackView *top = [NSStackView stackViewWithViews:@[icon_col, self.name_bg,
                                                          self.locked_name_label]];
     top.spacing      = 12.0;
 
@@ -709,8 +972,11 @@ populate_fields:(NSURL *)url
     NSDictionary<NSURLResourceKey, id> *res =
         [fresh resourceValuesForKeys:keys error:nil];
 
-    /* Icon */
-    self.icon_view.image = files_icon_for_url(fresh, icon_size, NO);
+    /* Icon — the item's own, custom icons included (files_icon_for_url
+     * uncached), plus whether that icon is a custom one, which decides
+     * whether "revert" is offered (update_icon_controls). */
+    self.icon_view.image         = files_icon_for_url(fresh, icon_size, NO);
+    self.current_has_custom_icon = files_has_custom_icon(fresh);
 
     /* Name */
     NSString *item_name = res[NSURLNameKey] ?: url.lastPathComponent;
@@ -829,6 +1095,7 @@ update_editable_state
     for (NSGridRow *r in self.edit_rows_gated)   r.hidden = !editable;
     for (NSGridRow *r in self.locked_rows_gated) r.hidden =  editable;
 
+    [self update_icon_controls];
     [self update_xattr_buttons];
     [self fit_window];
 }
@@ -1031,6 +1298,85 @@ lock_toggled:(NSButton *)sender
         sender.state = lock ? NSControlStateValueOff : NSControlStateValueOn;
     }
     [self update_editable_state];
+}
+
+/*
+ * update_icon_controls — offers "revert" only where there is an icon of
+ * the item's own to revert and the item is not locked, the same gate the
+ * rest of the panel's editing is behind. The caller refits the window: the
+ * link appearing changes the height of the block the icon sits in.
+ */
+- (void)
+update_icon_controls
+{
+    BOOL editable = (self.lock_check.state != NSControlStateValueOn);
+    self.icon_revert.hidden = !(self.current_has_custom_icon && editable);
+}
+
+/*
+ * icon_is_changeable — whether a dropped icon could be written to the item
+ * as things stand: there is an item, it is not locked (a locked item's
+ * fields are all read-only here), and it is writable — for a folder,
+ * because the icon becomes a file inside it. Answers a drag arriving over
+ * the icon, so it reads the volume once per drag, not per mouse move.
+ *
+ * Output: YES if a dropped icon should be accepted.
+ */
+- (BOOL)
+icon_is_changeable
+{
+    if (!self.current_url) return NO;
+    if (self.lock_check.state == NSControlStateValueOn) return NO;
+    return [NSFileManager.defaultManager isWritableFileAtPath:self.current_url.path];
+}
+
+/*
+ * apply_custom_icon: — gives the current item the dropped icon, or takes
+ * its own icon away (icon nil). The write runs on a background queue: it
+ * rewrites the item's resource fork, or a folder's "Icon\r" file, which a
+ * slow volume can take its time over. On success the item is read again
+ * rather than just redrawn, because the icon is not all that changed — the
+ * modification date moves, and com.apple.FinderInfo and ResourceFork
+ * appear among the extended attributes. The panel may have moved on to
+ * another item by then, which the path check catches.
+ *
+ * Inputs:
+ *   icon — the new icon, or nil to restore the item's type icon
+ */
+- (void)
+apply_custom_icon:(NSImage *)icon
+{
+    NSURL *url = self.current_url;
+    if (!url) return;
+
+    __weak FilesInfoPanel *ws = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSError *err = nil;
+        BOOL ok = files_set_custom_icon(url, icon, &err);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            FilesInfoPanel *s = ws;
+            if (!s) return;
+            if (!ok) {
+                files_show_error(icon ? @"Could not set the icon"
+                                      : @"Could not remove the icon", err, s.window);
+                return;
+            }
+            if (files_same_path(s.current_url, url)) [s populate_fields:s.current_url];
+        });
+    });
+}
+
+/*
+ * revert_icon_action: — the "revert" link under the icon: drops the item's
+ * own icon so its type's icon shows again.
+ *
+ * Inputs:
+ *   sender — the link button (unused)
+ */
+- (void)
+revert_icon_action:(NSButton *)sender
+{
+    [self apply_custom_icon:nil];
 }
 
 /*

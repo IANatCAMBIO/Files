@@ -9,6 +9,11 @@ status, real folder sizes), and copies with APFS clones and optional
 SHA-256 verification. "Show in Finder" from any other app opens Files
 instead, and every setting it changes is recorded and reversible.
 
+It is also quick, on purpose. A folder of 10,000 items is read in about
+45 ms, the main thread never touches the file system, and every
+performance claim here is a number someone measured rather than an
+intention — see [Speed](#speed).
+
 ## Quickstart
 
 **Prerequisites**
@@ -87,6 +92,10 @@ for the current choice re-checks and repairs every setting.
 
 Compared with Finder:
 
+- **Fast on purpose** — a folder of 10,000 items opens in about 45 ms,
+  roughly ten times quicker than asking Foundation for the same
+  information, because the whole listing comes back in batched system
+  calls instead of an attribute read per file
 - **Replaces Finder as the default file viewer** — reveals from other apps
   open Files with the item scrolled to and selected, and `open <folder>` in
   Terminal opens Files too. Reversible from Preferences, with a log of every
@@ -102,7 +111,9 @@ Compared with Finder:
 - **Git-aware**: a badge on working-tree folders, a tracked/untracked
   column, and branch, push state and remote in Get Info
 - **Get Info that tells you more**: editable permissions, owner and group,
-  the Locked flag, and SHA-256 / MD5 checksums
+  the Locked flag, SHA-256 / MD5 checksums, and an icon well — drag an
+  image or `.icns` file onto the icon to make it the item's own, shown in
+  the file list as well, and **revert** to put the type's icon back
 - **Archives and disk images open in place** — double-click a `.zip`,
   `.tar.gz`, `.dmg` or `.iso` and the contents open in a new window; create
   archives (zip, tar.gz, tar, optionally password-protected) from the
@@ -121,6 +132,33 @@ Compared with Finder:
 - Spotlight search in the folder or across the Mac, Quick Look on Space,
   type-select, an address bar that takes `~` and relative paths, an info
   sidebar, and a status bar with item count and free disk space
+
+### Speed
+
+Responsiveness is a feature here, held to the same standard as
+correctness: a change that makes the window slower is a bug, and a claim
+about speed is worth nothing until it has been measured.
+
+- **Nothing on the main thread that touches a volume.** Listings, icons,
+  extended attributes, folder-size totals, git state and column
+  measurement all run on background queues, and a stale result is dropped
+  by a generation counter rather than drawn. A hung network share can be
+  navigated away from; it cannot freeze a window.
+- **Ask the file system once, in batches.** A folder's contents and every
+  attribute a row shows come back together from `getattrlistbulk`, a few
+  hundred items a call: 34 ms for 10,000 items against 425 ms for the
+  same values read one at a time. Launch Services is asked what kind of
+  thing an item is once per kind of item in the folder, not once per
+  item.
+- **Share what can be shared.** Files of one type share one cached icon,
+  so a folder of 10,000 photographs costs one image; only a folder, a
+  package or a file carrying an icon of its own is read separately.
+- **Measure, then decide.** The numbers above and in
+  [USER_GUIDE.md](USER_GUIDE.md) come from benchmarks over real folders,
+  and the trade-offs they bought are written down beside the code that
+  made them. Where a cheaper system call exists, it is used: reading one
+  Finder flag through `getattrlist` rather than `getxattr` cut that read
+  by five times, which is a comment in `util.m` as well as a line here.
 
 Everything in detail — including keyboard shortcuts, the Finder settings
 Files manages, and keeping Files running for faster startup — is in
