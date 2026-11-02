@@ -653,9 +653,11 @@ add_location_item:(NSMenu *)menu url:(NSURL *)url name:(NSString *)name icon:(NS
  * Go: below its fixed items, a Bookmarks section listing every bookmark in
  * bar order.
  *
- * Mounts: the mounted volumes, then (after a separator) the cloud storage
- * locations — iCloud Drive and File Provider accounts such as Google
- * Drive — then "All Mounts…".
+ * Mounts: the mounted volumes under a "Mounted Filesystems" heading,
+ * then the cloud storage locations — iCloud Drive and the File Provider
+ * accounts such as Google Drive, which fileproviderd serves rather than
+ * the kernel mount table — under a "Fileproviderd" heading, then
+ * "All Mounts…". A heading only appears over items it has.
  *
  * Each location item navigates the front window's active pane.
  *
@@ -681,12 +683,19 @@ menuNeedsUpdate:(NSMenu *)menu
     [menu removeAllItems];
 
     FilesVolumeManager *vm = FilesVolumeManager.shared;
-    for (NSURL *vol in vm.mounted_volumes) {
+    NSArray<NSURL *> *vols = vm.mounted_volumes;
+    if (vols.count > 0) {
+        [menu addItem:[NSMenuItem sectionHeaderWithTitle:@"Mounted Filesystems"]];
+    }
+    for (NSURL *vol in vols) {
         [self add_location_item:menu url:vol name:[vm display_name_for_volume:vol] icon:nil];
     }
 
     NSArray<NSURL *> *clouds = vm.cloud_storage_locations;
-    if (clouds.count > 0) [menu addItem:NSMenuItem.separatorItem];
+    if (clouds.count > 0) {
+        [menu addItem:NSMenuItem.separatorItem];
+        [menu addItem:[NSMenuItem sectionHeaderWithTitle:@"Fileproviderd"]];
+    }
     for (NSURL *cloud in clouds) {
         NSString *name = nil;
         [cloud getResourceValue:&name forKey:NSURLLocalizedNameKey error:nil];

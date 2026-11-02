@@ -138,7 +138,8 @@ A minimalist macOS file manager written in Objective-C + AppKit.
   archive-reveal-after / dearchive-reveal-after are off (checked at every
   launch, including the first) and come back on with Set default file
   browser to Finder
-- Mounts menu: mounted volumes, then cloud storage (iCloud Drive and
+- Mounts menu: the mounted volumes under a Mounted Filesystems heading,
+  then, under a Fileproviderd heading, the cloud storage (iCloud Drive and
   File Provider accounts such as Google Drive); Go menu: Home, Desktop,
   Downloads, Documents and Trash, then a Bookmarks section listing every
   bookmark in bar order
