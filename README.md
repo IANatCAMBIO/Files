@@ -1,348 +1,125 @@
-# files
+# Files
 
 ![Files, dual-pane view](images/screenshot.png)
 
-A minimalist macOS file manager written in Objective-C + AppKit.
+Files is a file manager that replaces Finder on macOS — a plain
+Objective-C and AppKit app with no third-party dependencies. It browses
+in one or two panes, shows the columns Finder won't (permissions, git
+status, real folder sizes), and copies with APFS clones and optional
+SHA-256 verification. "Show in Finder" from any other app opens Files
+instead, and every setting it changes is recorded and reversible.
 
-## Features
+## Quickstart
 
-- List-view browser with Name, Size, Kind, Permissions, Date Modified and
-  Date Created (hidden by default) columns; click a header to sort
-  (Finder-style name order), right-click the headers to show or hide
-  columns (every list follows). The Permissions and Comment headers do not
-  sort, as neither holds a value a list can be put in order by
-- Default sort (Preferences ▸ View): the column every new window and
-  folder starts sorted by — Name, Size, Kind, Date Modified or Date
-  Created — and its direction, worded for the column ("Newest first",
-  "Largest first", "Z → A"). Date Modified, newest first, out of the box.
-  Changing it re-sorts the windows already open; clicking a column header
-  re-sorts that window alone and leaves the setting as it is
-- View ▸ Always Show Folders First (on by default; also in Preferences)
-  keeps every folder above the files, as Finder does. Turn it off and
-  folders take their place among the files in whatever order is in force
-- Auto-fit columns (View ▸ Auto-Fit Columns, on by default) and optional
-  double-height rows with larger icons (View ▸ Large Rows)
-- Single- or dual-pane browsing (View ▸ Dual Pane, ⇧⌘2; Tab switches panes; right-click a folder ▸ Open in Split Pane)
-- The status bar shows the item count and, on the right, the free and
-  total space of the disk being browsed ("10.3 GB (of 245 GB) free"; free
-  space counts purgeable space, as Finder does). View ▸ Show Used Disk
-  Space (off by default; also in Preferences) shows the space used instead
-  ("234.8 GB (of 245 GB) used"). A spinner at its left shows while a slow
-  folder (e.g. a File Provider mount) is still loading
-- View ▸ Show Full Path in Title (on by default; also in Preferences)
-  titles the window with the active pane's full path instead of just the
-  folder name
-- Bookmarks bar directly under the toolbar, where Tasks and Notes put their
-  Favorites bar (Home, Desktop, Downloads, Documents, Applications, Trash);
-  ⌘D adds the current folder, and right-click ▸ Add to Bookmarks on a
-  folder in the list adds that folder (before Trash, which is always
-  last). The star right of the address bar, in the toolbar, shows ★ when
-  the current folder is a bookmark and ☆ when it is not; click it to
-  toggle. Drag a bookmark along the bar to reorder it, and right-click it
-  to remove it. When the window is too narrow for every bookmark, scroll over the bar
-  (mouse wheel or trackpad) to move along it. View ▸ Show Bookmarks Bar or the same
-  checkbox in Preferences ▸ View (on by default) hides or shows it in
-  every window
-- Type-select: with the list focused, typing a letter jumps the selection
-  to the next item whose name starts with it, as in Finder; keep typing to
-  narrow it (the typed letters are forgotten after about a second). Only
-  names are matched, never a row's kind, permissions or comment
-- Quick Look: Space previews the selection (Space or Esc closes it; the
-  arrow keys move through the list and the preview follows)
-- Collapsible info sidebar with a Quick Look thumbnail and file details
-- Get Info panel: kind, the app that opens the file, size, dates,
-  owner/group, editable permissions, Locked flag, rename, and SHA-256 /
-  MD5 checksums (Preferences ▸ Show Hashes in Get Info, off by default)
-- Git folders: the top folder of a git working tree shows its usual folder
-  icon with a git badge centered on it. Inside a repository the list gains
-  a Git column that reads "tracked" for every file git tracks (including
-  newly added ones) and every folder containing one, and is blank for
-  untracked and ignored items; it updates when the index changes (add, rm,
-  commit, checkout) and is filled in just after the list appears, so large
-  repositories never hold up a folder. Git features need Xcode or the
-  Command Line Tools and are off without them. The repository's Get Info
-  panel adds a Git section: the current branch, whether it is pushed
-  (compared with its upstream as of the last fetch — commits
-  ahead/behind, no upstream, detached HEAD), and the remote URL (the
-  upstream's remote, else origin), and the info sidebar shows the same three as
-  Branch, Pushed and Remote rows
-- Copy, cut and paste, and drag and drop (moves by default; hold ⌥ to
-  copy), with a progress panel (status line, progress bars, transfer log,
-  cancel), Keep Both / Replace prompts, and optional SHA-256 verification
-  (View ▸ Validate Copies with SHA-256, also in Preferences ▸ Move/Copy).
-  View ▸ Simple Copies (off by default; also in Preferences ▸ Move/Copy)
-  skips the panel: transfers run silently, keeping both on name clashes,
-  and only errors are shown. Copies use APFS clones when possible and
-  keep extended attributes, tags, ACLs, the Locked flag and dates; nothing
-  at the destination is replaced until the new copy is complete. With
-  validation on, each file's source is hashed before it is copied and its
-  staged copy straight after, and the copy stops at the first mismatch;
-  APFS clones are hashed like any other copy. Files kept only in iCloud
-  are downloaded first, with their progress shown in the panel
-  ("Downloading … from iCloud"); moves within iCloud Drive need no download
-- The progress panel counts a job in **steps**, not bytes, because byte
-  totals say little about how much of a transfer is left: hashing a file
-  costs about as much as copying it, and a same-volume move or an APFS
-  clone moves no data at all. Every file costs five steps with validation
-  on — hash the source, copy it into a staging file, hash the staged copy,
-  compare the two, then rename the staged file into place or delete it —
-  and two without: copy it into a staging file, then rename it into place;
-  a move that stays on one volume is a single rename however many files it
-  covers. The job's steps are
-  counted before anything moves, so there is a progress bar for the file
-  being transferred and, when the job covers more than one file, a second
-  one for the job as a whole. The bar that stands for the job is followed
-  by "52% @ 5.7 MB/s": the rate is every byte of every file copied over the
-  time since the job started, so hashing, which moves no bytes but does
-  take time, pulls a validated copy's average well under the volume's own
-  speed, and a same-volume move shows no rate at all because it copies
-  nothing. The status line above them is the newest
-  line of the transfer log, so the two always agree: the log opens with
-  the job, names each step as it begins, reports each file's success with
-  the SHA-256 both sides agreed on, and closes with the job's result,
-  error count and elapsed time
-- Move to Trash, Empty Trash, New Folder and New File (File menu or the
-  toolbar's + button), Paste Into (right-click a folder while files are on
-  the clipboard), inline rename (right-click ▸ Rename, and
-  straight after New Folder / New File; the name without its extension is
-  selected, ready to type). Return opens the selection, like a
-  double-click: folders in the list, files in their default app
-- App bundles open like folders; right-click ▸ Run Application launches one
-- Symbolic links are followed (a link to a folder opens that folder)
-- Opening a disk image (.dmg, .iso, …) mounts it and opens its volume in a
-  new window; password-protected or licensed images are handed to the
-  system's DiskImageMounter to ask, then open the same way
-- Opening an archive (.zip, .tar, .tar.gz, .tgz) extracts it next to
-  itself and opens the new folder in a new window: a folder named after the
-  archive, or the archive's own top-level folder if it has just one; a name
-  already taken gets " 2". Nothing appears until extraction is complete, and
-  a failed one leaves nothing behind. An encrypted zip asks for its password
-- Right-click ▸ Create Archive… on one or more items in the same folder asks
-  for the format (zip, tar.gz or tar), the file name and, for zip, an
-  optional password; the archive is made in that folder and selected.
-  Passwords go to `zip` and `unzip` through a terminal, never on a command
-  line where `ps` would show them. Zip password protection is the older
-  ZipCrypto scheme, which is weak; tar cannot be password protected
-- Spotlight search by name, in the current folder and its subfolders or
-  across the whole Mac (the search field's magnifying-glass menu: This
-  Folder / This Mac; the empty field shows which); the first 5,000 matches
-  are shown, and the status bar says when there are more
-- View ▸ Show Folder Sizes (off by default; also in Preferences): the Size
-  column shows each folder's total — every file inside it, at any depth,
-  added up (symbolic links not followed, other volumes not entered).
-  Totals are counted in the background, one folder at a time, and fill in
-  as they finish ("…" until then); sorting by Size uses them. They are
-  kept while you stay in the folder; Reload counts them again
-- Live updates when the current folder changes; a folder that cannot be
-  read (no permission, a disconnected server) says so in the status bar.
-  Folders are listed in the background, so a slow or unresponsive network
-  folder never freezes the window
-- While Files is the default file browser, expanding or creating an
-  archive does not pop open a Finder window: Archive Utility's
-  archive-reveal-after / dearchive-reveal-after are off (checked at every
-  launch, including the first) and come back on with Set default file
-  browser to Finder
-- Mounts menu: the mounted volumes under a Mounted Filesystems heading,
-  then, under a Fileproviderd heading, the cloud storage (iCloud Drive and
-  File Provider accounts such as Google Drive); Go menu: Home, Desktop,
-  Downloads, Documents and Trash, then a Bookmarks section listing every
-  bookmark in bar order
-- An All Mounts window (Mounts ▸ All Mounts…, or the toolbar's ⏏ button,
-  which is there only while a volume is mounted that can be unmounted)
-  with per-volume unmount; at the root
-  of an unmountable volume (external disk, disk image, network share) a
-  floating ⏏ button unmounts it (the status bar confirms), and any window
-  showing it moves to /Volumes. If files on it are open, a sheet lists them
-  (and the apps using them) and the volume unmounts automatically once
-  they are closed
-- Default file viewer in place of Finder: "Show in Finder" from other apps
-  opens Files; Preferences ▸ Set Finder as default undoes every change
-  (see Replacing Finder)
-- Preferences window (Files ▸ Preferences…, ⌘,): View has the Default sort
-  order and the View-menu preferences; Move/Copy has Simple Copies and
-  Validate Copies with SHA-256; Integration has the default file browser
-  (Set Files as default / Set Finder as default — each opens a change
-  log, and the ⓘ beside the heading lists what follows the default) and
-  Keep Files running for faster startup (see Keeping Files running)
-- About Files shows the version (from the `VERSION` file), build date,
-  the app's motto, and links to camb.io and the license
-- Address bar in the toolbar (accepts `~` and relative paths), with the
-  bookmark star beside it, between Reload and the hidden-files eye. It
-  stretches to every point the other toolbar items can spare and gives
-  them back as the window narrows; the buttons and the search field stay
-  packed against the right edge of the toolbar, and when the window gets
-  narrow enough that the search field shuts to its magnifying glass, the
-  address bar takes the room it gives up. The
-  toolbar has no Back and Forward buttons: the address bar takes the room
-  they would want, and Go ▸ Back (⌘[) and Go ▸ Forward (⌘]) navigate
-  without them. Up, Open in Terminal, show/hide hidden files
-  (View ▸ Show Hidden Files, ⇧⌘., or the toolbar's eye button — macOS
-  flags `/Volumes`, `/usr`, `/private` and the other Unix directories
-  hidden, so `/` lists only four items until this is on). An ⏏ toolbar
-  button opens All Mounts, and appears only while something unmountable is
-  mounted
-
-## Prerequisites
+**Prerequisites**
 
 - macOS 14.0 (Sonoma) or later
-- Xcode Command Line Tools (`xcode-select --install`)
-- The `shared_ui` repository checked out beside this one (`../shared_ui`); its
-  tool panel and helpers are compiled in
+- Xcode Command Line Tools: `xcode-select --install`
 
-## Installation
+**Clone and build.** Files compiles in the `shared_ui` module, so check
+both repositories out beside each other:
 
 ```sh
+git clone https://github.com/IANatCAMBIO/Files.git files
+git clone https://github.com/IANatCAMBIO/SharedUI.git shared_ui
+cd files
 make install
 ```
 
-This builds the app bundle and copies it to `~/Applications/Files.app` (per-user; no `sudo` needed). Re-running `make install` replaces the previous copy.
+`make install` builds the bundle and copies it to `~/Applications/Files.app`
+(per-user; no `sudo`). Re-running it replaces the previous copy.
 
-To check a build first, `make test` runs the copy-engine tests (see BUILD.md).
+| Command | What it does |
+|---|---|
+| `make` | build `Files.app` in the repo root |
+| `make run` | build, then launch |
+| `make install` | build, then install to `~/Applications` |
+| `make test` | release checks (build, unit, feature, UI) |
+| `make clean` | remove `build/` and the bundle |
 
-## Full Disk Access
+See [BUILD.md](BUILD.md) for the toolchain, dependencies and test targets.
 
-Files expects Full Disk Access (to show protected folders such as the Trash
-and to change Archive Utility's settings). On launch it checks, and if access
-is missing it explains how to grant it: System Settings ▸ Privacy & Security ▸
-Full Disk Access, turn on Files (or add `~/Applications/Files.app` with +),
-then Quit & Reopen.
+## First run
 
-The build signs with your first "Apple Development" certificate if you have
-one (`security find-identity -v -p codesigning`), so the grant survives
-rebuilds and `make install`. Without a certificate it falls back to an
-ad-hoc signature, which macOS ties to a single build — the grant then has
-to be given again after each install. To choose a specific identity:
+Launch from `~/Applications`, or `make run`.
+
+**Full Disk Access.** Files needs it to show protected folders such as the
+Trash and to change Archive Utility's settings. On launch it checks, and
+if access is missing it explains how to grant it: System Settings ▸
+Privacy & Security ▸ Full Disk Access, turn on Files (or add
+`~/Applications/Files.app` with +), then Quit & Reopen.
+
+**Code signing.** The build signs with your first "Apple Development"
+certificate if you have one (`security find-identity -v -p codesigning`),
+so the Full Disk Access grant survives rebuilds and `make install`.
+Without a certificate it falls back to an ad-hoc signature, which macOS
+ties to a single build — the grant then has to be given again after each
+install. To choose a specific identity:
 
 ```sh
 make install CODESIGN_IDENTITY="Apple Development: Your Name (TEAMID)"
 ```
 
-## First run
+**Default file browser.** On first launch Files makes itself the default
+file viewer, so "Show in Finder" from other apps opens Files. It does not
+replace or disable Finder, which macOS still needs. It changes a recorded
+set of settings — `NSFileViewer`, Finder's desktop icons and Quit menu
+item, an `open` function in `~/.zshrc`, and Archive Utility's reveal-after
+flags — and quits Finder so they take effect. Every one is listed, with
+its value before and after, in the change log that Preferences ▸
+Integration opens. The full account is in
+[USER_GUIDE.md § Replacing Finder](USER_GUIDE.md#replacing-finder).
 
-```sh
-make run
-```
+## Uninstalling
 
-Or double-click `Files.app` in `~/Applications` after installing.
+1. Open **Files ▸ Preferences… ▸ Integration** and click **Set Finder as
+   default**. Files writes every recorded setting back exactly as it was,
+   turns Archive Utility's reveal back on, and relaunches Finder. A change
+   log opens showing what it restored.
+2. Turn off **Keep Files running for faster startup**, so Files is no
+   longer a login item.
+3. Quit Files and delete `~/Applications/Files.app`.
 
-## Replacing Finder
+**Set Files as default** switches back at any time. Clicking the button
+for the current choice re-checks and repairs every setting.
 
-On first launch Files makes itself the default file viewer. It does not
-replace or disable Finder, which macOS still needs. Instead it changes these
-settings:
+## Features
 
-| Setting | Files sets | Effect |
-|---------|------------|--------|
-| `NSGlobalDomain NSFileViewer` | `com.cambio.files` | "Show in Finder" / "Reveal in Finder" in other apps (browser downloads, editors, System Settings' reveal buttons, `open -R`) opens Files, with the item selected in its folder |
-| `com.apple.finder CreateDesktop` | `false` | Finder draws no desktop icons |
-| `com.apple.finder QuitMenuItem` | `true` | Finder ▸ Quit Finder exists |
-| `~/.zshrc` block between `# BEGIN Files: open folders in Files` and `# END Files: …` | an `open` shell function | `open <folder>` in Terminal opens Files. Anything else (files, options, `.app` and other packages) goes to the real `open`, as does a folder if Files can't be opened. Added only if zsh is your login shell, takes effect in new Terminal windows, and is removed when Finder is made the default again |
-| `com.apple.archiveutility dearchive-reveal-after`, `archive-reveal-after` | `false` | Archive Utility opens no Finder window on what it expands or creates (needs Full Disk Access; set back to `true`, Archive Utility's default, when Finder is made the default again) |
+Compared with Finder:
 
-Files quits Finder when it changes Finder's settings. Finder only reads
-them at launch. It stays quit until something asks for it (its Dock icon,
-the Dock's Trash, AirDrop, and so on), and then runs without desktop icons.
+- **Replaces Finder as the default file viewer** — reveals from other apps
+  open Files, and `open <folder>` in Terminal does too. Reversible from
+  Preferences, with a log of every setting touched
+- **Dual-pane browsing** (⇧⌘2), Tab to switch, or open any folder in a
+  split pane
+- **Columns Finder doesn't have**: Permissions, Git status, Date Created,
+  and real folder sizes (totalled in the background, sortable)
+- **Copies you can trust**: APFS clones where possible, extended
+  attributes, tags, ACLs and dates preserved, nothing replaced until the
+  new copy is complete, and optional SHA-256 verification of every file —
+  with a progress panel and a transfer log that records the hashes
+- **Git-aware**: a badge on working-tree folders, a tracked/untracked
+  column, and branch, push state and remote in Get Info
+- **Get Info that tells you more**: editable permissions, owner and group,
+  the Locked flag, and SHA-256 / MD5 checksums
+- **Archives and disk images open in place** — double-click a `.zip`,
+  `.tar.gz`, `.dmg` or `.iso` and the contents open in a new window; create
+  archives (zip, tar.gz, tar, optionally password-protected) from the
+  right-click menu
+- **A bookmarks bar** under the toolbar: ⌘D to add, drag to reorder
+- **Mounts menu and one-click unmount**, including iCloud Drive and other
+  File Provider accounts; if a volume is busy, Files names the files and
+  apps holding it and unmounts as soon as they close
+- **Never freezes on a slow volume** — listing, icons and column
+  measurement all run off the main thread, so an unresponsive network
+  share or File Provider mount doesn't lock up the window
+- Spotlight search in the folder or across the Mac, Quick Look on Space,
+  type-select, an address bar that takes `~` and relative paths, an info
+  sidebar, and a status bar with item count and free disk space
 
-Files records each setting's original value (or that it was not set)
-before changing it. Every launch re-checks the settings and puts back any
-that something else reset.
-
-Files can't become the default app for folders. The LaunchServices API
-refuses (`LSSetDefaultRoleHandlerForContentType` returns `paramErr` for
-`public.folder`). macOS 26 also ignores a `public.folder` entry written
-straight into the `com.apple.launchservices.secure` preferences (the way
-ForkLift documents), even after logging out and back in, and later drops
-it. So Files doesn't write one.
-
-This is a different request from a reveal. Revealing an item ("Show in
-Finder", System Settings' reveal buttons) goes to the app named in
-`NSFileViewer`, which is Files. Opening a folder (a Dock folder's "Open in
-Finder", Return on a Spotlight folder result, an app opening a folder
-rather than revealing it) goes to the default app for folders, which
-stays Finder. In zsh, the `open` function sends `open <folder>` to Files.
-
-A revealed folder opens to show its contents. macOS sends reveals as plain
-"open" requests, so Files can't tell them apart. Hidden items are only
-selected while hidden files are shown.
-
-Some things still go to Finder, because macOS gives other apps no way to
-take them:
-- a folder another app opens rather than reveals: a Dock folder's "Open
-  in Finder", a Spotlight folder result (the default app for folders)
-- double-clicking a folder inside a Finder window
-- the Finder and Trash icons in the Dock
-- AirDrop and Connect to Server
-- AppleScripts that name Finder
-
-### Uninstalling
-
-Before removing Files, open **Files ▸ Preferences…**, click **Set Finder
-as default**, and turn off **Keep Files running for faster
-startup** so it is no longer a login item. Files writes every recorded setting back exactly as it was,
-turns Archive Utility's reveal back on, and relaunches Finder. Then quit
-Files and delete `~/Applications/Files.app`. **Set Files as default**
-switches back.
-
-Either button opens a change log (in Console, from
-`~/Library/Logs/Files/default-file-browser-<date>.log`) listing every
-setting it checked or changed: its value before and after, the Terminal
-command that makes the same change (`defaults write …`, or `cat >>` /
-`sed` for the `~/.zshrc` function), and
-whether the new value was confirmed by reading it back. The summary at
-the end lists each check with the `defaults read` command that shows it.
-Clicking the button for the current choice re-checks and repairs every
-setting.
-
-## Keeping Files running
-
-By default Files quits when its last window closes, so the next "Show in
-Finder" or opened folder has to launch it again. Turn on **Preferences ▸
-Keep Files running for faster startup** (off by default) to have Files
-behave like Finder:
-
-- it stays open, without windows, after the last window closes, so the
-  next window appears instantly
-- clicking its Dock icon with no window open opens a home-folder window
-- it is added to your login items and starts at login without opening a
-  window (if you have turned Files off in System Settings ▸ General ▸
-  Login Items, it asks you to turn it back on)
-- each time it is used again with no windows open it repeats its launch
-  checks: Full Disk Access, and the Finder / Archive Utility settings it
-  manages
-
-Only opening windows gets faster; browsing within a window is the same.
-Turning the option off removes the login item. The login item points at
-the copy of Files that was running when you turned the option on, so turn
-it on from `~/Applications/Files.app`, not from a build in the project
-folder.
-
-## Keyboard shortcuts
-
-| Action         | Shortcut           |
-|----------------|--------------------|
-| Copy           | ⌘C                 |
-| Cut            | ⌘X                 |
-| Paste          | ⌘V                 |
-| New Window     | ⌘N                 |
-| Preferences    | ⌘,                 |
-| Find (search)  | ⌘F                 |
-| New File       | ⌥⌘N                |
-| Move to Trash  | ⌘⌫                 |
-| Add Bookmark   | ⌘D                 |
-| Open in Terminal | ⌘⇧T              |
-| Dual Pane      | ⌘⇧2                |
-| Show Hidden Files | ⌘⇧.             |
-| New Folder     | ⌘⇧N                |
-| Get Info       | ⌘I                 |
-| Select All     | ⌘A                 |
-| Open           | Return             |
-| Back           | ⌘[ or ←            |
-| Forward        | ⌘] or →            |
-| Home           | ⌘⇧H               |
-| Desktop        | ⌘⇧D               |
-| Downloads      | ⌘⇧L               |
-| Documents      | ⌘⇧O               |
-| Jump to an item | type its first letters |
+Everything in detail — including keyboard shortcuts, the Finder settings
+Files manages, and keeping Files running for faster startup — is in
+[USER_GUIDE.md](USER_GUIDE.md).
 
 ## License
 
