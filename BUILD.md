@@ -85,6 +85,11 @@ a package), that none is listed twice, and that an extension a declared
 type covers is never also listed under a dynamic type. It reads
 Info.plists and the LaunchServices database and changes no default.
 
+`reveal_test` checks how a reveal ("Show in Finder" from another app, a
+newly created item) finds the rows to select: the names are matched against
+the listing's own URLs, so a folder reached through a symbolic link still
+selects the right item. It touches no files.
+
 `sort_test` checks the default sort order (Preferences ▸ View ▸ Default
 sort): which columns sort at all, which of those a default order may name,
 how each one words its two directions, and that a missing, stale or
@@ -202,6 +207,7 @@ tests/
 ├── file_ops_test.m         — copy-engine tests (`make test`)
 ├── archive_test.m          — archive tests (`make test`)
 ├── sort_test.m             — default sort order tests (`make test`)
+├── reveal_test.m           — reveal name-matching tests (`make test`)
 └── default_apps_test.m     — file-type list tests (`make test`)
 ```
 

@@ -56,6 +56,25 @@ NSString *files_sort_default_column(void);
  */
 NSArray<NSString *> *files_sort_order_titles(NSString *col_id);
 
+/*
+ * files_paths_named — picks the items a reveal asked for out of a listing,
+ * by name, and returns their paths (what the file list selects by).
+ *
+ * The names are matched against the listing's own URLs rather than a path
+ * built from the folder plus the name: the file manager hands back the
+ * resolved path (an item of a folder reached through /tmp comes back under
+ * /private/tmp), so a synthesized path matches nothing whenever the folder
+ * was reached through a symbolic link.
+ *
+ * Inputs:
+ *   items — a folder's contents, as listed
+ *   names — file names (last path components) to find; may be nil
+ *
+ * Output: the paths of the items whose names are in names; empty if none
+ *         are (a reveal of something that has since been removed).
+ */
+NSSet<NSString *> *files_paths_named(NSArray<NSURL *> *items, NSSet<NSString *> *names);
+
 @interface FilesBrowserView : NSView
 
 /*
@@ -169,14 +188,18 @@ NSArray<NSString *> *files_sort_order_titles(NSString *col_id);
 - (void)navigate_to:(NSURL *)url;
 
 /*
- * reveal_items: — selects the named items of the current folder once it has
- * been re-listed, scrolling the first into view (ends any Spotlight search).
+ * reveal_items:in_folder: — shows folder and selects the named items in it
+ * once the listing lands, scrolling the first into view (ends any Spotlight
+ * search). The folder may be one this browser is not showing yet, including
+ * one whose navigation is still in flight in a window just opened to reveal
+ * them, so the request outlives the navigation rather than being dropped.
  * Items that are hidden while hidden files are not shown stay unselected.
  *
  * Inputs:
- *   names — file names (last path components) within current_url
+ *   names  — file names (last path components) within folder
+ *   folder — the folder holding them
  */
-- (void)reveal_items:(NSArray<NSString *> *)names;
+- (void)reveal_items:(NSArray<NSString *> *)names in_folder:(NSURL *)folder;
 
 /*
  * go_back — navigates to the previous location, if any.

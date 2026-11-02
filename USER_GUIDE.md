@@ -352,9 +352,12 @@ Finder", Return on a Spotlight folder result, an app opening a folder
 rather than revealing it) goes to the default app for folders, which
 stays Finder. In zsh, the `open` function sends `open <folder>` to Files.
 
-A revealed folder opens to show its contents. macOS sends reveals as plain
-"open" requests, so Files can't tell them apart. Hidden items are only
-selected while hidden files are shown.
+A revealed file is selected in its folder: the list scrolls to it and takes
+keyboard focus, so ↑ and ↓ carry on from there. Several items revealed
+together are all selected, and items in different folders open a window
+each. A revealed folder opens to show its contents instead: macOS sends
+reveals as plain "open" requests, so Files can't tell them apart. Hidden
+items are only selected while hidden files are shown.
 
 Some things still go to Finder, because macOS gives other apps no way to
 take them:

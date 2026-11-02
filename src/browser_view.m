@@ -308,6 +308,20 @@ list_folder(NSURL *dir, NSError **err)
 }
 
 /*
+ * files_paths_named — picks the items a reveal asked for out of a listing.
+ * Inputs/output are documented in browser_view.h.
+ */
+NSSet<NSString *> *
+files_paths_named(NSArray<NSURL *> *items, NSSet<NSString *> *names)
+{
+    NSMutableSet<NSString *> *paths = [NSMutableSet set];
+    for (NSURL *item in items) {
+        if ([names containsObject:item.lastPathComponent]) [paths addObject:item.path];
+    }
+    return paths;
+}
+
+/*
  * listing_rows — the rows to show for a set of items: hidden items dropped
  * (unless show_hidden), then sorted by the sort column using prefetched
  * values (Finder-style natural order for names and kinds), with folders
@@ -672,11 +686,14 @@ mouseDown:(NSEvent *)event
 /* Total Spotlight matches when more than SEARCH_RESULT_LIMIT; 0 otherwise. */
 @property (nonatomic, assign) NSUInteger               search_overflow;
 
-/* Names to select when the next listing lands (reveal_items:, a new or
- * renamed item), replacing the kept selection; nil normally. With
- * pending_rename, the item selected that way is then renamed in place. */
+/* Names to select when the next listing lands (reveal_items:in_folder:, a
+ * new or renamed item), replacing the kept selection; nil normally. With
+ * pending_rename, the item selected that way is then renamed in place.
+ * reveal_dir is the folder those names belong to while a navigation to it
+ * is still under way, so load_location: keeps them when it lands. */
 @property (nonatomic, copy)   NSSet<NSString *>       *pending_names;
 @property (nonatomic, assign) BOOL                     pending_rename;
+@property (nonatomic, strong) NSURL                   *reveal_dir;
 
 /* Inline rename: the Name cell's own text field while it is being edited,
  * the item being renamed, and whether a listing reload was postponed so
@@ -1333,6 +1350,11 @@ push_history:(NSURL *)url onto:(NSMutableArray<NSURL *> *)stack
  * lands) and notifies the navigation handler. Shared by navigate_to:,
  * go_back and go_forward; does not touch the history stacks.
  *
+ * A reveal (reveal_items:in_folder:) of items in url is the one thing that
+ * survives the arrival: its names were set before this navigation finished,
+ * so they are kept and the listing selects them. Any other pending names
+ * belong to the folder being left and are dropped.
+ *
  * Inputs:
  *   url — directory URL
  */
@@ -1340,9 +1362,11 @@ push_history:(NSURL *)url onto:(NSMutableArray<NSURL *> *)stack
 load_location:(NSURL *)url
 {
     [self stop_search_query];
+    BOOL revealing        = self.reveal_dir && files_same_path(url, self.reveal_dir);
+    self.reveal_dir       = nil;
     self.current_dir      = url;
     self.auto_fit_pending = YES;
-    self.pending_names    = nil;
+    if (!revealing) self.pending_names = nil;
     self.pending_rename   = NO;
     [self reset_folder_sizes];
     [self reload_directory];
@@ -1423,20 +1447,30 @@ navigate_to:(NSURL *)url
 }
 
 /*
- * reveal_items: — selects the named items of the current folder: re-lists
- * it (ending any Spotlight search) and selects them when the listing lands.
- * Hidden items are only found while hidden files are shown.
+ * reveal_items:in_folder: — shows folder and selects the named items in it
+ * when the listing lands (see the header). The folder already on display is
+ * re-listed; any other is navigated to, carrying the names in reveal_dir so
+ * load_location: keeps them. A window opened to reveal items navigates on
+ * creation and has no current_dir yet, so navigating again is how the names
+ * reach that listing; the stale first navigation then does nothing
+ * (navigate_generation) and the folder is stat'ed one extra time.
  *
  * Inputs:
- *   names — file names within current_url
+ *   names  — file names within folder
+ *   folder — the folder holding them
  */
 - (void)
-reveal_items:(NSArray<NSString *> *)names
+reveal_items:(NSArray<NSString *> *)names in_folder:(NSURL *)folder
 {
-    if (!self.current_dir) return;
+    if (!folder) return;
     self.pending_names = [NSSet setWithArray:names];
-    [self stop_search_query];
-    [self reload_directory];
+    if (files_same_path(folder, self.current_dir)) {
+        [self stop_search_query];
+        [self reload_directory];
+        return;
+    }
+    self.reveal_dir = folder;
+    [self navigate_to:folder];
 }
 
 /*
@@ -1557,7 +1591,8 @@ create_archive:(id)sender
                 files_show_error([NSString stringWithFormat:@"Could not create \"%@\"", name],
                                  err, s2.window);
             } else if (files_same_path(archive.URLByDeletingLastPathComponent, s2.current_dir)) {
-                [s2 reveal_items:@[archive.lastPathComponent]];
+                [s2 reveal_items:@[archive.lastPathComponent]
+                        in_folder:archive.URLByDeletingLastPathComponent];
             }
         }];
     }];
@@ -1946,8 +1981,8 @@ resort_revealing:(BOOL)reveal
 /*
  * show_listing:rows: — installs a fresh folder listing, keeping the
  * selection (matched by path). Names requested by pending_names are
- * selected instead, the first of them scrolled into view, and, with
- * pending_rename, renamed in place.
+ * selected instead, the first of them scrolled into view, the list given
+ * keyboard focus, and, with pending_rename, the item renamed in place.
  *
  * Inputs:
  *   items — folder contents with listing_keys() prefetched
@@ -1959,13 +1994,7 @@ show_listing:(NSArray<NSURL *> *)items rows:(NSArray<NSURL *> *)rows
 {
     NSSet<NSString *> *want = [self selected_paths];
     BOOL reveal = self.pending_names != nil;
-    if (reveal) {
-        NSMutableSet<NSString *> *paths = [NSMutableSet set];
-        for (NSString *name in self.pending_names) {
-            [paths addObject:[self.current_dir URLByAppendingPathComponent:name].path];
-        }
-        want = paths;
-    }
+    if (reveal) want = files_paths_named(items, self.pending_names);
     self.pending_names = nil;
 
     self.all_items = items;
@@ -1974,6 +2003,15 @@ show_listing:(NSArray<NSURL *> *)items rows:(NSArray<NSURL *> *)rows
                             self.git_tracked, self.folder_sizes, [self shows_hidden_items]);
     }
     [self show_rows:rows selecting:want reveal:reveal];
+
+    /* A reveal hands keyboard focus to the list, as Finder does: a window
+     * opened to reveal an item starts with the address bar focused, which
+     * would leave the row it found selected but unemphasised and the arrow
+     * keys in the wrong view. Not during a rename: show_rows: deferred the
+     * listing, and taking first responder would end the edit. */
+    if (reveal && !self.rename_url && self.table.numberOfSelectedRows > 0) {
+        [self.window makeFirstResponder:self.table];
+    }
 
     if (self.pending_rename) {
         self.pending_rename = NO;

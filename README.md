@@ -88,8 +88,9 @@ for the current choice re-checks and repairs every setting.
 Compared with Finder:
 
 - **Replaces Finder as the default file viewer** — reveals from other apps
-  open Files, and `open <folder>` in Terminal does too. Reversible from
-  Preferences, with a log of every setting touched
+  open Files with the item scrolled to and selected, and `open <folder>` in
+  Terminal opens Files too. Reversible from Preferences, with a log of every
+  setting touched
 - **Dual-pane browsing** (⇧⌘2), Tab to switch, or open any folder in a
   split pane
 - **Columns Finder doesn't have**: Permissions, Git status, Date Created,

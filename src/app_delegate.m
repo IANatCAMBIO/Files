@@ -360,7 +360,8 @@ application:(NSApplication *)app openURLs:(NSArray<NSURL *> *)urls
         [reveal[parent] addObject:url.lastPathComponent];
     }
     for (NSURL *parent in reveal) {
-        [[[self window_for_folder:parent] active_browser] reveal_items:reveal[parent]];
+        [[[self window_for_folder:parent] active_browser] reveal_items:reveal[parent]
+                                                               in_folder:parent];
     }
     [NSApp activate];
 }
