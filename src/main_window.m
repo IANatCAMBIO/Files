@@ -46,6 +46,9 @@ static const CGFloat sidebar_w       = 180.0;  /* initial info sidebar width */
 static const CGFloat sidebar_min_w   = 140.0;
 static const CGFloat browser_min_w   = 400.0;
 static const CGFloat search_w        = 220.0;  /* toolbar search field */
+/* What NSSearchToolbarItem shrinks to when the toolbar runs short: the
+ * magnifying glass on its own, measured from the laid-out item. */
+static const CGFloat search_glyph_w  = 36.0;
 
 /* How long a transient status message stays before the item count returns. */
 static const double  transient_status_sec = 4.0;
@@ -947,13 +950,21 @@ any_unmountable_volume(void)
  * Each item is laid out inside its own viewer view, and the viewers tile
  * the bar edge to edge, which is what makes the arithmetic possible: what
  * is left for the address bar is the bar's width less every other item.
- * A flexible space counts at its floor and the search field at its full
- * width, rather than at whatever either happens to be now — otherwise
- * growing the address bar would squeeze the search field shut and it
- * would never open again. The rest are measured, and remembered by
- * identifier: the moment the address bar is too wide for the window the
- * toolbar moves items into its overflow menu, and the measurements from
- * the last whole layout are then the only ones to work from.
+ * Flexible spaces count at their floor, so that the room goes to the
+ * address bar rather than to gaps, which is what keeps the search field
+ * against the right edge of the bar with the buttons packed in front of
+ * it. The rest are measured, and remembered by identifier: the moment the
+ * address bar is too wide for the window the toolbar moves items into its
+ * overflow menu, and the measurements from the last whole layout are then
+ * the only ones to work from.
+ *
+ * The search field is the one item with two widths of its own, so it is
+ * taken at neither the measured one nor a fixed one but at whichever of
+ * the two the window has room for. Asking for what is left beside the
+ * open field, while that leaves the address bar its floor, keeps the
+ * field open; below that width the toolbar shuts the field whatever it is
+ * asked, so the room it gives up is claimed here instead of being left to
+ * spread itself through the flexible spaces.
  */
 - (void)
 fit_address_item
@@ -996,17 +1007,23 @@ fit_address_item
             taken += flexible_space_min;
             continue;
         }
-        if ([ident isEqualToString:tb_search]) {
-            taken += search_w + toolbar_item_pad;
-            continue;
-        }
+        if ([ident isEqualToString:tb_search]) continue;
         NSNumber *measured = self.item_widths[ident];
         if (!measured) return;   /* never yet seen laid out; the next pass will */
         taken += measured.doubleValue;
     }
+    taken += 2.0 * toolbar_edge_inset + toolbar_item_pad;
 
-    CGFloat spare = bar_w - 2.0 * toolbar_edge_inset - taken - toolbar_item_pad;
-    self.address_width.constant = MAX(address_item_min_w, spare);
+    /* What is left with the search field open, and what is left once it
+     * has shut. Below the width where the open field still leaves the
+     * address bar its floor, the field shuts whatever is asked of it, so
+     * ask for the room it gives up: left to the toolbar, that room would
+     * go to the flexible spaces instead and show up as a gap in front of
+     * the search glyph. */
+    CGFloat open = bar_w - taken - (search_w + toolbar_item_pad);
+    CGFloat shut = bar_w - taken - (search_glyph_w + toolbar_item_pad);
+    self.address_width.constant = open >= address_item_min_w
+                                      ? open : MAX(address_item_min_w, shut);
 }
 
 /*

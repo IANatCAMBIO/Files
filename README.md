@@ -164,7 +164,10 @@ A minimalist macOS file manager written in Objective-C + AppKit.
 - Address bar in the toolbar (accepts `~` and relative paths), with the
   bookmark star beside it, between Reload and the hidden-files eye. It
   stretches to every point the other toolbar items can spare and gives
-  them back as the window narrows. The
+  them back as the window narrows; the buttons and the search field stay
+  packed against the right edge of the toolbar, and when the window gets
+  narrow enough that the search field shuts to its magnifying glass, the
+  address bar takes the room it gives up. The
   toolbar has no Back and Forward buttons: the address bar takes the room
   they would want, and Go ▸ Back (⌘[) and Go ▸ Forward (⌘]) navigate
   without them. Up, Open in Terminal, show/hide hidden files
