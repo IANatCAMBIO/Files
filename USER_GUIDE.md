@@ -115,6 +115,15 @@ too narrow for every bookmark, scroll over the bar (mouse wheel or
 trackpad) to move along it. View ▸ Show Bookmarks Bar or the same checkbox
 in Preferences ▸ View (on by default) hides or shows it in every window.
 
+The Trash bookmark shows a full can when there is anything in the Trash
+and an empty one when there is not. It follows an app-wide watcher on the
+Trash folders, so it changes within about half a second of anything being
+trashed or emptied — by Files, by Finder or by any other app — without a
+window having to list the Trash. Items whose name begins with a dot do
+not count as contents, as in Finder. (The Empty Trash button that appears
+while the Trash is on screen always shows an empty can: it pictures what
+the button does, not what the Trash holds.)
+
 The Go menu lists Home, Desktop, Downloads, Documents and Trash, then a
 Bookmarks section listing every bookmark in bar order.
 
