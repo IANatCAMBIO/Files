@@ -37,9 +37,10 @@ At run time Files runs `/usr/bin/git` (Xcode or the Command Line Tools) for
 the Git column and Get Info's branch and push state. Without either, the git
 features are simply off: Files checks once with `xcode-select -p` and never
 runs git, so macOS does not offer to install the tools. It also runs `lsof`
-(what keeps a volume busy), `hdiutil` (disk images), `zip`, `unzip` and
-`tar` (creating and extracting archives; all in /usr/bin on macOS) and, for
-Archive Utility's sandboxed settings only, `defaults`.
+(what keeps a volume busy), `hdiutil` (disk images), `zip` and `tar`
+(creating archives; all in /usr/bin on macOS) and, for Archive Utility's
+sandboxed settings only, `defaults`. Expanding an archive is handed to its
+default application, so no tool of ours unpacks one.
 
 The C library's `copyfile(3)`, `renamex_np(2)` and CommonCrypto (SHA-256 / MD5)
 are part of libSystem and need no extra linking.

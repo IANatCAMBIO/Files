@@ -1,8 +1,10 @@
 /*
- * archive_test — exercises FilesArchive (create and extract zip, tar.gz and
- * tar, passwords, name clashes, bad input) against real files in a scratch
- * folder. Run with `make test`; prints one line per check and exits
- * non-zero on failure.
+ * archive_test — exercises FilesArchive (creating zip, tar.gz and tar,
+ * passwords, name clashes, bad input) against real files in a scratch
+ * folder. Files does not expand archives — a double-click hands them to
+ * their default application — so what it creates is checked by unpacking it
+ * with the system tool. Run with `make test`; prints one line per check and
+ * exits non-zero on failure.
  */
 #import <Cocoa/Cocoa.h>
 #import "archive.h"
@@ -72,32 +74,6 @@ make_archive(NSArray<NSURL *> *items, NSString *name, FilesArchiveFormat format,
 }
 
 /*
- * extract_archive — expands an archive and waits for it.
- *
- * Inputs:
- *   archive  — archive URL
- *   password — password, or nil
- *   err      — receives the error on failure
- *
- * Output: the new folder, or nil.
- */
-static NSURL *
-extract_archive(NSURL *archive, NSString *password, NSError **err)
-{
-    __block BOOL done = NO;
-    __block NSURL *result = nil;
-    __block NSError *error = nil;
-    [FilesArchive extract:archive password:password completion:^(NSURL *folder, NSError *e) {
-        result = folder;
-        error  = e;
-        done   = YES;
-    }];
-    spin_until(&done);
-    if (err) *err = error;
-    return result;
-}
-
-/*
  * write_file — creates a file with the given text.
  *
  * Inputs:
@@ -108,6 +84,71 @@ static void
 write_file(NSURL *url, NSString *text)
 {
     [text writeToURL:url atomically:NO encoding:NSUTF8StringEncoding error:nil];
+}
+
+/*
+ * archive_listing — entry names in an archive, as the system tool lists
+ * them, one per line.
+ *
+ * Inputs:
+ *   archive — archive file URL
+ *   format  — its format
+ *
+ * Output: the listing, or nil if the tool could not be run.
+ */
+static NSString *
+archive_listing(NSURL *archive, FilesArchiveFormat format)
+{
+    BOOL zip = format == FilesArchiveFormatZip;
+    NSPipe *out = [NSPipe pipe];
+    NSTask *t   = [[NSTask alloc] init];
+    t.executableURL  = [NSURL fileURLWithPath:zip ? @"/usr/bin/unzip" : @"/usr/bin/tar"];
+    t.arguments      = zip ? @[@"-Z1", archive.path] : @[@"-tf", archive.path];
+    t.standardOutput = out;
+    t.standardError  = [NSFileHandle fileHandleWithNullDevice];
+    t.standardInput  = [NSFileHandle fileHandleWithNullDevice];
+    if (![t launchAndReturnError:nil]) return nil;
+    NSData *data = [out.fileHandleForReading readDataToEndOfFile];
+    [t waitUntilExit];
+    return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+}
+
+/*
+ * expand_with_tool — unpacks an archive with /usr/bin/unzip or /usr/bin/tar.
+ * Files itself never expands one, so this is how a test checks that what it
+ * created is a sound archive. stdin is /dev/null, so a tool that asks for a
+ * password fails instead of waiting.
+ *
+ * Inputs:
+ *   archive  — archive file URL
+ *   format   — its format
+ *   dest     — an existing folder to unpack into
+ *   password — for an encrypted zip; nil for none
+ *
+ * Output: YES if the tool exited 0.
+ */
+static BOOL
+expand_with_tool(NSURL *archive, FilesArchiveFormat format, NSURL *dest, NSString *password)
+{
+    BOOL zip = format == FilesArchiveFormatZip;
+    NSMutableArray<NSString *> *args = [NSMutableArray array];
+    if (zip) {
+        [args addObject:@"-q"];
+        if (password.length > 0) [args addObjectsFromArray:@[@"-P", password]];
+        [args addObjectsFromArray:@[archive.path, @"-d", dest.path]];
+    } else {
+        [args addObjectsFromArray:@[@"-xf", archive.path, @"-C", dest.path]];
+    }
+
+    NSTask *t = [[NSTask alloc] init];
+    t.executableURL  = [NSURL fileURLWithPath:zip ? @"/usr/bin/unzip" : @"/usr/bin/tar"];
+    t.arguments      = args;
+    t.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+    t.standardError  = [NSFileHandle fileHandleWithNullDevice];
+    t.standardInput  = [NSFileHandle fileHandleWithNullDevice];
+    if (![t launchAndReturnError:nil]) return NO;
+    [t waitUntilExit];
+    return t.terminationStatus == 0;
 }
 
 /*
@@ -180,16 +221,6 @@ main(void)
         root = [NSURL fileURLWithPath:root.path.stringByResolvingSymlinksInPath];
         make_dir(root);
 
-        check([FilesArchive is_archive:[NSURL fileURLWithPath:@"/x/a.zip"]]
-              && [FilesArchive is_archive:[NSURL fileURLWithPath:@"/x/a.tar"]]
-              && [FilesArchive is_archive:[NSURL fileURLWithPath:@"/x/a.tar.gz"]]
-              && [FilesArchive is_archive:[NSURL fileURLWithPath:@"/x/A.TGZ"]],
-              @"zip, tar, tar.gz and tgz names are archives");
-        check(![FilesArchive is_archive:[NSURL fileURLWithPath:@"/x/a.gz"]]
-              && ![FilesArchive is_archive:[NSURL fileURLWithPath:@"/x/zip"]]
-              && ![FilesArchive is_archive:[NSURL fileURLWithPath:@"/x/a.zip.txt"]],
-              @"other names are not");
-
         /* A source tree with a folder, a symbolic link, a space and a dash-led name. */
         NSURL *src  = make_dir([root URLByAppendingPathComponent:@"src"]);
         NSURL *proj = make_dir([src URLByAppendingPathComponent:@"proj"]);
@@ -214,95 +245,40 @@ main(void)
 
             NSURL *out = make_dir([root URLByAppendingPathComponent:
                                    [NSString stringWithFormat:@"out%d", i]]);
-            NSURL *moved = [out URLByAppendingPathComponent:name];
-            [fm moveItemAtURL:archive toURL:moved error:nil];
-            NSURL *folder = extract_archive(moved, nil, &err);
-            NSURL *base   = [out URLByAppendingPathComponent:@"set"];
-            check(folder && [folder.path isEqualToString:base.path],
-                  [NSString stringWithFormat:@"%@: extracts to a folder named after it", name]);
-            check([read_file([base URLByAppendingPathComponent:@"proj/inner.txt"]) isEqualToString:@"inner"]
-                  && [read_file([base URLByAppendingPathComponent:@"-dash file.txt"]) isEqualToString:@"dash"],
+            check(expand_with_tool(archive, formats[i].format, out, nil),
+                  [NSString stringWithFormat:@"%@: the system tool unpacks it", name]);
+            check([read_file([out URLByAppendingPathComponent:@"proj/inner.txt"]) isEqualToString:@"inner"]
+                  && [read_file([out URLByAppendingPathComponent:@"-dash file.txt"]) isEqualToString:@"dash"],
                   [NSString stringWithFormat:@"%@: files round-trip", name]);
-            check([link_target([base URLByAppendingPathComponent:@"proj/link"])
+            check([link_target([out URLByAppendingPathComponent:@"proj/link"])
                    isEqualToString:@"inner.txt"],
                   [NSString stringWithFormat:@"%@: symbolic link kept as a link", name]);
-            check(leftovers(out).count == 0 && leftovers(src).count == 0,
+            check(leftovers(src).count == 0,
                   [NSString stringWithFormat:@"%@: no staging items left", name]);
-
-            NSURL *again = extract_archive(moved, nil, &err);
-            check(again && [again.lastPathComponent isEqualToString:@"set 2"],
-                  [NSString stringWithFormat:@"%@: a taken name gets \" 2\"", name]);
         }
 
         /* A tar has no ._ entries for extended attributes. */
         NSURL *xa = [src URLByAppendingPathComponent:@"top.txt"];
         setxattr(xa.fileSystemRepresentation, "user.test", "v", 1, 0, 0);
         NSURL *xtar = make_archive(@[xa], @"xa.tar", FilesArchiveFormatTar, nil, NULL);
-        NSData *listing = nil;
-        NSTask *t = [[NSTask alloc] init];
-        t.executableURL = [NSURL fileURLWithPath:@"/usr/bin/tar"];
-        t.arguments     = @[@"-tf", xtar.path];
-        NSPipe *p       = [NSPipe pipe];
-        t.standardOutput = p;
-        [t launchAndReturnError:nil];
-        listing = [p.fileHandleForReading readDataToEndOfFile];
-        [t waitUntilExit];
-        NSString *names = [[NSString alloc] initWithData:listing encoding:NSUTF8StringEncoding];
-        check([names isEqualToString:@"top.txt\n"], @"tar holds no ._ metadata entries");
+        check([archive_listing(xtar, FilesArchiveFormatTar) isEqualToString:@"top.txt\n"],
+              @"tar holds no ._ metadata entries");
 
-        /* A single top-level folder is the result itself, not wrapped again. */
         NSError *err = nil;
-        NSURL *one = make_archive(@[proj], @"whatever.zip", FilesArchiveFormatZip, nil, &err);
-        NSURL *dest = make_dir([root URLByAppendingPathComponent:@"single"]);
-        NSURL *one_moved = [dest URLByAppendingPathComponent:@"whatever.zip"];
-        [fm moveItemAtURL:one toURL:one_moved error:nil];
-        NSURL *unwrapped = extract_archive(one_moved, nil, &err);
-        check(unwrapped && [unwrapped.lastPathComponent isEqualToString:@"proj"]
-              && [read_file([unwrapped URLByAppendingPathComponent:@"inner.txt"]) isEqualToString:@"inner"],
-              @"a lone top-level folder is not wrapped in another");
-        struct stat st;
-        stat(unwrapped.fileSystemRepresentation, &st);
-        check((st.st_mode & 0700) == 0700 && (st.st_mode & 0055) != 0,
-              @"extracted folder has ordinary permissions");
-
-        /* A zip with a Finder-style __MACOSX folder drops it. */
-        NSURL *mac = make_dir([root URLByAppendingPathComponent:@"mac"]);
-        NSURL *mac_src = make_dir([mac URLByAppendingPathComponent:@"s"]);
-        write_file([mac_src URLByAppendingPathComponent:@"f.txt"], @"f");
-        make_dir([mac_src URLByAppendingPathComponent:@"__MACOSX"]);
-        write_file([mac_src URLByAppendingPathComponent:@"__MACOSX/._f.txt"], @"meta");
-        NSURL *mac_zip = make_archive(@[[mac_src URLByAppendingPathComponent:@"f.txt"],
-                                        [mac_src URLByAppendingPathComponent:@"__MACOSX"]],
-                                      @"mac.zip", FilesArchiveFormatZip, nil, &err);
-        NSURL *mac_out = extract_archive(mac_zip, nil, &err);
-        check(mac_out && [fm fileExistsAtPath:[mac_out URLByAppendingPathComponent:@"f.txt"].path]
-              && ![fm fileExistsAtPath:[mac_out URLByAppendingPathComponent:@"__MACOSX"].path],
-              @"__MACOSX metadata is not extracted");
-
         /* Passwords. */
         NSString *pw = @"p@ss \"word\" 1!";
         NSURL *enc = make_archive(both, @"secret.zip", FilesArchiveFormatZip, pw, &err);
         check(enc != nil, @"encrypted zip: create");
         NSURL *enc_dir = make_dir([root URLByAppendingPathComponent:@"enc"]);
-        NSURL *enc_moved = [enc_dir URLByAppendingPathComponent:@"secret.zip"];
-        [fm moveItemAtURL:enc toURL:enc_moved error:nil];
-
-        NSURL *r = extract_archive(enc_moved, nil, &err);
-        check(!r && [err.domain isEqualToString:FilesArchiveErrorDomain]
-              && err.code == FilesArchiveErrorPasswordRequired,
-              @"encrypted zip: no password is reported as required");
-        r = extract_archive(enc_moved, @"wrong", &err);
-        check(!r && err.code == FilesArchiveErrorPasswordIncorrect,
-              @"encrypted zip: wrong password is reported as incorrect");
-        check(leftovers(enc_dir).count == 0 &&
-              [fm contentsOfDirectoryAtPath:enc_dir.path error:nil].count == 1,
-              @"encrypted zip: failed attempts leave nothing behind");
-        r = extract_archive(enc_moved, pw, &err);
-        check(r && [read_file([r URLByAppendingPathComponent:@"-dash file.txt"]) isEqualToString:@"dash"],
-              @"encrypted zip: right password extracts");
-        NSURL *plain = make_archive(@[xa], @"plain.zip", FilesArchiveFormatZip, nil, &err);
-        r = extract_archive(plain, @"unneeded", &err);
-        check(r != nil, @"a password given for an unencrypted zip is ignored");
+        check(!expand_with_tool(enc, FilesArchiveFormatZip, enc_dir, nil),
+              @"encrypted zip: no password does not open it");
+        check(!expand_with_tool(enc, FilesArchiveFormatZip, enc_dir, @"wrong"),
+              @"encrypted zip: the wrong password does not open it");
+        NSURL *enc_ok = make_dir([root URLByAppendingPathComponent:@"enc_ok"]);
+        check(expand_with_tool(enc, FilesArchiveFormatZip, enc_ok, pw)
+              && [read_file([enc_ok URLByAppendingPathComponent:@"-dash file.txt"])
+                  isEqualToString:@"dash"],
+              @"encrypted zip: the right password opens it");
 
         /* Refusals. */
         NSURL *bad = make_archive(both, @"bad.tar.gz", FilesArchiveFormatTarGz, @"x", &err);
@@ -322,41 +298,14 @@ main(void)
         check(leftovers(src).count == 0 && leftovers(elsewhere).count == 0,
               @"refusals leave no staging items");
 
-        /* Damaged and hostile archives. */
-        NSURL *junk_dir = make_dir([root URLByAppendingPathComponent:@"junk"]);
-        for (NSString *n in @[@"junk.zip", @"junk.tar.gz", @"junk.tar"]) {
-            NSURL *junk = [junk_dir URLByAppendingPathComponent:n];
-            write_file(junk, @"this is not an archive");
-            NSURL *res = extract_archive(junk, nil, &err);
-            check(!res && err.code == FilesArchiveErrorFailed && err.localizedDescription.length > 0,
-                  [NSString stringWithFormat:@"%@: damaged archive is an error", n]);
-        }
-        check(leftovers(junk_dir).count == 0 && [fm contentsOfDirectoryAtPath:junk_dir.path error:nil].count == 3,
-              @"damaged archives leave nothing behind");
-
-        NSURL *trav = make_dir([root URLByAppendingPathComponent:@"trav"]);
-        NSURL *trav_in = make_dir([trav URLByAppendingPathComponent:@"in"]);
-        write_file([trav URLByAppendingPathComponent:@"evil.txt"], @"evil");
-        NSTask *mk = [[NSTask alloc] init];
-        mk.executableURL = [NSURL fileURLWithPath:@"/usr/bin/tar"];
-        mk.arguments = @[@"-cPf", [trav_in URLByAppendingPathComponent:@"evil.tar"].path,
-                         @"-C", trav_in.path, @"../evil.txt"];
-        [mk launchAndReturnError:nil];
-        [mk waitUntilExit];
-        [fm removeItemAtURL:[trav URLByAppendingPathComponent:@"evil.txt"] error:nil];
-        extract_archive([trav_in URLByAppendingPathComponent:@"evil.tar"], nil, &err);
-        check(![fm fileExistsAtPath:[trav URLByAppendingPathComponent:@"evil.txt"].path]
-              && ![fm fileExistsAtPath:[trav_in URLByAppendingPathComponent:@"evil.txt"].path]
-              && ![fm fileExistsAtPath:[trav URLByAppendingPathComponent:@"in/../evil.txt"].path],
-              @"a tar entry named ../x is not written outside the extraction folder");
-
         /* Awkward archive names. */
         NSURL *odd = make_dir([root URLByAppendingPathComponent:@"odd"]);
         write_file([odd URLByAppendingPathComponent:@"o.txt"], @"o");
         NSURL *odd_zip = make_archive(@[[odd URLByAppendingPathComponent:@"o.txt"]],
                                       @"a[1] café *.zip", FilesArchiveFormatZip, nil, &err);
-        NSURL *odd_out = odd_zip ? extract_archive(odd_zip, nil, &err) : nil;
-        check(odd_out && [read_file([odd_out URLByAppendingPathComponent:@"o.txt"]) isEqualToString:@"o"],
+        NSURL *odd_out = make_dir([root URLByAppendingPathComponent:@"odd_out"]);
+        check(odd_zip && expand_with_tool(odd_zip, FilesArchiveFormatZip, odd_out, nil)
+              && [read_file([odd_out URLByAppendingPathComponent:@"o.txt"]) isEqualToString:@"o"],
               @"archive names with brackets, accents and * work");
 
         [fm removeItemAtURL:root error:nil];

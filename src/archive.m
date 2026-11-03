@@ -17,7 +17,6 @@
 NSString * const FilesArchiveErrorDomain = @"FilesArchiveErrorDomain";
 
 static NSString * const zip_tool   = @"/usr/bin/zip";
-static NSString * const unzip_tool = @"/usr/bin/unzip";
 static NSString * const tar_tool   = @"/usr/bin/tar";
 
 /* Most tool output kept for an error message, in bytes. */
@@ -96,12 +95,7 @@ creation_suffix(FilesArchiveFormat format)
 static NSError *
 archive_error(FilesArchiveErrorCode code, NSString *text)
 {
-    NSString *desc;
-    switch (code) {
-    case FilesArchiveErrorPasswordRequired:  desc = @"The archive is password protected."; break;
-    case FilesArchiveErrorPasswordIncorrect: desc = @"The password is incorrect.";        break;
-    default: desc = text.length > 0 ? text : @"The archive tool failed.";                  break;
-    }
+    NSString *desc = text.length > 0 ? text : @"The archive tool failed.";
     return [NSError errorWithDomain:FilesArchiveErrorDomain
                                code:code
                            userInfo:@{NSLocalizedDescriptionKey: desc}];
@@ -196,7 +190,7 @@ wait_for_echo_off(int master)
 
 /*
  * run_tool — runs a command-line tool on a pseudo-terminal and waits for
- * it. zip and unzip read their password from the terminal, not a pipe, and
+ * it. zip reads its password from the terminal, not a pipe, and
  * a command-line password would show in `ps`; so the tool gets a terminal
  * of its own as stdin, stdout, stderr and controlling terminal, and the
  * password is typed into it when a prompt appears. Output (stderr
@@ -209,7 +203,7 @@ wait_for_echo_off(int master)
  *   cwd       — working directory for the tool; nil = ours
  *   password  — typed at each prompt, up to max_sends times; nil = none
  *   max_sends — password prompts to answer before the next one means the
- *               password was refused (zip -e asks twice, unzip once)
+ *               password was refused (zip -e asks twice)
  *   status    — receives the exit status (128 + signal if killed)
  *   text      — receives the output, tidied and without the password
  *
@@ -369,98 +363,6 @@ move_into_place(NSURL *src, NSURL *dir, NSString *name, BOOL suffixed, NSError *
             return nil;
         }
     }
-}
-
-/*
- * is_real_directory — whether url is a folder itself, not a link to one.
- *
- * Inputs:
- *   url — file URL
- *
- * Output: YES for a directory (lstat).
- */
-static BOOL
-is_real_directory(NSURL *url)
-{
-    struct stat st;
-    return lstat(url.fileSystemRepresentation, &st) == 0 && S_ISDIR(st.st_mode);
-}
-
-/*
- * extract_sync — does the work of +extract:password:completion:. Blocks;
- * call off the main thread.
- *
- * Inputs:
- *   archive  — archive file URL
- *   password — for an encrypted zip; may be nil
- *   err      — receives the error on failure
- *
- * Output: the folder holding the contents, or nil.
- */
-static NSURL *
-extract_sync(NSURL *archive, NSString *password, NSError **err)
-{
-    NSString *name = archive.lastPathComponent;
-    FilesArchiveFormat format;
-    const char *suffix = archive_suffix_of(name, &format);
-    if (!suffix) {
-        *err = archive_error(FilesArchiveErrorFailed, @"This is not a zip or tar archive.");
-        return nil;
-    }
-    NSString *stem = [name substringToIndex:name.length - strlen(suffix)];
-    if (stem.length == 0) stem = @"Extracted";
-
-    NSURL *dir     = archive.URLByDeletingLastPathComponent;
-    NSURL *staging = staging_url(dir, name, @"extract");
-    NSError *mk_err = nil;
-    if (![NSFileManager.defaultManager createDirectoryAtURL:staging
-                                withIntermediateDirectories:NO
-                                                 attributes:nil
-                                                      error:&mk_err]) {
-        *err = mk_err;
-        return nil;
-    }
-
-    BOOL zip = format == FilesArchiveFormatZip;
-    NSArray<NSString *> *args = zip
-        ? @[@"-q", @"-d", staging.path, archive.path, @"-x", @"__MACOSX/*"]
-        : @[@"-xf", archive.path, @"-C", staging.path];
-    int status = 0;
-    NSString *text = nil;
-    run_outcome_t outcome = run_tool(zip ? unzip_tool : tar_tool, args, nil,
-                                     zip ? password : nil, 1, &status, &text);
-    /* unzip exits 1 for warnings after extracting everything it could. */
-    BOOL ok = outcome == run_exited && status <= (zip ? 1 : 0);
-    if (!ok) {
-        remove_quietly(staging);
-        if (outcome == run_needs_password) {
-            *err = archive_error(FilesArchiveErrorPasswordRequired, nil);
-        } else if (outcome == run_password_rejected) {
-            *err = archive_error(FilesArchiveErrorPasswordIncorrect, nil);
-        } else if (outcome == run_not_started) {
-            *err = archive_error(FilesArchiveErrorFailed, @"Could not start the extraction tool.");
-        } else {
-            *err = archive_error(FilesArchiveErrorFailed, text);
-        }
-        return nil;
-    }
-
-    NSArray<NSURL *> *top = [NSFileManager.defaultManager contentsOfDirectoryAtURL:staging
-                                                        includingPropertiesForKeys:nil
-                                                                           options:0
-                                                                             error:nil];
-    NSError *mv_err = nil;
-    NSURL *result;
-    if (top.count == 1 && is_real_directory(top.firstObject)) {
-        result = move_into_place(top.firstObject, dir, top.firstObject.lastPathComponent,
-                                 YES, &mv_err);
-        remove_quietly(staging);
-    } else {
-        result = move_into_place(staging, dir, stem, YES, &mv_err);
-        if (!result) remove_quietly(staging);
-    }
-    if (!result) *err = mv_err;
-    return result;
 }
 
 /*
@@ -815,28 +717,6 @@ validation_error
 @implementation FilesArchive
 
 /*
- * is_archive: — see archive.h.
- */
-+ (BOOL)
-is_archive:(NSURL *)url
-{
-    return archive_suffix_of(url.lastPathComponent, NULL) != NULL;
-}
-
-/*
- * extract:password:completion: — see archive.h.
- */
-+ (void)
-extract:(NSURL *)archive
-password:(NSString *)password
-completion:(void (^)(NSURL *folder, NSError *err))completion
-{
-    run_in_background(^NSURL *(NSError **err) {
-        return extract_sync(archive, password, err);
-    }, completion);
-}
-
-/*
  * create_from:name:format:password:completion: — see archive.h.
  */
 + (void)
@@ -870,43 +750,6 @@ prompt_create_for:(NSArray<NSURL *> *)items
           handler:(void (^)(NSString *, FilesArchiveFormat, NSString *))handler
 {
     [[[FilesArchiveDialog alloc] init_for:items handler:handler] show_over:window];
-}
-
-/*
- * prompt_password_for:incorrect:window:handler: — see archive.h.
- */
-+ (void)
-prompt_password_for:(NSURL *)archive
-          incorrect:(BOOL)incorrect
-             window:(NSWindow *)window
-            handler:(void (^)(NSString *password))handler
-{
-    NSTextField *label = [NSTextField labelWithString:@"Password:"];
-    label.font         = [NSFont systemFontOfSize:text_pt];
-    NSSecureTextField *field = [[NSSecureTextField alloc] initWithFrame:NSZeroRect];
-    style_field(field);
-    NSStackView *row = [NSStackView stackViewWithViews:@[label, field]];
-    row.spacing = 8;
-    row.alignment = NSLayoutAttributeCenterY;
-
-    SharedToolPanel *panel = [SharedToolPanel
-        panel_with_title:@"Password"
-                headline:[NSString stringWithFormat:@"\"%@\" is password protected",
-                          archive.lastPathComponent]
-                subtitle:incorrect ? @"The password was incorrect. Try again."
-                                   : @"Enter the password to extract it."
-                  symbol:@"lock.fill"
-                 content:row
-                 buttons:@[@"Extract", @"Cancel"]
-             destructive:-1
-                 handler:^NSString *(NSInteger index) {
-        if (index != 0) return nil;
-        if (field.stringValue.length == 0) return @"Enter a password.";
-        handler(field.stringValue);
-        return nil;
-    }];
-    panel.window.initialFirstResponder = field;
-    [panel show_over:window];
 }
 
 @end

@@ -114,10 +114,10 @@ Compared with Finder:
   the Locked flag, SHA-256 / MD5 checksums, and an icon well — drag an
   image or `.icns` file onto the icon to make it the item's own, shown in
   the file list as well, and **revert** to put the type's icon back
-- **Archives and disk images open in place** — double-click a `.zip`,
-  `.tar.gz`, `.dmg` or `.iso` and the contents open in a new window; create
-  archives (zip, tar.gz, tar, optionally password-protected) from the
-  right-click menu
+- **Disk images open in place** — double-click a `.dmg` or `.iso` and the
+  volume opens in a new window; create archives (zip, tar.gz, tar,
+  optionally password-protected) from the right-click menu. A double-clicked
+  archive goes to Archive Utility, the app macOS already uses for it
 - **Set Default Apps** (Files ▸ Set Default Apps…) — every file type this
   Mac knows in one searchable, sortable list, with its icon and the app
   that opens it; double-click a row to repoint it, or follow the **change**

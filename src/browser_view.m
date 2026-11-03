@@ -1360,8 +1360,9 @@ load_location:(NSURL *)url
 
 /*
  * navigate_to: — shows url if it is a folder (recording history); mounts a
- * disk image, extracts an archive (FilesArchive is_archive:) or otherwise
- * opens it with its default application. A symbolic link is followed first,
+ * disk image, or otherwise opens the file with its default application —
+ * an archive goes to Archive Utility like any other handoff. A symbolic
+ * link is followed first,
  * like a Finder alias: a link to a folder shows the folder it points to
  * (at its real path), and a link whose target is missing reports an error.
  * The item is examined on a background queue, so a slow volume never
@@ -1415,8 +1416,6 @@ navigate_to:(NSURL *)url
             } else if (!is_dir.boolValue) {
                 if (uti && [[UTType typeWithIdentifier:uti] conformsToType:UTTypeDiskImage]) {
                     [s mount_disk_image:target];
-                } else if ([FilesArchive is_archive:target]) {
-                    [s extract_archive:target password:nil];
                 } else {
                     [NSWorkspace.sharedWorkspace openURL:target];
                 }
@@ -1484,46 +1483,6 @@ mount_disk_image:(NSURL *)image
             s.open_window_handler(volume);
         } else if (volume) {
             [s navigate_to:volume];
-        }
-    }];
-}
-
-/*
- * extract_archive:password: — expands an archive (FilesArchive extract:…)
- * and shows the new folder in a new window via open_window_handler, or in
- * this browser if none is set. The status bar reads "Extracting …"
- * meanwhile. An encrypted zip asks for its password, again if it was
- * wrong.
- *
- * Inputs:
- *   archive  — archive file URL
- *   password — password to try; nil for the first attempt
- */
-- (void)
-extract_archive:(NSURL *)archive password:(NSString *)password
-{
-    [self report_status:[NSString stringWithFormat:@"Extracting \"%@\"…",
-                         archive.lastPathComponent]];
-    __weak FilesBrowserView *ws = self;
-    [FilesArchive extract:archive password:password completion:^(NSURL *folder, NSError *err) {
-        FilesBrowserView *s = ws;
-        if (!s) return;
-        [s update_status_bar];
-        if (folder) {
-            if (s.open_window_handler) s.open_window_handler(folder);
-            else                       [s navigate_to:folder];
-        } else if ([err.domain isEqualToString:FilesArchiveErrorDomain] &&
-                   (err.code == FilesArchiveErrorPasswordRequired ||
-                    err.code == FilesArchiveErrorPasswordIncorrect)) {
-            [FilesArchive prompt_password_for:archive
-                                    incorrect:err.code == FilesArchiveErrorPasswordIncorrect
-                                       window:s.window
-                                      handler:^(NSString *pw) {
-                [s extract_archive:archive password:pw];
-            }];
-        } else {
-            files_show_error([NSString stringWithFormat:@"Could not extract \"%@\"",
-                              archive.lastPathComponent], err, s.window);
         }
     }];
 }

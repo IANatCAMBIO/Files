@@ -250,20 +250,22 @@ list, files in their default app.
 - Opening a disk image (.dmg, .iso, …) mounts it and opens its volume in a
   new window; password-protected or licensed images are handed to the
   system's DiskImageMounter to ask, then open the same way.
-- Opening an archive (.zip, .tar, .tar.gz, .tgz) extracts it next to
-  itself and opens the new folder in a new window: a folder named after
-  the archive, or the archive's own top-level folder if it has just one; a
-  name already taken gets " 2". Nothing appears until extraction is
-  complete, and a failed one leaves nothing behind. An encrypted zip asks
-  for its password.
+- Opening an archive (.zip, .tar, .tar.gz, .tgz) hands it to whichever app
+  macOS has for it — Archive Utility unless you have changed it — exactly
+  as Files hands over any other file it does not display itself. Expanding
+  is that app's job, including its progress, its password prompt for an
+  encrypted zip and its own handling of a damaged one; Files does not
+  unpack archives itself.
 - Right-click ▸ Create Archive… on one or more items in the same folder
   asks for the format (zip, tar.gz or tar), the file name and, for zip, an
   optional password; the archive is made in that folder and selected.
-  Passwords go to `zip` and `unzip` through a terminal, never on a command
-  line where `ps` would show them. Zip password protection is the older
+  Passwords go to `zip` through a terminal, never on a command line where
+  `ps` would show them. Zip password protection is the older
   ZipCrypto scheme, which is weak; tar cannot be password protected.
 - While Files is the default file browser, expanding or creating an
-  archive does not pop open a Finder window: Archive Utility's
+  archive does not pop open a Finder window — which is what keeps the
+  handoff above feeling in place rather than bouncing you to Finder:
+  Archive Utility's
   archive-reveal-after / dearchive-reveal-after are off (checked at every
   launch, including the first) and come back on with Set default file
   browser to Finder.
