@@ -177,23 +177,6 @@ NSImage *files_icon_for_url(NSURL *url, CGFloat size, BOOL cached);
 NSImage *files_icon_cached(NSString *path, UTType *type, CGFloat size);
 
 /*
- * files_icon_cached — the same cached icon as files_icon_for_url, for a
- * caller that already knows what files_icon_for_url would have to read:
- * the file lists learn an item's type and whether it has an icon of its
- * own with the listing, so they say so rather than make it look again.
- *
- * Inputs:
- *   path — the item's path; the cache key for an item with its own icon
- *   type — the type to share an icon for, or nil for the item's own icon
- *          (a folder, a package, a file carrying one)
- *   size — edge length in points
- *
- * Output: NSImage of size x size (never nil); do not modify it. Any
- *         thread, though an item's own icon reads the volume.
- */
-NSImage *files_icon_cached(NSString *path, UTType *type, CGFloat size);
-
-/*
  * files_has_custom_icon — whether an item carries an icon of its own
  * rather than its type's: the kHasCustomIcon bit of its Finder flags,
  * which is set alongside the icon itself (a resource fork on a file, an
