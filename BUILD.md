@@ -57,9 +57,9 @@ macOS) to render the app icon; see [App icon](#app-icon).
 | Install         | `make install`  | Replaces `~/Applications/Files.app` with the new build; a running copy is sent SIGTERM, killed after 5 s, and reopened. A reopen LaunchServices refuses (it can still hold the bundle that was just replaced) is retried, and then reported rather than failing the install, which has already happened |
 | Test            | `make test`     | Release checks: `test-build`, `test-unit`, `test-features`, `test-ui` |
 | Test (build)    | `make test-build` | From-scratch build with zero warnings; valid `Info.plist`, executable and signature |
-| Test (unit)     | `make test-unit` | Builds and runs the copy-engine, archive, sort and default-apps tests (`tests/`) |
-| Test (features) | `make test-features` | Feature tests (`tests/features/`); none written yet |
-| Test (UI)       | `make test-ui`  | Interface check (`tests/ui/ui_check.m`); none written yet |
+| Test (unit)     | `make test-unit` | Builds and runs the eight engine tests in `tests/`: copy engine, archive, listing, row order, sort, reveal, custom icon and default apps |
+| Test (features) | `make test-features` | Feature tests (`tests/features/`); none written yet, so this target reports that and passes |
+| Test (UI)       | `make test-ui`  | Builds the real windows in process, checks the chrome, writes light and dark PNG snapshots to `build/snapshots` (`tests/ui/ui_check.m`) |
 | Clean           | `make clean`    | Removes `build/` and `Files.app`       |
 
 The tests are never run by a normal build. `make test-unit` links each `tests/*_test.m` against the app's objects (all but
@@ -98,6 +98,38 @@ misspelled preference resolves to Date Modified rather than to a column the
 list cannot sort by. It writes only to a preference domain of its own,
 which it removes when it finishes.
 
+`listing_test` checks that the batched listing (`files_list_items`, which
+reads a folder with `getattrlistbulk`) reports exactly what Foundation's
+own resource values would have reported, for every awkward kind of item a
+folder can hold: packages, application bundles, symbolic links, dot files,
+hidden-flagged files, items with an icon of their own, and extensionless
+files of several different types, which Launch Services cannot resolve from
+the name. It then repeats the comparison over the startup volume's root,
+the one place where firmlinks and mount points make the batched call
+describe the directory standing in the way rather than the one it stands
+for.
+
+`row_order_test` checks the order and the membership of the rows the file
+list shows, driven through the real browser view: every sortable column in
+both directions, folders-first on and off, and Show Hidden Files. It writes
+only to a preference domain of its own.
+
+`custom_icon_test` exercises the icon well in Get Info
+(`files_set_custom_icon` / `files_has_custom_icon`) against real files: an
+icon written and read back, reverted, and the two shapes it takes on disk —
+a resource fork on a file, an `Icon\r` file inside a folder — plus the
+effect on the shared per-type icon cache.
+
+`ui_check` (`make test-ui`) builds the browser window, Preferences, Get
+Info, All Mounts and Set Default Apps in process, checks each one has a
+real title bar and that the browser's toolbar is expanded, icon-only and
+not user-customisable, renders each in light and dark to
+`build/snapshots/`, and checks that closing a browser window releases the
+controller, the window and its browser views. It runs in process, so it
+needs no Screen Recording or Accessibility grant, and it never creates the
+app delegate — that would make Files the default file viewer and change the
+machine it is running on.
+
 ## Output
 
 The build produces `Files.app/` in the project root:
@@ -110,12 +142,16 @@ Files.app/
     │   └── Files          ← compiled binary
     └── Resources/
         ├── app_icon.icns   ← app icon, rendered from resources/app_icon.png
-        └── documents.png, ribbon.png, git96.png  ← git badge
+        ├── documents.png   ← the generic document icon
+        └── git96.png       ← the git working-tree badge
 ```
 
-The Makefile copies every `.png` and `.icns` in `images/` into `Resources/`,
-so adding an image there is all it takes to bundle it; the app loads it by
-name (`NSBundle pathForResource:ofType:`).
+The Makefile's `IMAGES` names the images that go into `Resources/`, and the
+app loads each by name (`NSBundle pathForResource:ofType:`). They are named
+one by one rather than taken with a wildcard over `images/`, because that
+folder also holds `screenshot.png` for the README: a wildcard put the
+screenshot, and a leftover image nothing loads, inside every bundle. To
+bundle a new image, add it to `IMAGES`.
 
 ## App icon
 
@@ -133,7 +169,7 @@ About panel (`files_app_icon()`). To change the icon, replace the PNG and run
 ## Version and build date
 
 The version lives in the `VERSION` file at the project root (one line,
-e.g. `1.0`). When `make` assembles the bundle it copies
+e.g. `3.0.0`). When `make` assembles the bundle it copies
 `resources/Info.plist` and writes into the copy:
 
 | Key | Value |
@@ -141,7 +177,7 @@ e.g. `1.0`). When `make` assembles the bundle it copies
 | `CFBundleShortVersionString`, `CFBundleVersion` | contents of `VERSION` |
 | `FilesBuildDate` | time the bundle was assembled, UTC, ISO 8601 |
 
-Files ▸ About Files shows them as "Version 1.0 (built <date>)", with the date in
+Files ▸ About Files shows them as "Version 3.0.0 (built <date>)", with the date in
 local time. To release a new version, edit `VERSION` and run `make`; editing
 it is enough to rebuild the bundle. The build date is refreshed whenever the
 bundle is reassembled (any source change, `Info.plist` or `VERSION`), not on
@@ -208,11 +244,19 @@ src/
                               the background queue, standard folder URLs,
                               the icon cache, size/date formatting, alerts
 tests/
-├── file_ops_test.m         — copy-engine tests (`make test`)
-├── archive_test.m          — archive tests (`make test`)
-├── sort_test.m             — default sort order tests (`make test`)
-├── reveal_test.m           — reveal name-matching tests (`make test`)
-└── default_apps_test.m     — file-type list tests (`make test`)
+├── file_ops_test.m         — copy-engine tests (`make test-unit`)
+├── archive_test.m          — archive tests
+├── listing_test.m          — batched listing against Foundation's own
+│                             answers, fixture and startup-volume root
+├── row_order_test.m        — row order and membership through the
+│                             browser view
+├── sort_test.m             — default sort order tests
+├── reveal_test.m           — reveal name-matching tests
+├── custom_icon_test.m      — the icon well in Get Info
+├── default_apps_test.m     — file-type list tests
+└── ui/
+    └── ui_check.m          — the windows built in process: chrome,
+                              light/dark snapshots, release (`make test-ui`)
 ```
 
 ## Code signing

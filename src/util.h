@@ -418,6 +418,20 @@ NSImage *files_app_icon(void);
 void files_show_error(NSString *title, NSError *err, NSWindow *window);
 
 /*
+ * files_posix_error — wraps an errno value in an NSError naming the item
+ * it happened on. The description is strerror's, so files_show_error has
+ * something to say about a failure Foundation did not raise; without it a
+ * bare NSPOSIXErrorDomain error shows only Cocoa's generic wording.
+ *
+ * Inputs:
+ *   code — errno value
+ *   url  — the item or folder the failure relates to; may be nil
+ *
+ * Output: the error, in NSPOSIXErrorDomain.
+ */
+NSError *files_posix_error(int code, NSURL *url);
+
+/*
  * FilesCancelToken — an atomic cancel flag for one piece of background
  * work (a hash, a folder-size count). The work's block holds a strong
  * reference, so the flag stays valid for the whole job even after its

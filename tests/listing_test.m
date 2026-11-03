@@ -13,6 +13,8 @@
 #import "util.h"
 #include <sys/stat.h>
 #include <unistd.h>
+#include <sys/mount.h>
+#include <sys/param.h>
 
 static int failures;
 
@@ -59,11 +61,32 @@ compare_item(files_item *item)
         NSURLNameKey, NSURLFileSizeKey, NSURLIsDirectoryKey, NSURLIsPackageKey,
         NSURLIsApplicationKey, NSURLIsSymbolicLinkKey, NSURLTypeIdentifierKey,
         NSURLLocalizedTypeDescriptionKey, NSURLContentModificationDateKey,
-        NSURLCreationDateKey, NSURLIsHiddenKey] error:nil];
+        NSURLCreationDateKey, NSURLIsHiddenKey, NSURLIsVolumeKey] error:nil];
 
     NSString *n = item.name;
-    check(same(item.name, v[NSURLNameKey]),
-          [NSString stringWithFormat:@"%@: name", n]);
+
+    /* A volume root is the one item whose name the listing does not take
+     * from Foundation. Foundation answers with the mounted volume's name
+     * ("Macintosh HD" for /.nofollow, where the startup volume appears a
+     * second time); the file list shows the name the folder actually
+     * holds, because that is the name in the path, and a dot-prefixed one
+     * stays hidden with it. Everything else about the item — its dates,
+     * mode, type and kind — still has to agree, which is what the firmlink
+     * and mount-point re-read is for. */
+    BOOL is_volume = [v[NSURLIsVolumeKey] boolValue];
+    if (is_volume) {
+        check([item.name isEqualToString:url.lastPathComponent],
+              [NSString stringWithFormat:@"%@: a volume keeps the folder's own name "
+                                          "(Foundation says %@)", n, v[NSURLNameKey]]);
+    } else {
+        check(same(item.name, v[NSURLNameKey]),
+              [NSString stringWithFormat:@"%@: name", n]);
+    }
+    /* Hidden by a dot in the name the folder holds, or by the item's own
+     * flag (/dev carries UF_HIDDEN without a dot). */
+    check(item.is_hidden == ([item.name hasPrefix:@"."] ||
+                             [v[NSURLIsHiddenKey] boolValue]),
+          [NSString stringWithFormat:@"%@: is hidden", n]);
     check(item.is_dir == [v[NSURLIsDirectoryKey] boolValue],
           [NSString stringWithFormat:@"%@: is a directory", n]);
     check(item.is_symlink == [v[NSURLIsSymbolicLinkKey] boolValue],
@@ -72,8 +95,6 @@ compare_item(files_item *item)
           [NSString stringWithFormat:@"%@: is a package", n]);
     check(item.is_application == [v[NSURLIsApplicationKey] boolValue],
           [NSString stringWithFormat:@"%@: is an application", n]);
-    check(item.is_hidden == [v[NSURLIsHiddenKey] boolValue],
-          [NSString stringWithFormat:@"%@: is hidden", n]);
     check(same(item.type.identifier, v[NSURLTypeIdentifierKey]),
           [NSString stringWithFormat:@"%@: type (%@ / %@)", n,
               item.type.identifier, v[NSURLTypeIdentifierKey]]);
@@ -136,6 +157,15 @@ main(void)
         write_file(@"second.txt",   @"more text");   /* shares doc.txt's group */
         write_file(@"noext",        @"no extension");
         write_file(@".dotfile",     @"hidden by name");
+        /* Three extensionless files that resolve to three different types.
+         * They share an empty extension, so a listing that groups items by
+         * extension alone gives all three whichever type it read first —
+         * the wrong Kind, the wrong Kind sort and the wrong icon for two of
+         * them. "noext" above is a fourth; it resolves to public.data. */
+        write_file(@"Makefile",     @"all:\n\techo hi\n");   /* public.make-source */
+        write_file(@"LICENSE",      @"BSD 3-Clause\n");      /* public.plain-text */
+        [[NSData dataWithBytes:"\x7f\x45\x4c\x46\x00\x01\x02\x03" length:8]
+            writeToFile:[d stringByAppendingPathComponent:@"blob"] atomically:YES];
         write_file(@"UPPER.TXT",    @"extension case");
         write_file(@"spaced name.txt", @"spaces");
         write_file(@"ünïcode–ñ.txt", @"unicode");
@@ -210,12 +240,26 @@ main(void)
             if (!same(a.name, b.name) || a.is_dir != b.is_dir || a.size != b.size ||
                 a.mode != b.mode || a.is_package != b.is_package ||
                 a.is_hidden != b.is_hidden || a.has_custom_icon != b.has_custom_icon ||
-                !same(a.type.identifier, b.type.identifier) || !same(a.kind, b.kind)) {
+                !same(a.type.identifier, b.type.identifier) || !same(a.kind, b.kind) ||
+                fabs([a.modified timeIntervalSinceDate:b.modified]) >= 1.0 ||
+                fabs([a.created timeIntervalSinceDate:b.created]) >= 1.0) {
                 agree = NO;
                 printf("     differs: %s\n", a.name.UTF8String);
             }
         }
         check(agree, @"reading one at a time gives the same answers");
+
+        /* The startup volume's root, where the dates used to be wrong: its
+         * firmlinked folders (Library, Users, Applications, private, opt,
+         * Volumes, cores) and its mount points (/dev) are reported by
+         * getattrlistbulk as the directory standing in the way rather than
+         * the one it stands for, so each has to be read again by path.
+         * Nothing but a real volume root exercises this, which is why the
+         * check is made here rather than against the fixture. */
+        NSURL *vol_root = [NSURL fileURLWithPath:@"/" isDirectory:YES];
+        NSArray<files_item *> *root_items = files_list_items(vol_root, NULL);
+        check(root_items.count > 0, @"the startup volume's root lists");
+        for (files_item *item in root_items) compare_item(item);
 
         /* A folder that cannot be read fails rather than coming back empty. */
         NSURL *missing = [root URLByAppendingPathComponent:@"not here at all"];

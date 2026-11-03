@@ -84,22 +84,6 @@ real_path(NSURL *url)
 }
 
 /*
- * posix_error — wraps an errno value in an NSError carrying the offending path.
- *
- * Inputs:
- *   code — errno value
- *   url  — file URL the failure relates to
- *
- * Output: NSError in NSPOSIXErrorDomain.
- */
-static NSError *
-posix_error(int code, NSURL *url)
-{
-    return [NSError errorWithDomain:NSPOSIXErrorDomain code:code
-                           userInfo:@{NSFilePathErrorKey: url.path ?: @""}];
-}
-
-/*
  * remove_tree — deletes path and, for a folder, everything in it, without
  * following symbolic links. On the way down it clears the user lock flags
  * (UF_IMMUTABLE, UF_APPEND) on every item and gives folders owner rwx, so
@@ -761,7 +745,7 @@ copy_tree(NSURL *src, NSURL *dst, copy_ctx_t *c)
             @"SHA-256 validation failed for \"%@\". Nothing was replaced and "
              "the source was kept.", src.lastPathComponent]);
     }
-    return posix_error(c->err ? c->err : saved_errno, src);
+    return files_posix_error(c->err ? c->err : saved_errno, src);
 }
 
 /*
@@ -829,6 +813,14 @@ misplaced_error(NSString *name, NSURL *hidden, int code)
  *   c       — copy context (log)
  *
  * Output: nil on success, NSError on failure (staged is left in place).
+ *
+ * Replace moves the old item aside and renames the staged one into its
+ * place, rather than exchanging the two with renamex_np's RENAME_SWAP.
+ * Swap would make the replacement one atomic step, but it is not
+ * supported on every file system, so it would need this same aside-and-
+ * rename path as a fallback anyway — two ways to do one thing, for a
+ * window of a few microseconds. Reconsider only if a volume turns up
+ * where the aside rename is a real problem.
  */
 static NSError *
 commit_item(NSURL *staged, NSURL *dst, BOOL replace, BOOL hidden, copy_ctx_t *c)
@@ -839,7 +831,7 @@ commit_item(NSURL *staged, NSURL *dst, BOOL replace, BOOL hidden, copy_ctx_t *c)
     struct stat st;
     u_int lock = (lstat(staged_p, &st) == 0) ? (st.st_flags & LOCK_FLAGS) : 0;
     if (lock && lchflags(staged_p, st.st_flags & ~lock) != 0) {
-        return posix_error(errno, staged);
+        return files_posix_error(errno, staged);
     }
 
     NSURL *old = nil;
@@ -849,7 +841,7 @@ commit_item(NSURL *staged, NSURL *dst, BOOL replace, BOOL hidden, copy_ctx_t *c)
         old_hidden = lstat(dst_p, &old_st) == 0 && (old_st.st_flags & UF_HIDDEN);
         old = sibling_temp_url(dst, @"old");
         if (rename(dst_p, old.fileSystemRepresentation) != 0) {
-            return posix_error(errno, dst);
+            return files_posix_error(errno, dst);
         }
     }
 
@@ -864,7 +856,7 @@ commit_item(NSURL *staged, NSURL *dst, BOOL replace, BOOL hidden, copy_ctx_t *c)
             log_line(c, @"The existing \"%@\" was put back unchanged", dst.path);
             match_hidden_flag(dst, old_hidden);
         }
-        return posix_error(saved_errno, dst);
+        return files_posix_error(saved_errno, dst);
     }
     match_hidden_flag(dst, hidden);
     if (lock && (lstat(dst_p, &st) != 0 || lchflags(dst_p, st.st_flags | lock) != 0)) {
@@ -950,7 +942,7 @@ transfer_item(NSURL *src, NSURL *dst, BOOL replace, BOOL is_cut, copy_ctx_t *c)
                         @"no data copied)", c->file_name);
             return nil;
         }
-        if (errno != EXDEV) return posix_error(errno, src);
+        if (errno != EXDEV) return files_posix_error(errno, src);
         log_line(c, @"\"%@\" is on another volume than its destination: copying it, "
                     @"then removing the original", src.lastPathComponent);
     }
@@ -1336,7 +1328,7 @@ create_item_in:(NSURL *)parent
         } else {
             int fd = open(dest.fileSystemRepresentation, O_WRONLY | O_CREAT | O_EXCL, 0644);
             ok = (fd >= 0);
-            if (ok) close(fd); else err = posix_error(errno, dest);
+            if (ok) close(fd); else err = files_posix_error(errno, dest);
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             if (completion) completion(ok ? dest : nil, ok ? nil : err);

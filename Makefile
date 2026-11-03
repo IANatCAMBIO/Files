@@ -72,9 +72,13 @@ all: $(BUNDLE)
 # Info.plist gets the executable's name from APP, the version from VERSION
 # and the time the bundle was assembled as FilesBuildDate (UTC), both shown
 # in the About panel.
-# Every image in images/ (.png, .icns) is copied into Contents/Resources,
-# where the app loads it by name.
-IMAGES   = $(wildcard images/*.png images/*.icns)
+#
+# The images the app loads by name, copied into Contents/Resources. Named
+# one by one rather than taken with a wildcard over images/, which also
+# holds the README's screenshot: that put 741 KB of documentation, and a
+# leftover nothing loads, inside every bundle. Adding an image here is what
+# it takes to bundle it.
+IMAGES   = images/documents.png images/git96.png
 
 # The app icon (Info.plist CFBundleIconFile, and files_app_icon() in the
 # app) is built from resources/app_icon.png, a 1024x1024 PNG with a
@@ -212,10 +216,26 @@ test-build:
 test-features:
 	@echo "test-features: no feature tests yet (tests/features/)"
 
-# test-ui: the real windows built in-process (title bar, toolbar,
-# light/dark snapshots). None written yet (tests/ui/ui_check.m).
-test-ui:
-	@echo "test-ui: no interface check yet (tests/ui/ui_check.m)"
+# test-ui: tests/ui/ui_check.m linked against every app object but main.o.
+# It builds the real windows in this process, checks the chrome (titled
+# window, expanded toolbar, no header bar), renders light and dark PNG
+# snapshots to build/snapshots, and checks that a closed browser window is
+# released. In-process, so it needs no Screen Recording or Accessibility
+# grant. It runs from a throwaway bundle under build/ so the app icon is
+# found the way the app finds it.
+UI_CHECK_APP  = build/ui_check.app/Contents
+UI_CHECK_BIN  = $(UI_CHECK_APP)/MacOS/ui_check
+SNAPSHOT_DIR  = build/snapshots
+
+$(UI_CHECK_BIN): tests/ui/ui_check.m $(APP_OBJS) $(ICON) Makefile | build
+	@rm -rf build/ui_check.app && mkdir -p $(UI_CHECK_APP)/MacOS $(UI_CHECK_APP)/Resources
+	@cp $(ICON) $(IMAGES) $(UI_CHECK_APP)/Resources/
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< $(APP_OBJS)
+
+test-ui: $(UI_CHECK_BIN)
+	@rm -rf $(SNAPSHOT_DIR)
+	./$(UI_CHECK_BIN) "$(CURDIR)/$(SNAPSHOT_DIR)"
+	@echo "test-ui: ok"
 
 clean:
 	@rm -rf build $(BUNDLE)

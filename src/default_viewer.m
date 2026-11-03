@@ -854,6 +854,14 @@ files_default_viewer_sync(void (^done)(BOOL ok))
  * files_background_queue(): Files' preference, the managed settings
  * (Archive Utility included), then the final checks, all logged.
  *
+ * This writes the records of what was changed from the background queue,
+ * where everything else reads them on the main one. That is safe only
+ * because every NSUserDefaultsDidChangeNotification observer in the app
+ * is posted to the main queue, so no reader runs while this writes. It is
+ * left as it is rather than hopped to the main queue, which would make
+ * the restore path wait on the interface; the invariant to keep is the
+ * one about the observers.
+ *
  * Inputs:
  *   files — YES for Files, NO for Finder
  *   log   — change log to fill

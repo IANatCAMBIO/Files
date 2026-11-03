@@ -39,7 +39,7 @@ make install
 | `make` | build `Files.app` in the repo root |
 | `make run` | build, then launch |
 | `make install` | build, then install to `~/Applications` |
-| `make test` | release checks (build, unit, feature, UI) |
+| `make test` | release checks: a warning-free build, the engine tests, and the interface check |
 | `make clean` | remove `build/` and the bundle |
 
 See [BUILD.md](BUILD.md) for the toolchain, dependencies and test targets.

@@ -41,6 +41,10 @@ The full reference for Files. See [README.md](README.md) to install it and
   Name is the one that takes the window, growing and shrinking with it.
   Turn it off to size the columns by dragging their headers instead.
 - Optional double-height rows with larger icons (View ▸ Large Rows).
+- Sizes read as KB, MB and GB (View ▸ Human Readable File Sizes, on by
+  default), counted in thousands as Finder counts them. Turn it off and
+  the Size column shows the exact number of bytes, which is what you want
+  when comparing two files that round to the same figure.
 - Single- or dual-pane browsing (View ▸ Dual Pane, ⇧⌘2; Tab switches
   panes; right-click a folder ▸ Open in Split Pane).
 - The status bar shows the item count and, on the right, the free and
@@ -98,9 +102,28 @@ Kind column shows ("Folder", "Application", "Rich Text Document") still
 come from Launch Services, but once for each kind of item in the folder
 instead of once per item.
 
+"Each kind of item" means each filename extension, because that is what
+decides the type. A file with no extension at all is the exception:
+Launch Services looks past the name for those, so a `Makefile`, a
+`LICENSE` and a binary with no extension are three different kinds that
+share an empty one, and each has to be asked about separately. Its own
+type is resolved per file; everything that follows from the type — the
+kind string, whether it is a package or an application — is still shared.
+A folder of extensionless files is therefore dearer than a folder of
+photographs: `/usr/bin`, 924 items of which 817 have no extension, reads
+in about 29 ms, against about 38 ms for 10,000 items that do.
+
+Two sorts of folder are read a second time, by path, because the batched
+call describes the wrong directory for them: a firmlink and a mount
+point. Both live at the root of a volume — `/Library`, `/Users`,
+`/Applications` and `/dev` among them — and without the second read every
+one of them showed the volume root's own date instead of its own.
+
 A volume whose file system does not offer batched attributes — some
 network and FUSE mounts — is read item by item instead, which is slower
-but gives exactly the same rows.
+but gives exactly the same rows. If that per-item read is unsupported
+too, the folder reports that it cannot be read rather than appearing
+empty.
 
 ## Bookmarks bar
 
@@ -372,7 +395,7 @@ Files ▸ Preferences…, ⌘,
 
 | Tab | Settings |
 |---|---|
-| View | Default sort order and direction, and the View-menu preferences (folders first, used disk space, full path in title, bookmarks bar, folder sizes, hashes in Get Info) |
+| View | Default sort order and direction, and the View-menu preferences (folders first, bookmarks bar, auto-fit columns, large rows, folder sizes, human readable file sizes, used disk space, full path in title), plus Show Hashes in Get Info |
 | Move/Copy | Simple Copies; Validate Copies with SHA-256 |
 | Integration | Default file browser (Set Files as default / Set Finder as default — each opens a change log, and the ⓘ beside the heading lists what follows the default); Keep Files running for faster startup |
 

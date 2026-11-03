@@ -9,6 +9,7 @@
 #include <sys/xattr.h>
 #include <sys/attr.h>
 #include <errno.h>
+#include <string.h>
 
 NSString * const files_pref_show_hidden     = @"files.show_hidden_files";
 NSString * const files_pref_auto_fit        = @"files.auto_fit_columns";
@@ -688,6 +689,24 @@ void
 files_show_error(NSString *title, NSError *err, NSWindow *window)
 {
     shared_ui_notice(window, title, err.localizedDescription ?: @"Unknown error", nil);
+}
+
+/*
+ * files_posix_error — an NSError for a failed system call.
+ * Inputs/output are documented in util.h.
+ */
+NSError *
+files_posix_error(int code, NSURL *url)
+{
+    NSMutableDictionary<NSErrorUserInfoKey, id> *info = [NSMutableDictionary dictionary];
+    info[NSLocalizedDescriptionKey] = @(strerror(code));
+    if (url) {
+        info[NSURLErrorKey] = url;
+        if (url.path) {
+            info[NSFilePathErrorKey] = url.path;
+        }
+    }
+    return [NSError errorWithDomain:NSPOSIXErrorDomain code:code userInfo:info];
 }
 
 @implementation FilesCancelToken {
