@@ -241,8 +241,7 @@ volumes_changed:(NSNotification *)note
 - (NSArray<NSURL *> *)
 cloud_storage_locations
 {
-    NSURL *root = [files_home_url() URLByAppendingPathComponent:@"Library/CloudStorage"
-                                                    isDirectory:YES];
+    NSURL *root = files_cloud_storage_url();
     NSArray<NSURL *> *items =
         [NSFileManager.defaultManager contentsOfDirectoryAtURL:root
                                     includingPropertiesForKeys:@[NSURLIsDirectoryKey,

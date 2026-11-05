@@ -228,9 +228,51 @@ ACLs, the Locked flag and dates; nothing at the destination is replaced
 until the new copy is complete. With validation on, each file's source is
 hashed before it is copied and its staged copy straight after, and the
 copy stops at the first mismatch; APFS clones are hashed like any other
-copy. Files kept only in iCloud are downloaded first, with their progress
-shown in the panel ("Downloading … from iCloud"); moves within iCloud
-Drive need no download.
+copy. Files kept only in the cloud are downloaded first, with their
+progress shown in the panel ("Downloading … from iCloud"); a move that
+stays inside one synced folder needs no download.
+
+### Synced folders: iCloud Drive, Google Drive and SSH mounts
+
+A folder served by **fileproviderd** — iCloud Drive, or any account under
+`~/Library/CloudStorage`, which is where Google Drive, Dropbox and SSH
+mounts such as Mountaineer appear — is not an ordinary local folder, and
+Files treats a transfer that crosses into or out of one as crossing a
+volume even though macOS does not.
+
+It matters because of how such a folder is built. Its files sit on the
+same APFS volume as the rest of your home folder, so they report the same
+device and the same volume identifier, and `rename(2)` across the boundary
+succeeds instead of failing with `EXDEV`. A file manager that trusts that
+test will move a folder onto a remote server in a few milliseconds, report
+"renamed on the same volume, no data copied", and delete your original —
+while the only copy of the data is still in fileproviderd's staging area
+on this Mac, waiting to be uploaded. Unmount or lose the server before
+that upload finishes and the data is gone.
+
+So for these transfers Files:
+
+- **never takes the rename shortcut**, and copies the files instead, with
+  hash verification if it is turned on, exactly as it would to another
+  disk;
+- **waits for the provider to confirm the upload** once the copy is in
+  place, reporting "Waiting for … to finish uploading to <folder>" and
+  then "✓ … confirmed uploaded";
+- **keeps the original** if that confirmation does not come, and reports
+  the move as failed. The copy is left in the synced folder, so nothing is
+  lost and nothing is duplicated once the provider catches up — you can
+  retry the move, or delete the original yourself once you have checked
+  the server.
+
+A provider that has stopped syncing is the case this is for: the wait ends
+90 seconds after the last file is confirmed, and the move then fails
+rather than deleting anything. `.DS_Store` is not waited for, because it
+holds Finder's view settings rather than your data and providers refuse to
+sync it at all — Mountaineer and Google Drive both reject it outright, so
+waiting for it would never end.
+
+A move **within** one synced folder is still a single rename: it stays on
+the same server, and the provider renames it there.
 
 ### Why the progress panel counts steps, not bytes
 
@@ -244,6 +286,14 @@ into a staging file, hash the staged copy, compare the two, then rename
 the staged file into place or delete it — and two without: copy it into a
 staging file, then rename it into place. A move that stays on one volume
 is a single rename however many files it covers.
+
+A file landing in a synced folder costs one step more: the wait for the
+provider to confirm its upload, which falls due as that file is confirmed.
+That is why a transfer into iCloud Drive or an SSH mount stops at, say,
+83% when the last file has been copied — the uploading is real work still
+to do, and the bar should not claim the job is finished before the server
+has the data. Through that wait the file's own bar shows the bytes
+uploaded, and the rate shown is the upload's, not the local copy's.
 
 The job's steps are counted before anything moves, so there is a progress
 bar for the file being transferred and, when the job covers more than one

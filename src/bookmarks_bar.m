@@ -342,9 +342,7 @@ files_bookmark_name(NSURL *url)
     if (files_same_path(url, files_home_url())) return @"Home";
     if (files_same_path(url, files_directory_url(NSTrashDirectory))) return @"Trash";
     /* The name Finder shows: "iCloud Drive", not com~apple~CloudDocs. */
-    NSString *localized = nil;
-    [url getResourceValue:&localized forKey:NSURLLocalizedNameKey error:nil];
-    return localized ?: url.lastPathComponent;
+    return files_display_name(url);
 }
 
 /*

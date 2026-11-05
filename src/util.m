@@ -85,6 +85,78 @@ files_icloud_drive_url(void)
 }
 
 /*
+ * files_cloud_storage_url — ~/Library/CloudStorage.
+ * Inputs/output are documented in util.h.
+ */
+NSURL *
+files_cloud_storage_url(void)
+{
+    return [files_home_url() URLByAppendingPathComponent:@"Library/CloudStorage"
+                                             isDirectory:YES];
+}
+
+/*
+ * path_at_or_under — YES if path names dir itself or anything inside it.
+ * Compared component by component, so "/a/bc" is not under "/a/b".
+ *
+ * Inputs:
+ *   dir, path — absolute paths
+ *
+ * Output: YES if path is dir or is contained in it.
+ */
+static BOOL
+path_at_or_under(NSString *dir, NSString *path)
+{
+    NSArray<NSString *> *d = dir.pathComponents;
+    NSArray<NSString *> *p = path.pathComponents;
+    if (p.count < d.count) return NO;
+    for (NSUInteger i = 0; i < d.count; i++) {
+        if (![p[i] isEqualToString:d[i]]) return NO;
+    }
+    return YES;
+}
+
+/*
+ * files_sync_root — the File Provider domain root containing url.
+ * Inputs/output are documented in util.h.
+ */
+NSURL *
+files_sync_root(NSURL *url)
+{
+    if (!url) return nil;
+    NSString *path = url.URLByStandardizingPath.path;
+    if (path.length == 0) return nil;
+
+    /* iCloud Drive is one domain in its entirety. */
+    NSURL *icloud = files_icloud_drive_url();
+    if (icloud && path_at_or_under(icloud.URLByStandardizingPath.path, path)) return icloud;
+
+    /* Under ~/Library/CloudStorage each account folder is its own domain,
+     * so the root is the single component below it. The folder itself is
+     * not in any domain. */
+    NSURL *cloud = files_cloud_storage_url();
+    NSArray<NSString *> *base = cloud.URLByStandardizingPath.path.pathComponents;
+    NSArray<NSString *> *comps = path.pathComponents;
+    if (comps.count <= base.count) return nil;
+    for (NSUInteger i = 0; i < base.count; i++) {
+        if (![comps[i] isEqualToString:base[i]]) return nil;
+    }
+    return [cloud URLByAppendingPathComponent:comps[base.count] isDirectory:YES];
+}
+
+/*
+ * files_display_name — localized name, else the last path component.
+ * Inputs/output are documented in util.h.
+ */
+NSString *
+files_display_name(NSURL *url)
+{
+    NSString *localized = nil;
+    [url getResourceValue:&localized forKey:NSURLLocalizedNameKey error:nil];
+    return localized ?: url.lastPathComponent;
+}
+
+/*
  * files_trash_urls — ~/.Trash plus the iCloud Trash when it exists.
  * Inputs/output are documented in util.h.
  */

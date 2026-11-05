@@ -64,11 +64,19 @@
  * rename it into place. A move that stays on one volume is a single
  * rename(2), so it is one step however many files it covers.
  *
+ * A file landing inside a File Provider sync domain (iCloud Drive, Google
+ * Drive, an SSH mount) costs one step more: the wait for the provider to
+ * confirm its upload, which falls due as that file is confirmed. Without
+ * it the job's bar would stand at full for as long as the upload took.
+ *
  * Called on the background copy queue once the job's steps have been
  * counted (so the first call reports the file count with no progress), as
  * each step starts, and as the step in progress advances: after every 1 MB
- * of data copied and about ten times a second while an iCloud placeholder
- * is downloaded.
+ * of data copied, about ten times a second while a cloud placeholder is
+ * downloaded, and twice a second while an upload is being confirmed. In
+ * either wait file_frac is that transfer's own fraction of bytes, since the
+ * transfer is the work the user is waiting on rather than one of the file's
+ * steps.
  *
  * Parameters:
  *   files_total — regular files the job will touch; counts a same-volume
@@ -141,9 +149,12 @@ typedef FilesConflictResolution (^FilesConflictBlock)(NSURL *src, NSURL *dst);
  *
  * Runs on a background queue; calls completion on the main queue.
  * Uses copyfile(3) (APFS clones, full metadata, symlinks kept as links) and
- * rename(2) for same-volume moves. iCloud placeholders are downloaded first,
- * with progress, unless progress and log are both nil or a move stays in
- * iCloud Drive. Each copy is staged under a hidden name
+ * rename(2) for same-volume moves — but never for a transfer that crosses a
+ * File Provider sync domain, which the kernel would allow as a rename while
+ * leaving the data on this Mac alone; those are copied, verified, and their
+ * upload confirmed before any original is removed. Cloud placeholders are
+ * downloaded first, with progress, unless progress and log are both nil or a
+ * move stays within one domain. Each copy is staged under a hidden name
  * and renamed into place only when complete, so cancel, errors and failed
  * validation never damage an existing destination or delete the source.
  * Validation hashes each file's source before copying it and its staged

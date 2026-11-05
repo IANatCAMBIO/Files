@@ -78,6 +78,48 @@ NSURL *files_home_url(void);
 NSURL *files_icloud_drive_url(void);
 
 /*
+ * files_cloud_storage_url — ~/Library/CloudStorage, the folder in which
+ * fileproviderd gives each File Provider account a folder of its own
+ * (Google Drive, Dropbox, an SSH mount). The one definition of that path.
+ *
+ * Output: folder URL (whether or not it exists).
+ */
+NSURL *files_cloud_storage_url(void);
+
+/*
+ * files_sync_root — the root of the File Provider sync domain that holds
+ * url: iCloud Drive, or the account folder under ~/Library/CloudStorage
+ * (one domain per account).
+ *
+ * Files inside a domain are not ordinary local files. fileproviderd keeps
+ * them on the same APFS volume as the rest of the home folder, so st_dev
+ * matches and rename(2) across the boundary succeeds, but the bytes then
+ * live only in fileproviderd's local staging area until the provider has
+ * uploaded them to the server — asynchronously, after the call that moved
+ * them has returned. Callers that are about to delete an original, or to
+ * claim a transfer is finished, must know which domain each side is in.
+ *
+ * Inputs:
+ *   url — any file URL; may be nil
+ *
+ * Output: the domain's root folder URL, or nil if url is an ordinary local
+ *         path (or nil).
+ */
+NSURL *files_sync_root(NSURL *url);
+
+/*
+ * files_display_name — the name the Finder shows for a folder: its
+ * localized name where it has one ("iCloud Drive", not
+ * "com~apple~CloudDocs"), else its last path component.
+ *
+ * Inputs:
+ *   url — file URL
+ *
+ * Output: display name, never nil.
+ */
+NSString *files_display_name(NSURL *url);
+
+/*
  * files_trash_urls — the folders that together make up the user's Trash:
  * ~/.Trash, and ~/Library/Mobile Documents/.Trash where macOS puts items
  * deleted from iCloud-synced folders (e.g. a Desktop synced with iCloud).

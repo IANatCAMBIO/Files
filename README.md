@@ -108,6 +108,12 @@ Compared with Finder:
   attributes, tags, ACLs and dates preserved, nothing replaced until the
   new copy is complete, and optional SHA-256 verification of every file —
   with a progress panel and a transfer log that records the hashes
+- **Safe moves into synced folders**: iCloud Drive, Google Drive and SSH
+  mounts under `~/Library/CloudStorage` look like the same volume to
+  macOS, so a move into one is a rename that deletes your original while
+  the data is still only on this Mac, waiting to upload. Files copies and
+  verifies instead, waits for the provider to confirm the upload, and
+  **keeps the original** if that confirmation never comes
 - **Git-aware**: a badge on working-tree folders, a tracked/untracked
   column, and branch, push state and remote in Get Info
 - **Get Info that tells you more**: editable permissions, owner and group,

@@ -212,8 +212,10 @@ typedef struct {
     int64_t                bytes_done;    /* bytes of the files already finished */
     int64_t                file_bytes;    /* bytes of the file in progress */
 
-    BOOL                   downloading;   /* an iCloud download is in progress */
-    double                 dl_frac;       /* 0..1 through that download */
+    BOOL                   byte_wait;     /* waiting on a cloud download or upload */
+    double                 byte_wait_frac;/* 0..1 through that wait */
+    CFAbsoluteTime         byte_wait_started; /* when that wait began */
+    int64_t                byte_wait_done;    /* bytes it has moved so far */
 
     BOOL                   hash_failed;   /* a copy did not match its source */
     int                    err;           /* errno from the first COPYFILE_ERR */
@@ -309,13 +311,19 @@ static void
 report(copy_ctx_t *c)
 {
     if (!c->progress) return;
-    double file_frac = c->downloading ? c->dl_frac
+    double file_frac = c->byte_wait ? c->byte_wait_frac
         : (c->file_steps > 0 ? (c->file_step + c->step_frac) / c->file_steps : 0.0);
     double job_frac = c->steps_total > 0
         ? (c->steps_done + c->step_frac) / (double)c->steps_total : 0.0;
 
-    double  elapsed = CFAbsoluteTimeGetCurrent() - c->started;
-    int64_t moved   = c->bytes_done + c->file_bytes;
+    /* While a cloud transfer is being waited on, the rate is that
+     * transfer's own: the job's average counts bytes copied locally, which
+     * stand still through the wait and would make the figure decay as if
+     * the transfer were slowing down. */
+    double  elapsed = CFAbsoluteTimeGetCurrent() - (c->byte_wait ? c->byte_wait_started
+                                                                 : c->started);
+    int64_t moved   = c->byte_wait ? c->byte_wait_done
+                                   : c->bytes_done + c->file_bytes;
     double  rate    = (moved > 0 && elapsed >= rate_min_elapsed) ? moved / elapsed : 0.0;
 
     c->progress(c->files_total, MIN(file_frac, 1.0), MIN(job_frac, 1.0), rate);
@@ -385,20 +393,143 @@ step_done(copy_ctx_t *c)
 #define DOWNLOAD_POLL_USEC 100000
 
 /*
- * placeholder_files — the regular files at or under url whose contents are
- * only in iCloud (SF_DATALESS placeholders, "compressed,dataless" in
- * ls -lO). Symbolic links are not followed and other volumes are not
- * entered. Enumerating a placeholder folder may itself wait for iCloud.
+ * byte_watch — the per-file NSProgress that iCloud and fileproviderd
+ * publish while they move a file, collected for a set of files so a wait
+ * can report the bytes actually transferred instead of only whole files
+ * finished. Both directions use it: the download before a transfer and the
+ * upload confirmation after one.
+ *
+ * The publishing handlers run on the main thread while the copy queue
+ * polls, so the dictionary is held behind a lock; the handlers retain both
+ * objects, so a publish arriving after the wait has ended is harmless.
+ */
+typedef struct {
+    NSMutableDictionary<NSString *, NSProgress *> *published;
+    NSMutableDictionary<NSString *, NSNumber *>   *sizes;
+    NSMutableArray                                *subscribers;
+    NSLock                                        *lock;
+} byte_watch_t;
+
+/*
+ * byte_watch_begin — subscribes to the progress published for each file and
+ * records the size each one is expected to reach.
  *
  * Inputs:
- *   url    — item to walk
- *   bytes  — receives the files' total size
- *   cancel — polled during the walk; non-zero stops it. May be NULL.
+ *   w     — receives the watch; byte_watch_end releases it
+ *   files — files to watch
+ */
+static void
+byte_watch_begin(byte_watch_t *w, NSArray<NSURL *> *files)
+{
+    w->published   = [NSMutableDictionary dictionary];
+    w->sizes       = [NSMutableDictionary dictionary];
+    w->subscribers = [NSMutableArray array];
+    w->lock        = [NSLock new];
+
+    NSMutableDictionary<NSString *, NSProgress *> *published = w->published;
+    NSLock *lock = w->lock;
+    for (NSURL *file in files) {
+        NSString *path = file.path;
+        struct stat st;
+        w->sizes[path] = @(lstat(file.fileSystemRepresentation, &st) == 0 ? st.st_size : 0);
+        [w->subscribers addObject:[NSProgress addSubscriberForFileURL:file
+                                                withPublishingHandler:^NSProgressUnpublishingHandler(NSProgress *p) {
+            [lock lock];
+            published[path] = p;
+            [lock unlock];
+            return nil;
+        }]];
+    }
+}
+
+/*
+ * byte_watch_size — the size recorded for one watched file.
  *
- * Output: the placeholders' URLs; empty if there are none or on cancel.
+ * Inputs:
+ *   w, file — the watch and one of its files
+ *
+ * Output: the file's size when it was added, 0 if it is not watched.
+ */
+static int64_t
+byte_watch_size(byte_watch_t *w, NSURL *file)
+{
+    return w->sizes[file.path].longLongValue;
+}
+
+/*
+ * byte_watch_total — the summed size of the given watched files.
+ *
+ * Inputs:
+ *   w, files — the watch and the files to add up
+ *
+ * Output: total bytes.
+ */
+static int64_t
+byte_watch_total(byte_watch_t *w, NSArray<NSURL *> *files)
+{
+    int64_t total = 0;
+    for (NSURL *file in files) total += byte_watch_size(w, file);
+    return total;
+}
+
+/*
+ * byte_watch_done — how many of total bytes have moved: everything except
+ * what the files still outstanding have yet to transfer, taken from the
+ * progress each one publishes. A file with nothing published counts as
+ * having moved nothing, so the figure only ever understates.
+ *
+ * Inputs:
+ *   w       — the watch
+ *   pending — files not finished yet
+ *   total   — the byte total the fraction is against
+ *
+ * Output: bytes moved so far.
+ */
+static int64_t
+byte_watch_done(byte_watch_t *w, NSArray<NSURL *> *pending, int64_t total)
+{
+    int64_t done = total;
+    [w->lock lock];
+    for (NSURL *file in pending) {
+        int64_t size = w->sizes[file.path].longLongValue;
+        int64_t got  = MIN(MAX(w->published[file.path].completedUnitCount, 0), size);
+        done -= size - got;
+    }
+    [w->lock unlock];
+    return done;
+}
+
+/*
+ * byte_watch_end — removes the subscribers. The watch is not used again.
+ *
+ * Inputs:
+ *   w — the watch
+ */
+static void
+byte_watch_end(byte_watch_t *w)
+{
+    for (id subscriber in w->subscribers) [NSProgress removeSubscriber:subscriber];
+    [w->subscribers removeAllObjects];
+}
+
+/*
+ * walk_files — the regular files at or under url: every one of them, or
+ * with dataless_only set just those whose contents are not held locally
+ * (SF_DATALESS placeholders, "compressed,dataless" in ls -lO), which for a
+ * cloud folder means the ones only the server has. Symbolic links are not
+ * followed and other volumes are not entered. Enumerating a placeholder
+ * folder may itself wait for the provider.
+ *
+ * Inputs:
+ *   url           — item to walk
+ *   dataless_only — YES for placeholders alone, NO for every regular file
+ *   bytes         — receives the files' total size
+ *   cancel        — polled during the walk; non-zero stops it. May be NULL.
+ *
+ * Output: the files' URLs; empty if there are none or on cancel.
  */
 static NSArray<NSURL *> *
-placeholder_files(NSURL *url, int64_t *bytes, const atomic_int *cancel)
+walk_files(NSURL *url, BOOL dataless_only, int64_t *bytes, const atomic_int *cancel)
 {
     NSMutableArray<NSURL *> *files = [NSMutableArray array];
     *bytes = 0;
@@ -409,7 +540,8 @@ placeholder_files(NSURL *url, int64_t *bytes, const atomic_int *cancel)
     FTSENT *e;
     while ((e = fts_read(fts)) != NULL) {
         if (cancel && atomic_load(cancel)) break;
-        if (e->fts_info == FTS_F && (e->fts_statp->st_flags & SF_DATALESS)) {
+        if (e->fts_info == FTS_F
+            && (!dataless_only || (e->fts_statp->st_flags & SF_DATALESS))) {
             [files addObject:[NSURL fileURLWithFileSystemRepresentation:e->fts_path
                                                             isDirectory:NO relativeToURL:nil]];
             *bytes += e->fts_statp->st_size;
@@ -439,7 +571,7 @@ is_placeholder(NSURL *url)
  * which reports nothing for as long as the download takes; downloading
  * first lets the transfer report it. All downloads are started at once;
  * their bytes come from the progress iCloud publishes for each file (as
- * Finder shows it) and drive the current file's bar (c->downloading, so
+ * Finder shows it) and drive the current file's bar (c->byte_wait, so
  * the step count is left alone — a download is not one of the file's
  * steps). A file whose download cannot be started is left to the transfer
  * itself. Once they
@@ -458,39 +590,27 @@ static NSError *
 download_placeholders(NSURL *src, copy_ctx_t *c)
 {
     int64_t total = 0;
-    NSArray<NSURL *> *files = placeholder_files(src, &total, c->cancel);
+    NSArray<NSURL *> *files = walk_files(src, YES, &total, c->cancel);
     if (files.count == 0) return nil;
 
-    /* Written by the publishing handlers (main thread), read by the poll;
-     * the handlers retain both, so a late one is harmless. */
-    NSMutableDictionary<NSString *, NSProgress *> *published = [NSMutableDictionary dictionary];
-    NSLock *lock = [NSLock new];
+    byte_watch_t w;
+    byte_watch_begin(&w, files);
 
-    NSMutableArray *subscribers         = [NSMutableArray array];
-    NSMutableArray<NSURL *> *pending    = [NSMutableArray array];
-    NSMutableDictionary<NSString *, NSNumber *> *sizes = [NSMutableDictionary dictionary];
+    /* started: the downloads this call set going, whose sizes are checked
+     * once they finish. pending shrinks as they land. */
+    NSMutableArray<NSURL *> *started = [NSMutableArray array];
     for (NSURL *file in files) {
-        NSString *path = file.path;
-        [subscribers addObject:[NSProgress addSubscriberForFileURL:file
-                                             withPublishingHandler:^NSProgressUnpublishingHandler(NSProgress *p) {
-            [lock lock];
-            published[path] = p;
-            [lock unlock];
-            return nil;
-        }]];
         NSError *err = nil;
         if ([NSFileManager.defaultManager startDownloadingUbiquitousItemAtURL:file error:&err]) {
-            struct stat st;
-            sizes[path] = @(lstat(file.fileSystemRepresentation, &st) == 0 ? st.st_size : 0);
-            [pending addObject:file];
+            [started addObject:file];
         } else {
             log_line(c, @"Could not start downloading \"%@\" from iCloud (%@); the "
-                        @"transfer will wait for it instead", path, err.localizedDescription);
+                        @"transfer will wait for it instead", file.path, err.localizedDescription);
         }
     }
+    NSMutableArray<NSURL *> *pending = [started mutableCopy];
 
-    int64_t to_download = 0;
-    for (NSNumber *n in sizes.allValues) to_download += n.longLongValue;
+    int64_t to_download = byte_watch_total(&w, started);
     if (pending.count) {
         log_line(c, @"Downloading %@ from iCloud (%@) before the transfer",
                  pending.count == 1 ? [NSString stringWithFormat:@"\"%@\"", pending.firstObject.path]
@@ -500,8 +620,10 @@ download_placeholders(NSURL *src, copy_ctx_t *c)
     }
 
     CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
-    c->downloading = YES;
-    c->dl_frac     = 0.0;
+    c->byte_wait         = YES;
+    c->byte_wait_frac    = 0.0;
+    c->byte_wait_started = start;
+    c->byte_wait_done    = 0;
     NSError *result = nil;
     while (pending.count) {
         if (c->cancel && atomic_load(c->cancel)) {
@@ -512,24 +634,19 @@ download_placeholders(NSURL *src, copy_ctx_t *c)
         [pending filterUsingPredicate:[NSPredicate predicateWithBlock:
             ^BOOL(NSURL *file, NSDictionary *bindings) { return is_placeholder(file); }]];
 
-        int64_t done = to_download;  /* less what pending files still lack */
-        [lock lock];
-        for (NSURL *file in pending) {
-            int64_t size = sizes[file.path].longLongValue;
-            int64_t got  = MIN(MAX(published[file.path].completedUnitCount, 0), size);
-            done -= size - got;
-        }
-        [lock unlock];
-        c->dl_frac = to_download > 0 ? (double)done / (double)to_download : 1.0;
+        int64_t done = byte_watch_done(&w, pending, to_download);
+        c->byte_wait_frac = to_download > 0 ? (double)done / (double)to_download : 1.0;
+        c->byte_wait_done = done;
         report(c);
         if (pending.count) usleep(DOWNLOAD_POLL_USEC);
     }
-    c->downloading = NO;
+    c->byte_wait = NO;
 
-    for (id subscriber in subscribers) [NSProgress removeSubscriber:subscriber];
+    byte_watch_end(&w);
     if (!result) {
-        for (NSString *path in sizes) {
-            int64_t expected = sizes[path].longLongValue;
+        for (NSURL *file in started) {
+            NSString *path  = file.path;
+            int64_t expected = byte_watch_size(&w, file);
             struct stat st;
             int64_t got = lstat(path.fileSystemRepresentation, &st) == 0 ? st.st_size : -1;
             if (got != expected) {
@@ -548,6 +665,195 @@ download_placeholders(NSURL *src, copy_ctx_t *c)
                  files_format_duration(CFAbsoluteTimeGetCurrent() - start));
     }
     return result;
+}
+
+/*
+ * crosses_sync_domain — YES if moving or copying src to dst_dir crosses the
+ * boundary of a File Provider sync domain (iCloud Drive, or any account
+ * fileproviderd keeps in ~/Library/CloudStorage: Google Drive, Dropbox, an
+ * SSH mount such as Mountaineer).
+ *
+ * Such a move looks local to the kernel and is the reason this test exists.
+ * A domain's files sit on the same APFS volume as the rest of the home
+ * folder — they report the same st_dev and the same
+ * NSURLVolumeIdentifierKey — so rename(2) across the boundary returns 0
+ * instead of EXDEV. The bytes are then only in fileproviderd's staging
+ * area, and the provider uploads them to the server afterwards,
+ * asynchronously, with nothing holding the transfer open. Taking the
+ * rename shortcut would delete the original and report "renamed on the
+ * same volume" while the sole copy of the data was still on this Mac, so a
+ * transfer that crosses a domain boundary takes the copy-verify-upload
+ * path instead and only then removes the source.
+ *
+ * Inputs:
+ *   src     — source item URL
+ *   dst_dir — folder the item is going into
+ *
+ * Output: YES if the two sides are in different domains (one of them
+ *         possibly none at all), NO if both are in the same domain or both
+ *         are ordinary local paths.
+ */
+static BOOL
+crosses_sync_domain(NSURL *src, NSURL *dst_dir)
+{
+    NSURL *src_root = files_sync_root(src);
+    NSURL *dst_root = files_sync_root(dst_dir);
+    if (!src_root && !dst_root) return NO;
+    return !files_same_path(src_root, dst_root);
+}
+
+/* How often await_uploads polls, and how long it waits with no further
+ * file confirmed before it stops waiting. */
+#define UPLOAD_POLL_USEC 500000
+static const double upload_stall_timeout = 90.0;
+
+/* How many unconfirmed files await_uploads names in the log before it
+ * counts the rest: a stuck folder can hold hundreds. */
+static const int unconfirmed_names_logged = 5;
+
+/*
+ * await_uploads — waits for the provider to upload what has just been
+ * written into a File Provider domain, so a move can tell whether the
+ * server really holds the data before the original is deleted.
+ *
+ * A file in a domain reports NSURLUbiquitousItemIsUploadedKey = 1 once its
+ * bytes are on the server; until then the key reads 0, or is absent
+ * entirely while the sync engine has yet to take the file up.
+ *
+ * Two things stop this being a simple wait for every file. Providers
+ * refuse to sync some files at all — both Mountaineer and Google Drive
+ * reject .DS_Store outright — and such a file sits at 0 for good, while
+ * NSURLUbiquitousItemIsExcludedFromSyncKey still reads 0 rather than
+ * naming it excluded, so the only way to tell is by name. And a provider
+ * can simply stop, as one with a wedged connection does. So files the
+ * providers are known to drop are not waited for, and the wait itself runs
+ * only while confirmations keep arriving, giving up upload_stall_timeout
+ * after the last one and reporting what is still unconfirmed rather than
+ * guessing. The caller decides what that means — a copy is finished either
+ * way, a move keeps its original.
+ *
+ * Inputs:
+ *   dst  — the item just copied or moved into the domain
+ *   name — the domain's display name, for the log
+ *   c    — copy context (progress, log, cancel flag)
+ *
+ * Output: nil once every file that will be uploaded is confirmed;
+ *         NSUserCancelledError on cancel; otherwise an error naming what
+ *         is unconfirmed.
+ */
+static NSError *
+await_uploads(NSURL *dst, NSString *name, copy_ctx_t *c)
+{
+    int64_t walked = 0;
+    NSMutableArray<NSURL *> *files = [NSMutableArray array];
+    int64_t total = 0;
+    for (NSURL *file in walk_files(dst, NO, &walked, c->cancel)) {
+        /* Finder's own view settings, which no provider accepts and which
+         * hold none of the user's data: waiting for it never ends. */
+        if ([file.lastPathComponent isEqualToString:@".DS_Store"]) continue;
+        NSNumber *excluded = nil;
+        [file getResourceValue:&excluded
+                        forKey:NSURLUbiquitousItemIsExcludedFromSyncKey error:nil];
+        if (excluded.boolValue) continue;
+        struct stat st;
+        if (lstat(file.fileSystemRepresentation, &st) == 0) total += st.st_size;
+        [files addObject:file];
+    }
+    if (files.count == 0) return nil;
+
+    log_line(c, @"Waiting for %@ to finish uploading to %@ (%@)",
+             files.count == 1 ? [NSString stringWithFormat:@"\"%@\"",
+                                 files.firstObject.lastPathComponent]
+                              : [NSString stringWithFormat:@"%lu files",
+                                 (unsigned long)files.count],
+             name, byte_count(total));
+
+    byte_watch_t w;
+    byte_watch_begin(&w, files);
+
+    NSMutableArray<NSURL *> *pending = [files mutableCopy];
+    CFAbsoluteTime start    = CFAbsoluteTimeGetCurrent();
+    CFAbsoluteTime moved_at = start;      /* when the figures last grew */
+    NSUInteger     confirmed = 0;
+    int64_t        best_done = 0;
+    NSError       *result   = nil;
+
+    c->byte_wait         = YES;
+    c->byte_wait_frac    = 0.0;
+    c->byte_wait_started = start;
+    c->byte_wait_done    = 0;
+    c->file_name         = dst.lastPathComponent;
+    while (pending.count) {
+        if (c->cancel && atomic_load(c->cancel)) {
+            result = [NSError errorWithDomain:NSCocoaErrorDomain
+                                         code:NSUserCancelledError userInfo:nil];
+            break;
+        }
+        [pending filterUsingPredicate:[NSPredicate predicateWithBlock:
+            ^BOOL(NSURL *file, NSDictionary *bindings) {
+                /* NSURL caches resource values for the lifetime of the
+                 * object, so without this the first reading — taken before
+                 * the provider had finished — would be the only one this
+                 * loop ever saw, and nothing would ever be confirmed. */
+                [file removeAllCachedResourceValues];
+                NSNumber *uploaded = nil;
+                [file getResourceValue:&uploaded
+                                forKey:NSURLUbiquitousItemIsUploadedKey error:nil];
+                return !uploaded.boolValue;  /* keep waiting on this one */
+            }]];
+
+        /* One planned step per file falls due as that file is confirmed, so
+         * the job's bar keeps moving through the wait instead of standing
+         * at full while the upload is still to come. */
+        for (; confirmed < files.count - pending.count; confirmed++) c->steps_done++;
+
+        int64_t done = byte_watch_done(&w, pending, total);
+        if (done > best_done) {
+            best_done = done;
+            moved_at  = CFAbsoluteTimeGetCurrent();
+        }
+        c->byte_wait_frac = total > 0 ? (double)done / (double)total : 1.0;
+        c->byte_wait_done = done;
+        report(c);
+
+        if (pending.count == 0) break;
+        /* A provider that is uploading slowly keeps resetting this; only
+         * one that has stopped moving bytes altogether runs it out. */
+        if (CFAbsoluteTimeGetCurrent() - moved_at > upload_stall_timeout) break;
+        usleep(UPLOAD_POLL_USEC);
+    }
+    c->byte_wait = NO;
+    byte_watch_end(&w);
+
+    if (result) return result;
+    if (pending.count == 0) {
+        log_line(c, @"✓ %@ confirmed uploaded to %@ in %@",
+                 files.count == 1 ? @"1 file" : [NSString stringWithFormat:@"All %lu files",
+                                                 (unsigned long)files.count],
+                 name, files_format_duration(CFAbsoluteTimeGetCurrent() - start));
+        return nil;
+    }
+
+    /* One line per file would bury the log — 68 of them for a folder of
+     * GarageBand projects — so only the first few are named. */
+    NSUInteger shown = MIN(pending.count, (NSUInteger)unconfirmed_names_logged);
+    for (NSUInteger i = 0; i < shown; i++) {
+        log_line(c, @"✗ \"%@\" is not confirmed uploaded to %@",
+                 [pending[i] lastPathComponent], name);
+    }
+    if (pending.count > shown) {
+        log_line(c, @"✗ … and %lu more file%s not confirmed uploaded to %@",
+                 (unsigned long)(pending.count - shown),
+                 pending.count - shown == 1 ? "" : "s", name);
+    }
+    return described_error([NSString stringWithFormat:
+        @"%lu of %lu file%s had not finished uploading to %@ after %@ with no "
+        @"further progress (%@ of %@ sent). The data is in the folder on this Mac "
+        @"but the server is not yet known to have it.",
+        (unsigned long)pending.count, (unsigned long)files.count,
+        files.count == 1 ? "" : "s", name,
+        files_format_duration(upload_stall_timeout),
+        byte_count(best_done), byte_count(total)]);
 }
 
 /*
@@ -881,9 +1187,19 @@ commit_item(NSURL *staged, NSURL *dst, BOOL replace, BOOL hidden, copy_ctx_t *c)
  * cancel, I/O errors and validation failures leave dst untouched; a move
  * across volumes then deletes the source. Staging costs one rename(2) in
  * the destination folder, so it is done whether or not hashes are checked.
- * Before any of this, iCloud
- * placeholders in src are downloaded (download_placeholders), unless the
- * move stays in iCloud Drive or the transfer is silent.
+ *
+ * A move that crosses a File Provider sync domain — into or out of iCloud
+ * Drive, Google Drive or an SSH mount (crosses_sync_domain) — never takes
+ * the rename shortcut even though the kernel would allow it, because the
+ * rename would leave the data on this Mac alone while reporting success.
+ * It is copied and verified like any cross-volume move, and the source is
+ * removed only once the destination's provider confirms the upload
+ * (await_uploads). A copy into a domain waits for the same confirmation
+ * but is finished either way: nothing has been deleted.
+ *
+ * Before any of this, cloud placeholders in src are downloaded
+ * (download_placeholders), unless the move stays within one domain — where
+ * placeholders can simply be renamed — or the transfer is silent.
  *
  * Inputs:
  *   src     — source item URL
@@ -902,17 +1218,20 @@ transfer_item(NSURL *src, NSURL *dst, BOOL replace, BOOL is_cut, copy_ctx_t *c)
     BOOL have_st = lstat(src.fileSystemRepresentation, &st) == 0;
     BOOL hidden  = have_st && (st.st_flags & UF_HIDDEN);  /* the copy should match */
 
-    /* A move that stays in iCloud Drive renames placeholders without
+    NSURL    *dst_dir  = dst.URLByDeletingLastPathComponent;
+    NSURL    *dst_root  = files_sync_root(dst_dir);
+    BOOL      cross_domain = crosses_sync_domain(src, dst_dir);
+
+    /* A move that stays inside one domain renames placeholders without
      * downloading them; anything else downloads them first, reported. A
      * silent transfer (no progress, no log) leaves that to the kernel. */
-    BOOL stays_in_icloud = is_cut && [NSFileManager.defaultManager
-        isUbiquitousItemAtURL:dst.URLByDeletingLastPathComponent];
-    if ((c->progress || c->log) && !stays_in_icloud) {
+    BOOL stays_in_domain = is_cut && dst_root && !cross_domain;
+    if ((c->progress || c->log) && !stays_in_domain) {
         NSError *err = download_placeholders(src, c);
         if (err) return err;
     }
 
-    if (is_cut) {
+    if (is_cut && !cross_domain) {
         BOOL direct = !replace || !item_exists(dst);
         NSURL *to   = direct ? dst : staged;
         /* The step is logged only once the rename has worked: until then
@@ -945,6 +1264,14 @@ transfer_item(NSURL *src, NSURL *dst, BOOL replace, BOOL is_cut, copy_ctx_t *c)
         if (errno != EXDEV) return files_posix_error(errno, src);
         log_line(c, @"\"%@\" is on another volume than its destination: copying it, "
                     @"then removing the original", src.lastPathComponent);
+    } else if (is_cut) {
+        /* rename(2) would have worked here — same volume as far as the
+         * kernel is concerned — but it would hand the data to a sync
+         * provider and delete the original before the server had it. */
+        log_line(c, @"\"%@\" is moving %@ a synced folder, which the kernel would "
+                    @"treat as the same volume: copying it, confirming the upload, "
+                    @"then removing the original", src.lastPathComponent,
+                 dst_root ? @"into" : @"out of");
     }
 
     NSError *err = copy_tree(src, staged, c);
@@ -954,6 +1281,23 @@ transfer_item(NSURL *src, NSURL *dst, BOOL replace, BOOL is_cut, copy_ctx_t *c)
     if (err) {
         remove_logged(staged, @"the staging item", c);
         return err;
+    }
+
+    /* The item is in place. If that place is a sync domain, its bytes may
+     * still be on this Mac alone, so the upload is confirmed before the
+     * original is removed — the one step that makes a move irreversible. */
+    if (dst_root && (c->progress || c->log)) {
+        NSError *up = await_uploads(dst, files_display_name(dst_root), c);
+        if (up) {
+            if (is_cut) {
+                log_line(c, @"\"%@\" has been left in place: its copy is not "
+                            @"confirmed on the server", src.path);
+                return up;
+            }
+            log_line(c, @"The copy of \"%@\" is in place but its upload is "
+                        @"unconfirmed", src.lastPathComponent);
+            if (up.code == NSUserCancelledError) return up;
+        }
     }
 
     if (is_cut) {
@@ -974,7 +1318,9 @@ transfer_item(NSURL *src, NSURL *dst, BOOL replace, BOOL is_cut, copy_ctx_t *c)
  * and no log — is not planned at all.
  *
  * A move that stays on one volume is a single rename(2) however many files
- * it covers, so it counts as one file and one step. Anything else costs its
+ * it covers, so it counts as one file and one step — unless it crosses a
+ * sync domain, which transfer_item copies rather than renames however much
+ * the kernel would allow it. Anything else costs its
  * regular files — at least one, so an empty folder or a symbolic link still
  * has a step of its own — times the steps each file takes. An item whose
  * walk fails is counted as one file; the main loop snaps the count straight
@@ -1000,13 +1346,22 @@ plan_steps(NSArray<NSURL *> *srcs, NSURL *dest, copy_ctx_t *c)
     struct stat dest_st;
     BOOL have_dest = lstat(dest.fileSystemRepresentation, &dest_st) == 0;
     int  per_file  = c->hash_validate ? 5 : 2;
+    /* transfer_item waits for the provider's confirmation when the items
+     * land inside a sync domain, which is work the plan has to include. */
+    BOOL confirms_uploads = files_sync_root(dest) != nil;
 
     for (NSUInteger i = 0; i < srcs.count; i++) {
         NSURL *src = srcs[i];
         struct stat src_st;
         BOOL rename_only = c->is_cut && have_dest
             && lstat(src.fileSystemRepresentation, &src_st) == 0
-            && src_st.st_dev == dest_st.st_dev;
+            && src_st.st_dev == dest_st.st_dev
+            && !crosses_sync_domain(src, dest);
+        /* Landing in a synced folder costs one more step per file: the wait
+         * for the provider to confirm that file's upload (await_uploads).
+         * Leaving it out of the plan is what made the job's bar read full
+         * while the whole upload was still ahead of it. */
+        int per_file_here = per_file + (confirms_uploads && !rename_only ? 1 : 0);
 
         int64_t files = 1;
         if (!rename_only) {
@@ -1016,7 +1371,7 @@ plan_steps(NSArray<NSURL *> *srcs, NSURL *dest, copy_ctx_t *c)
                 files = counted;
             }
         }
-        steps[i]        = rename_only ? 1 : files * per_file;
+        steps[i]        = rename_only ? 1 : files * per_file_here;
         c->files_total += files;
         c->steps_total += steps[i];
     }
@@ -1210,7 +1565,7 @@ hash_validate:(BOOL)hash_validate
                 ctx.file_steps  = 1;
                 ctx.file_step   = 1;
                 ctx.step_frac   = 0.0;
-                ctx.downloading = NO;
+                ctx.byte_wait = NO;
                 report(&ctx);
             }
             log_line(&ctx, @"%@ job completed %@ in %@", noun.capitalizedString,

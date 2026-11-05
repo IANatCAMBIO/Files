@@ -57,7 +57,7 @@ macOS) to render the app icon; see [App icon](#app-icon).
 | Install         | `make install`  | Replaces `~/Applications/Files.app` with the new build; a running copy is sent SIGTERM, killed after 5 s, and reopened. A reopen LaunchServices refuses (it can still hold the bundle that was just replaced) is retried, and then reported rather than failing the install, which has already happened |
 | Test            | `make test`     | Release checks: `test-build`, `test-unit`, `test-features`, `test-ui` |
 | Test (build)    | `make test-build` | From-scratch build with zero warnings; valid `Info.plist`, executable and signature |
-| Test (unit)     | `make test-unit` | Builds and runs the eight engine tests in `tests/`: copy engine, archive, listing, row order, sort, reveal, custom icon and default apps |
+| Test (unit)     | `make test-unit` | Builds and runs the nine engine tests in `tests/`: copy engine, sync domains, archive, listing, row order, sort, reveal, custom icon and default apps |
 | Test (features) | `make test-features` | Feature tests (`tests/features/`); none written yet, so this target reports that and passes |
 | Test (UI)       | `make test-ui`  | Builds the real windows in process, checks the chrome, writes light and dark PNG snapshots to `build/snapshots` (`tests/ui/ui_check.m`) |
 | Clean           | `make clean`    | Removes `build/` and `Files.app`       |
@@ -113,6 +113,13 @@ for.
 list shows, driven through the real browser view: every sortable column in
 both directions, folders-first on and off, and Show Hidden Files. It writes
 only to a preference domain of its own.
+
+`sync_domain_test` checks `files_sync_root`, the decision the copy engine
+rests on when it refuses to treat a move into iCloud Drive, Google Drive or
+an SSH mount as a same-volume rename: which paths belong to which File
+Provider domain, that `~/Library/CloudStorage` itself is no domain, that two
+accounts are two domains, and that path components are matched whole. Pure
+path logic, so no provider has to be mounted and nothing is written.
 
 `custom_icon_test` exercises the icon well in Get Info
 (`files_set_custom_icon` / `files_has_custom_icon`) against real files: an
@@ -245,6 +252,8 @@ src/
                               the icon cache, size/date formatting, alerts
 tests/
 ├── file_ops_test.m         — copy-engine tests (`make test-unit`)
+├── sync_domain_test.m      — which File Provider sync domain a path is
+│                             in, for cross-domain moves
 ├── archive_test.m          — archive tests
 ├── listing_test.m          — batched listing against Foundation's own
 │                             answers, fixture and startup-volume root
